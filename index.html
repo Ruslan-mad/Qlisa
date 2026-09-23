@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Qlisa</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <style>
+      /* ── Theme tokens ─────────────────────────────────────────────────────── */
+      :root, :root[data-theme="dark"] {
+        --wc-bg-deepest:   #0a0a0d;
+        --wc-bg-app:       #0d0d10;
+        --wc-bg-surface:   #16151a;
+        --wc-bg-input:     #131217;
+        --wc-bg-hover:     #1c1b22;
+        --wc-bg-selected:  rgba(61, 186, 111, 0.14);
+        --wc-bg-running:   #112016;
+        --wc-bg-paused:    #221604;
+        --wc-bg-group:     #0b0a0e;
+        --wc-bg-drag-over: #112016;
+        --wc-border:        #222130;
+        --wc-border-strong: #2a2838;
+        --wc-text-bright:    #f2f0f7;
+        --wc-text:           #e8e6f0;
+        --wc-text-secondary: #7a788a;
+        --wc-text-muted:     #56546a;
+        --wc-text-faint:     #3a3848;
+        --wc-accent:       #3dba6f;
+        --wc-accent-hover: #34a862;
+        --wc-accent-fg:    #06140c;
+        --wc-accent-dim:   rgba(61, 186, 111, 0.15);
+        color-scheme: dark;
+      }
+      :root[data-theme="navy"] {
+        --wc-bg-deepest:   #08090f;
+        --wc-bg-app:       #0f1117;
+        --wc-bg-surface:   #171c28;
+        --wc-bg-input:     #0c0e16;
+        --wc-bg-hover:     #1e2438;
+        --wc-bg-selected:  rgba(34, 197, 94, 0.15);
+        --wc-bg-running:   #0a1f14;
+        --wc-bg-paused:    #1a1a08;
+        --wc-bg-group:     #0b0e18;
+        --wc-bg-drag-over: #0c1f12;
+        --wc-border:        #1c2238;
+        --wc-border-strong: #28304c;
+        --wc-text-bright:    #e8edf8;
+        --wc-text:           #bcc8e0;
+        --wc-text-secondary: #5e6e94;
+        --wc-text-muted:     #404e6a;
+        --wc-text-faint:     #2c3650;
+        --wc-accent:       #22c55e;
+        --wc-accent-hover: #16a34a;
+        --wc-accent-fg:    #071a0e;
+        --wc-accent-dim:   rgba(34, 197, 94, 0.15);
+        color-scheme: dark;
+      }
+      :root[data-theme="light"] {
+        --wc-bg-deepest:   #d8d2cb;
+        --wc-bg-app:       #e8e2db;
+        --wc-bg-surface:   #f0ebe4;
+        --wc-bg-input:     #f5f0ea;
+        --wc-bg-hover:     #cec8c1;
+        --wc-bg-selected:  rgba(185, 100, 0, 0.14);
+        --wc-bg-running:   #c8e0cc;
+        --wc-bg-paused:    #f0d8a8;
+        --wc-bg-group:     #dedad3;
+        --wc-bg-drag-over: #c8e0c8;
+        --wc-border:        #b8b2aa;
+        --wc-border-strong: #a09890;
+        --wc-text-bright:    #100d0a;
+        --wc-text:           #1e1a16;
+        --wc-text-secondary: #484038;
+        --wc-text-muted:     #706860;
+        --wc-text-faint:     #988880;
+        --wc-accent:       #15803d;
+        --wc-accent-hover: #166534;
+        --wc-accent-fg:    #ffffff;
+        --wc-accent-dim:   rgba(21, 128, 61, 0.16);
+        color-scheme: light;
+      }
+
+      /* ── Base reset ───────────────────────────────────────────────────────── */
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body, #root { width: 100%; height: 100%; overflow: hidden; }
+      body {
+        background: var(--wc-bg-app);
+        font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      }
+      input[type="range"], input[type="checkbox"] { accent-color: var(--wc-accent); }
+
+      /* ── Scrollbars ───────────────────────────────────────────────────────── */
+      .no-scrollbar { scrollbar-width: none; }
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      * { scrollbar-width: thin; scrollbar-color: var(--wc-border-strong) transparent; }
+      *::-webkit-scrollbar { width: 6px; height: 6px; }
+      *::-webkit-scrollbar-track { background: transparent; }
+      *::-webkit-scrollbar-thumb { background: var(--wc-border-strong); border-radius: 3px; }
+      *::-webkit-scrollbar-thumb:hover { background: var(--wc-text-faint); }
+      *::-webkit-scrollbar-corner { background: transparent; }
+
+      /* ── Cart drag ghost ──────────────────────────────────────────────────── */
+      @keyframes wc-ghost-appear {
+        from { opacity: 0; }
+        to   { opacity: 0.93; }
+      }
+      .wc-drag-ghost {
+        animation: wc-ghost-appear 100ms ease-out forwards;
+      }
+    </style>
+    <!-- Apply saved theme before first paint to avoid flash -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("wc_theme");
+          if (t && t !== "system") {
+            document.documentElement.setAttribute("data-theme", t);
+          } else {
+            document.documentElement.setAttribute(
+              "data-theme",
+              window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+            );
+          }
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,137 @@
+// Floating OSC message monitor — shows all raw incoming packets in real time.
+
+import { useEffect, useRef } from "react";
+import { useTransportStore } from "../../stores/transportStore";
+import { useLocale } from "../../i18n";
+
+export function OscMonitor({ onClose }: { onClose: () => void }) {
+  const { t } = useLocale();
+  const { oscLog, clearOscLog } = useTransportStore();
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom on new entries.
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [oscLog.length]);
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        bottom: 104,
+        right: 16,
+        width: 460,
+        maxHeight: 320,
+        background: "var(--wc-bg-deepest)",
+        border: "1px solid var(--wc-border-strong)",
+        borderRadius: 8,
+        boxShadow: "0 8px 32px rgba(0,0,0,0.7)",
+        zIndex: 9999,
+        display: "flex",
+        flexDirection: "column",
+        fontFamily: "monospace",
+        fontSize: 12,
+      }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {/* Header */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          padding: "6px 10px",
+          borderBottom: "1px solid var(--wc-border)",
+          gap: 8,
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ color: "#4ade80", fontSize: 10 }}>●</span>
+        <span style={{ color: "var(--wc-text-secondary)", fontWeight: 600, fontSize: 12, flex: 1 }}>
+          {t("editorUi.oscMonitor")}
+        </span>
+        <button
+          onClick={clearOscLog}
+          style={{
+            background: "none", border: "1px solid var(--wc-border-strong)", borderRadius: 4,
+            color: "var(--wc-text-muted)", fontSize: 11, padding: "1px 8px", cursor: "pointer",
+          }}
+        >
+          {t("editorUi.clear")}
+        </button>
+        <button
+          onClick={onClose}
+          style={{
+            background: "none", border: "none",
+            color: "var(--wc-text-muted)", fontSize: 16, cursor: "pointer", lineHeight: 1, padding: "0 2px",
+          }}
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Log */}
+      <div style={{ overflowY: "auto", flex: 1, padding: "4px 0" }}>
+        {oscLog.length === 0 ? (
+          <div style={{ color: "var(--wc-text-faint)", padding: "12px 14px", fontSize: 12 }}>
+            {t("editorUi.waitingOsc")}
+          </div>
+        ) : (
+          oscLog.map((entry) => {
+            const known = entry.matched;
+            return (
+              <div
+                key={entry.id}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "88px 1fr",
+                  gap: 8,
+                  padding: "2px 12px",
+                  borderBottom: "1px solid var(--wc-bg-app)",
+                }}
+              >
+                {/* Timestamp */}
+                <span style={{ color: "var(--wc-text-faint)", fontSize: 11, paddingTop: 1 }}>
+                  {entry.ts}
+                </span>
+                {/* Address + args */}
+                <div>
+                  <span
+                    style={{
+                      color: known ? "#4ade80" : "#f97316",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {entry.addr}
+                  </span>
+                  {entry.args.length > 0 && (
+                    <span style={{ color: "var(--wc-text-muted)", marginLeft: 8 }}>
+                      {entry.args.join("  ")}
+                    </span>
+                  )}
+                  {!known && (
+                    <span style={{ color: "#ef4444", marginLeft: 8, fontSize: 10 }}>
+                      ← {t("editorUi.unknown")}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Footer hint */}
+      <div style={{
+        padding: "4px 12px",
+        borderTop: "1px solid var(--wc-border)",
+        fontSize: 10,
+        color: "var(--wc-text-faint)",
+        flexShrink: 0,
+      }}>
+        <span style={{ color: "#4ade80" }}>■</span> {t("editorUi.matched")} &nbsp;
+        <span style={{ color: "#f97316" }}>■</span> {t("editorUi.unknown")} &nbsp;·&nbsp; {t("editorUi.maxEntries")}
+      </div>
+    </div>
+  );
+}

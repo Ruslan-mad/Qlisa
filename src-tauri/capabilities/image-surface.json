@@ -1,0 +1,10 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema/capability.json",
+  "identifier": "image-surface",
+  "description": "Permissions for Qlisa output surface windows (image and video display)",
+  "windows": ["output-surface"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
+}

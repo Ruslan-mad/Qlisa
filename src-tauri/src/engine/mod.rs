@@ -1,0 +1,46 @@
+//! Audio and output engine modules.
+//!
+//! Contains the real-time audio pipeline and the unified output engine:
+//! - [`audio_engine::AudioEngine`]: top-level audio coordinator
+//! - [`output_engine::OutputEngine`]: unified libmpv output for video and image (Win32 window)
+//! - [`device_manager::DeviceManager`]: OS device enumeration + Output Patches
+//! - [`voice::Voice`]: a single playing audio stream
+//! - [`ring_command`]: command/status types for lock-free RT communication
+//! - [`mpv_sys`]: runtime-loaded libmpv FFI symbols
+
+pub mod audio_engine;
+pub mod audio_input;
+pub mod camera_enum;
+pub mod device_manager;
+pub mod timecode_types;
+pub mod timecode_receiver;
+pub mod timecode_generator;
+pub mod ltc;
+
+pub use timecode_types::{TcPosition, TcRate, TcTrigger, TcEvent,
+                         CueListTcConfig, TcOnStop};
+pub use timecode_receiver::TcSource;
+pub mod dmx_engine;
+pub mod dmx_sink;
+pub mod engine_traits;
+pub mod fixture;
+pub mod midi_file;
+pub mod midi_trigger;
+pub mod media_metadata;
+pub mod mpv_sys;
+pub mod net_interface;
+pub mod network_io;
+pub mod osc_feedback;
+pub mod osc_patch;
+pub mod osc_server;
+pub mod output_engine;
+pub mod ring_command;
+pub mod thumbnails;
+pub mod voice;
+
+pub use audio_engine::AudioEngine;
+pub use dmx_engine::DmxEngine;
+pub use engine_traits::{AudioEngineApi, DmxEngineApi, OutputEngineApi};
+pub use osc_patch::OscPatch;
+pub use osc_server::OscServer;
+pub use output_engine::OutputEngine;

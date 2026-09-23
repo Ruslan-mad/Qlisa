@@ -1,0 +1,131 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Qlisa",
+  "version": "1.5.2",
+  "identifier": "com.qlisa.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Qlisa",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "maximized": false,
+        "decorations": false
+      },
+      {
+        "label": "preferences",
+        "title": "Preferences",
+        "width": 740,
+        "height": 520,
+        "resizable": false,
+        "decorations": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "center": true
+      },
+      {
+        "label": "diagnostics",
+        "title": "Диагностика",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 720,
+        "minHeight": 480,
+        "resizable": true,
+        "decorations": false,
+        "visible": false,
+        "skipTaskbar": false,
+        "center": true
+      },
+      {
+        "label": "mixer",
+        "title": "Qlisa Mixer",
+        "width": 480,
+        "height": 460,
+        "minWidth": 240,
+        "minHeight": 360,
+        "decorations": false,
+        "visible": false,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
+      },
+      {
+        "label": "output-monitor",
+        "title": "Qlisa Output Monitor",
+        "width": 720,
+        "height": 480,
+        "minWidth": 400,
+        "minHeight": 300,
+        "decorations": false,
+        "visible": false,
+        "resizable": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": true
+      },
+      {
+        "label": "float-timer",
+        "title": "Qlisa Timer",
+        "width": 420,
+        "height": 110,
+        "decorations": false,
+        "visible": false,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "transparent": true
+      },
+      {
+        "label": "browser-surface",
+        "title": "Qlisa Browser",
+        "url": "browser-surface.html",
+        "width": 1,
+        "height": 1,
+        "decorations": false,
+        "resizable": false,
+        "fullscreen": false,
+        "visible": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": false,
+    "license": "GPL-3.0-or-later",
+    "licenseFile": "../LICENSE",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["libmpv2 | libmpv1", "libxkbcommon-x11-0"]
+      }
+    }
+  }
+}

@@ -1,0 +1,811 @@
+//! [`ImageCue`] — displays a static or animated image on the output surface.
+//!
+//! The cue delegates rendering to the [`OutputEngine`], which uses libmpv with
+//! `audio=no,image-display-duration=inf` to show the image in the unified
+//! output window.  Images stay visible until explicitly stopped — there is no
+//! auto-complete via duration.
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use crate::engine::output_engine::{ContentRequest, LayerStyle, VideoGeometry, VoiceId};
+
+use super::{
+    context::{CueContext, CueEvent},
+    traits::{Cue, CueFactory, RuntimeState},
+    types::{
+        eof_fade_remaining_ms, ContinueMode, CueColor, CueId, CueState, CueType, FadeCurve,
+        FadeSpec,
+    },
+};
+
+// ---------------------------------------------------------------------------
+// ImageCue
+// ---------------------------------------------------------------------------
+
+/// A cue that displays a static or animated image file on the output surface.
+pub struct ImageCue {
+    // --- Identity ---
+    id: CueId,
+    name: String,
+    number: Option<String>,
+    notes: String,
+    color: CueColor,
+
+    // --- State ---
+    state: CueState,
+
+    // --- Timing ---
+    pre_wait: Duration,
+    post_wait: Duration,
+    started_at: Option<Instant>,
+    action_started_at: Option<Instant>,
+    elapsed_before_pause: Duration,
+    action_elapsed_before_pause: Duration,
+
+    // --- Continue ---
+    continue_mode: ContinueMode,
+
+    // --- Image-specific ---
+    /// Absolute (or workspace-relative) path to the image file.
+    pub file_path: Option<PathBuf>,
+    /// Optional fade-in applied when the image first appears.
+    pub fade_in: Option<FadeSpec>,
+    /// Optional fade-out applied when the image is hidden.
+    pub fade_out: Option<FadeSpec>,
+    /// How long the image stays on screen before auto-completing.
+    /// `None` = infinite (hold until explicitly stopped).
+    pub display_duration_ms: Option<u64>,
+    /// Visual geometry (fit / position / scale / rotation / crop).
+    pub geometry: VideoGeometry,
+    /// Compositing (stacking layer, base opacity, blend mode).
+    pub layer_style: LayerStyle,
+    pub output_id: Option<String>,
+    pub output_ids: Vec<String>,
+
+    is_disabled: bool,
+
+    // --- Runtime ---
+    /// Active output voice ID.
+    active_voice_id: Option<VoiceId>,
+    /// `true` between `go()` and the moment the action starts after pre-wait.
+    in_pre_wait: bool,
+    /// Incremented on every `go()` call.
+    play_generation: u64,
+    /// Prevents double-firing of Auto-Continue.
+    auto_continue_fired: bool,
+    /// `true` once the natural-end visual fade-out has been triggered for the
+    /// current play (timed images only).
+    eof_fade_started: bool,
+    /// Set while `preload()` builds the content request (dark, held load).
+    preloading: bool,
+    /// `true` between a Load Cue and the Start that reveals the image.
+    preloaded: bool,
+}
+
+impl ImageCue {
+    /// Create a new, empty Image Cue with a fresh UUID.
+    pub fn new() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: String::from("Image Cue"),
+            number: None,
+            notes: String::new(),
+            color: CueColor::None,
+            state: CueState::Standby,
+            pre_wait: Duration::ZERO,
+            post_wait: Duration::ZERO,
+            started_at: None,
+            action_started_at: None,
+            elapsed_before_pause: Duration::ZERO,
+            action_elapsed_before_pause: Duration::ZERO,
+            continue_mode: ContinueMode::DoNotContinue,
+            file_path: None,
+            fade_in: None,
+            fade_out: None,
+            display_duration_ms: None,
+            geometry: VideoGeometry::default(),
+            layer_style: LayerStyle::default(),
+            output_id: None,
+            output_ids: Vec::new(),
+            is_disabled: false,
+            active_voice_id: None,
+            in_pre_wait: false,
+            play_generation: 0,
+            auto_continue_fired: false,
+            eof_fade_started: false,
+            preloading: false,
+            preloaded: false,
+        }
+    }
+
+    /// [`Self::start_image_action`], returning the cue to Standby when it fails.
+    ///
+    /// A cue whose action never started must not stay at `Running` with no
+    /// voice: the UI only leaves Running on a state change it is told about, so
+    /// it would freeze on the cue forever (the classic symptom when the output
+    /// engine is headless and refuses every `show_content`).
+    fn start_action_or_reset(&mut self, context: &CueContext) -> Result<()> {
+        let result = self.start_image_action(context);
+        if result.is_err() {
+            self.state = CueState::Standby;
+            self.started_at = None;
+            self.in_pre_wait = false;
+        }
+        result
+    }
+
+    /// Start the actual image display action.
+    fn start_image_action(&mut self, context: &CueContext) -> Result<()> {
+        let path = self.file_path.as_ref().ok_or_else(|| {
+            anyhow!(
+                "ImageCue '{}': no file assigned — set a file in the inspector",
+                self.name
+            )
+        })?;
+
+        let fade_in_ms: u32 = self
+            .fade_in
+            .as_ref()
+            .map(|f| f.duration_ms as u32)
+            .unwrap_or(0);
+
+        let voice_id = context.output_engine.show_content_multi(ContentRequest {
+            file_path: path,
+            is_image: true,
+            fade_in_ms,
+            loop_count: 0,
+            initial_seek_action_ms: None,
+            start_ms: None,
+            end_ms: None,
+            screen_index: if self.output_id.is_some() {
+                None
+            } else {
+                context.output_screen
+            },
+            output_id: self.output_id.as_deref(),
+            audio_voice_id: None,
+            display_duration_ms: self.display_duration_ms,
+            hold_last_frame: false,
+            geometry: self.geometry,
+            live_source: false,
+            layer_style: self.layer_style,
+            slices: Vec::new(),
+            preload: self.preloading,
+        }, &self.output_ids)?;
+
+        self.active_voice_id = Some(voice_id);
+        self.action_started_at = Some(Instant::now());
+        self.action_elapsed_before_pause = Duration::ZERO;
+        self.in_pre_wait = false;
+        self.eof_fade_started = false;
+
+        context.emit(CueEvent::ActionStarted { cue_id: self.id });
+        Ok(())
+    }
+}
+
+impl Default for ImageCue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Cue for ImageCue {
+    // -----------------------------------------------------------------------
+    // Identity
+    // -----------------------------------------------------------------------
+
+    fn id(&self) -> CueId {
+        self.id
+    }
+    fn cue_type(&self) -> CueType {
+        CueType::Image
+    }
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+    fn number(&self) -> Option<&str> {
+        self.number.as_deref()
+    }
+    fn set_number(&mut self, number: Option<String>) {
+        self.number = number;
+    }
+    fn notes(&self) -> &str {
+        &self.notes
+    }
+    fn set_notes(&mut self, notes: String) {
+        self.notes = notes;
+    }
+    fn color(&self) -> CueColor {
+        self.color
+    }
+    fn set_color(&mut self, color: CueColor) {
+        self.color = color;
+    }
+    fn is_disabled(&self) -> bool {
+        self.is_disabled
+    }
+    fn set_disabled(&mut self, d: bool) {
+        self.is_disabled = d;
+    }
+    fn state(&self) -> CueState {
+        self.state
+    }
+
+    fn is_preloaded_or_loading(&self) -> bool {
+        self.preloading || self.preloaded
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
+
+    fn load(&mut self, _context: &CueContext) -> Result<()> {
+        Ok(())
+    }
+
+    fn go(&mut self, context: &CueContext) -> Result<()> {
+        if self.state == CueState::Running {
+            return Ok(());
+        }
+
+        let has_file = self
+            .file_path
+            .as_ref()
+            .is_some_and(|p| !p.as_os_str().is_empty());
+        if !has_file {
+            // No file assigned — nothing to play. Complete instantly (same
+            // pattern as MemoCue) so Auto-Continue/Auto-Follow can advance
+            // past it instead of getting stuck "running" an empty cue.
+            self.state = CueState::Running;
+            self.started_at = Some(Instant::now());
+            context.emit(CueEvent::ActionStarted { cue_id: self.id });
+            self.state = CueState::Completed;
+            context.emit(CueEvent::ActionCompleted { cue_id: self.id });
+            return Ok(());
+        }
+
+        // Preloaded by a Load Cue: the image is decoded and held off-screen,
+        // so starting it is a reveal.
+        if self.preloaded {
+            self.state = CueState::Paused;
+            return self.resume(context);
+        }
+
+        self.play_generation = self.play_generation.wrapping_add(1);
+        self.auto_continue_fired = false;
+        self.state = CueState::Running;
+        self.started_at = Some(Instant::now());
+        self.elapsed_before_pause = Duration::ZERO;
+        self.action_elapsed_before_pause = Duration::ZERO;
+
+        if !self.pre_wait.is_zero() {
+            self.in_pre_wait = true;
+            return Ok(());
+        }
+
+        self.start_action_or_reset(context)
+    }
+
+    fn preload(&mut self, context: &CueContext) -> Result<()> {
+        if self.state == CueState::Running || self.preloaded {
+            return Ok(());
+        }
+        let has_file = self
+            .file_path
+            .as_ref()
+            .is_some_and(|p| !p.as_os_str().is_empty());
+        if !has_file {
+            return Ok(());
+        }
+
+        self.preloading = true;
+        let result = self.start_image_action(context);
+        self.preloading = false;
+        result?;
+
+        self.state = CueState::Paused;
+        self.started_at = None;
+        self.action_started_at = None;
+        self.elapsed_before_pause = Duration::ZERO;
+        self.action_elapsed_before_pause = Duration::ZERO;
+        self.preloaded = true;
+        Ok(())
+    }
+
+    fn stop(&mut self, context: &CueContext) -> Result<()> {
+        self.in_pre_wait = false;
+
+        if let Some(vid) = self.active_voice_id.take() {
+            let fade_ms = self
+                .fade_out
+                .as_ref()
+                .map(|f| f.duration_ms as u32)
+                .unwrap_or(0);
+            context.output_engine.stop_content(vid, fade_ms, 0);
+        }
+
+        self.state = CueState::Standby;
+        self.started_at = None;
+        self.action_started_at = None;
+        self.elapsed_before_pause = Duration::ZERO;
+        self.action_elapsed_before_pause = Duration::ZERO;
+        self.auto_continue_fired = false;
+        self.eof_fade_started = false;
+        self.preloaded = false;
+        context.emit(CueEvent::Stopped { cue_id: self.id });
+        Ok(())
+    }
+
+    fn pause(&mut self, context: &CueContext) -> Result<()> {
+        if self.state != CueState::Running {
+            return Ok(());
+        }
+        if !self.in_pre_wait {
+            if let Some(vid) = self.active_voice_id {
+                context.output_engine.pause_voice(vid)?;
+            }
+        }
+        if let Some(t) = self.started_at.take() {
+            self.elapsed_before_pause = t.elapsed();
+        }
+        if let Some(t) = self.action_started_at.take() {
+            self.action_elapsed_before_pause = t.elapsed();
+        }
+        self.state = CueState::Paused;
+        Ok(())
+    }
+
+    fn resume(&mut self, context: &CueContext) -> Result<()> {
+        if self.state != CueState::Paused {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if let Some(vid) = self.active_voice_id {
+            if self.preloaded {
+                // Held off-screen by a Load Cue — this is the reveal.
+                context.output_engine.start_preloaded(vid);
+                self.started_at = Some(now);
+                self.action_started_at = Some(now);
+                self.elapsed_before_pause = Duration::ZERO;
+                self.action_elapsed_before_pause = Duration::ZERO;
+                self.in_pre_wait = false;
+            } else if !self.in_pre_wait {
+                context.output_engine.resume_voice(vid)?;
+            }
+        }
+        if !self.preloaded {
+            self.started_at = Some(now - self.elapsed_before_pause);
+            if !self.in_pre_wait {
+                self.action_started_at = Some(now - self.action_elapsed_before_pause);
+            }
+        }
+        self.preloaded = false;
+        self.state = CueState::Running;
+        Ok(())
+    }
+
+    fn hard_stop(&mut self, context: &CueContext) -> Result<()> {
+        self.in_pre_wait = false;
+
+        if let Some(vid) = self.active_voice_id.take() {
+            context.output_engine.stop_content(vid, 0, 0);
+        }
+
+        self.state = CueState::Standby;
+        self.started_at = None;
+        self.action_started_at = None;
+        self.elapsed_before_pause = Duration::ZERO;
+        self.action_elapsed_before_pause = Duration::ZERO;
+        self.auto_continue_fired = false;
+        self.eof_fade_started = false;
+        self.preloaded = false;
+        context.emit(CueEvent::Stopped { cue_id: self.id });
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.state = CueState::Standby;
+        self.active_voice_id = None;
+        self.started_at = None;
+        self.action_started_at = None;
+        self.elapsed_before_pause = Duration::ZERO;
+        self.action_elapsed_before_pause = Duration::ZERO;
+        self.in_pre_wait = false;
+        self.auto_continue_fired = false;
+        self.eof_fade_started = false;
+        self.preloaded = false;
+        Ok(())
+    }
+
+    fn tick(&mut self, context: &CueContext) -> Result<()> {
+        if self.in_pre_wait && self.elapsed() >= self.pre_wait {
+            if let Err(e) = self.start_action_or_reset(context) {
+                log::warn!("ImageCue '{}' failed to start action: {e}", self.name);
+            }
+        }
+
+        // Timed images: trigger the visual fade-out that lands on the end of
+        // the display duration (mirrors VideoCue's natural-end fade — without
+        // it the image hard-cuts to black when image-display-duration expires).
+        if !self.eof_fade_started && !self.in_pre_wait {
+            if let (Some(voice_id), Some(fade), Some(total)) =
+                (self.active_voice_id, &self.fade_out, self.duration())
+            {
+                if let Some(remaining_ms) =
+                    eof_fade_remaining_ms(self.action_elapsed(), total, fade.duration_ms)
+                {
+                    self.eof_fade_started = true;
+                    context
+                        .output_engine
+                        .begin_eof_fade_out(voice_id, remaining_ms);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_action_started(&self) -> bool {
+        !self.in_pre_wait
+    }
+
+    // -----------------------------------------------------------------------
+    // Timing
+    // -----------------------------------------------------------------------
+
+    fn pre_wait(&self) -> Duration {
+        self.pre_wait
+    }
+    fn set_pre_wait(&mut self, d: Duration) {
+        self.pre_wait = d;
+    }
+    fn post_wait(&self) -> Duration {
+        self.post_wait
+    }
+    fn set_post_wait(&mut self, d: Duration) {
+        self.post_wait = d;
+    }
+
+    fn duration(&self) -> Option<Duration> {
+        self.display_duration_ms.map(Duration::from_millis)
+    }
+
+    fn set_user_action_duration(&mut self, duration: Option<Duration>) -> Result<()> {
+        self.display_duration_ms = duration
+            .map(|duration| u64::try_from(duration.as_millis()).map_err(|_| anyhow::anyhow!("Image duration is too large")))
+            .transpose()?;
+        Ok(())
+    }
+
+    fn elapsed(&self) -> Duration {
+        if self.state == CueState::Paused {
+            return self.elapsed_before_pause;
+        }
+        self.started_at
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::ZERO)
+    }
+
+    fn action_elapsed(&self) -> Duration {
+        if self.state == CueState::Paused {
+            return self.action_elapsed_before_pause;
+        }
+        self.action_started_at
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::ZERO)
+    }
+
+    // -----------------------------------------------------------------------
+    // Continue mode
+    // -----------------------------------------------------------------------
+
+    fn continue_mode(&self) -> ContinueMode {
+        self.continue_mode
+    }
+    fn set_continue_mode(&mut self, mode: ContinueMode) {
+        self.continue_mode = mode;
+    }
+
+    // -----------------------------------------------------------------------
+    // Runtime helpers
+    // -----------------------------------------------------------------------
+
+    fn playing_voice_id(&self) -> Option<CueId> {
+        self.active_voice_id
+    }
+
+    fn media_file_path(&self) -> Option<&std::path::Path> {
+        self.file_path.as_deref()
+    }
+
+    fn visual_geometry(&self) -> Option<VideoGeometry> {
+        Some(self.geometry)
+    }
+
+    fn layer_style(&self) -> Option<LayerStyle> {
+        Some(self.layer_style)
+    }
+
+    fn apply_live_visual_patch(&mut self, patch: crate::cue::traits::LiveVisualPatch) {
+        if let Some(geometry) = patch.geometry {
+            self.geometry = geometry;
+        }
+        if let Some(layer_style) = patch.layer_style {
+            self.layer_style = layer_style;
+        }
+    }
+
+    fn is_visual(&self) -> bool {
+        true
+    }
+
+    fn play_generation(&self) -> u64 {
+        self.play_generation
+    }
+    fn is_auto_continue_fired(&self) -> bool {
+        self.auto_continue_fired
+    }
+
+    fn auto_continue_marker(&self) -> Option<bool> {
+        Some(self.auto_continue_fired)
+    }
+    fn mark_auto_continue_fired(&mut self) {
+        self.auto_continue_fired = true;
+    }
+    fn clear_auto_continue_fired(&mut self) {
+        self.auto_continue_fired = false;
+    }
+
+    fn runtime_state(&self) -> RuntimeState {
+        RuntimeState {
+            state: self.state,
+            voice_id: self.active_voice_id,
+            started_at: self.started_at,
+            action_started_at: self.action_started_at,
+        }
+    }
+
+    fn restore_runtime_state(&mut self, snap: RuntimeState) {
+        self.state = snap.state;
+        self.active_voice_id = snap.voice_id;
+        self.started_at = snap.started_at;
+        self.action_started_at = snap.action_started_at;
+        self.in_pre_wait = snap.state == CueState::Running && snap.action_started_at.is_none();
+    }
+
+    // -----------------------------------------------------------------------
+    // Serialisation
+    // -----------------------------------------------------------------------
+
+    fn serialize(&self) -> Value {
+        json!({
+            "type": "image",
+            "cue_type": "image",
+            "id": self.id,
+            "number": self.number,
+            "name": self.name,
+            "notes": self.notes,
+            "color": self.color,
+            "pre_wait_ms": self.pre_wait.as_millis() as u64,
+            "post_wait_ms": self.post_wait.as_millis() as u64,
+            "continue_mode": self.continue_mode,
+            "file_path": self.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+            "fade_in_ms": self.fade_in.as_ref().map(|f| f.duration_ms),
+            "fade_in_curve": self.fade_in.as_ref().map(|f| f.curve),
+            "fade_out_ms": self.fade_out.as_ref().map(|f| f.duration_ms),
+            "fade_out_curve": self.fade_out.as_ref().map(|f| f.curve),
+            "display_duration_ms": self.display_duration_ms,
+            "geometry": self.geometry,
+            "output_id": self.output_id,
+            "output_ids": self.output_ids,
+            "layer_style": self.layer_style,
+            "is_disabled": self.is_disabled,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+/// Factory for [`ImageCue`].
+pub struct ImageCueFactory;
+
+impl CueFactory for ImageCueFactory {
+    fn create(&self) -> Box<dyn Cue> {
+        Box::new(ImageCue::new())
+    }
+
+    fn from_json(&self, value: Value) -> Result<Box<dyn Cue>> {
+        let mut cue = ImageCue::new();
+
+        if let Some(id_str) = value.get("id").and_then(|v| v.as_str()) {
+            cue.id = id_str.parse().unwrap_or_else(|_| Uuid::new_v4());
+        }
+        if let Some(name) = value.get("name").and_then(|v| v.as_str()) {
+            cue.name = name.to_string();
+        }
+        if let Some(num) = value.get("number").and_then(|v| v.as_str()) {
+            cue.number = Some(num.to_string());
+        }
+        if let Some(notes) = value.get("notes").and_then(|v| v.as_str()) {
+            cue.notes = notes.to_string();
+        }
+        if let Some(ms) = value.get("pre_wait_ms").and_then(|v| v.as_u64()) {
+            cue.pre_wait = Duration::from_millis(ms);
+        }
+        if let Some(ms) = value.get("post_wait_ms").and_then(|v| v.as_u64()) {
+            cue.post_wait = Duration::from_millis(ms);
+        }
+        if let Some(cm) = value.get("continue_mode") {
+            if let Ok(mode) = serde_json::from_value(cm.clone()) {
+                cue.continue_mode = mode;
+            }
+        }
+        if let Some(col) = value.get("color") {
+            if let Ok(color) = serde_json::from_value(col.clone()) {
+                cue.color = color;
+            }
+        }
+        if let Some(path) = value.get("file_path").and_then(|v| v.as_str()) {
+            cue.file_path = Some(PathBuf::from(path));
+        }
+        if let Some(ms) = value.get("fade_in_ms").and_then(|v| v.as_u64()) {
+            let curve = value
+                .get("fade_in_curve")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or(FadeCurve::SCurve);
+            cue.fade_in = Some(FadeSpec {
+                duration_ms: ms,
+                curve,
+            });
+        }
+        if let Some(ms) = value.get("fade_out_ms").and_then(|v| v.as_u64()) {
+            let curve = value
+                .get("fade_out_curve")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or(FadeCurve::SCurve);
+            cue.fade_out = Some(FadeSpec {
+                duration_ms: ms,
+                curve,
+            });
+        }
+        if let Some(ms) = value.get("display_duration_ms").and_then(|v| v.as_u64()) {
+            cue.display_duration_ms = Some(ms);
+        }
+        if let Some(g) = value.get("geometry") {
+            if let Ok(geometry) = serde_json::from_value::<VideoGeometry>(g.clone()) {
+                cue.geometry = geometry;
+            }
+        }
+        cue.output_id = value
+            .get("output_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        cue.output_ids = value.get("output_ids").and_then(|v| v.as_array()).map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
+        if cue.output_ids.is_empty() { if let Some(id) = cue.output_id.clone() { cue.output_ids.push(id); } }
+        if let Some(ls) = value.get("layer_style") {
+            if let Ok(style) = serde_json::from_value::<LayerStyle>(ls.clone()) {
+                cue.layer_style = style;
+            }
+        }
+        // "stop_mode", "screen_index", "stop_on_next_visual" from older
+        // workspaces are silently ignored.
+        if let Some(b) = value.get("is_disabled").and_then(|v| v.as_bool()) {
+            cue.is_disabled = b;
+        }
+
+        Ok(Box::new(cue))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_image_cue_has_no_implicit_color() {
+        assert_eq!(ImageCue::new().color(), CueColor::None);
+    }
+
+    #[test]
+    fn duration_method_always_none() {
+        assert!(ImageCue::new().duration().is_none());
+    }
+
+    #[test]
+    fn cue_type_is_image() {
+        assert_eq!(ImageCue::new().cue_type(), CueType::Image);
+    }
+
+    #[test]
+    fn never_stops_on_next_go() {
+        // Visual cues stack as layers; only Stop/Fade cues remove one.
+        assert!(!ImageCue::new().stop_on_next_go());
+    }
+
+    #[test]
+    fn serialize_roundtrip_basic() {
+        let mut cue = ImageCue::new();
+        cue.set_name("Test Image".to_string());
+
+        let json = cue.serialize();
+        assert_eq!(json["type"], "image");
+        assert_eq!(json["name"], "Test Image");
+        assert!(
+            json.get("screen_index").is_none(),
+            "screen_index must not be serialised"
+        );
+        assert!(
+            json.get("stop_mode").is_none(),
+            "stop_mode must not be serialised"
+        );
+        assert_eq!(json["display_duration_ms"], serde_json::Value::Null);
+        assert_eq!(json["color"], "none");
+    }
+
+    #[test]
+    fn from_json_roundtrip() {
+        let factory = ImageCueFactory;
+        let mut cue = ImageCue::new();
+        cue.set_name("Round Trip".to_string());
+
+        let json = cue.serialize();
+        let rebuilt = factory.from_json(json).expect("should deserialise");
+
+        assert_eq!(rebuilt.name(), "Round Trip");
+        assert_eq!(rebuilt.cue_type(), CueType::Image);
+    }
+
+    #[test]
+    fn serialize_roundtrip_geometry() {
+        use crate::engine::output_engine::FitMode;
+        let mut cue = ImageCue::new();
+        cue.geometry = VideoGeometry {
+            fit_mode: FitMode::Stretch,
+            scale: 0.5,
+            crop_bottom: 0.2,
+            ..Default::default()
+        };
+
+        let json = cue.serialize();
+        assert_eq!(json["geometry"]["fit_mode"], "stretch");
+
+        let rebuilt = ImageCueFactory.from_json(json).expect("roundtrip");
+        assert_eq!(rebuilt.visual_geometry().unwrap(), cue.geometry);
+    }
+
+    #[test]
+    fn from_json_without_geometry_uses_defaults() {
+        let json = serde_json::json!({ "type": "image", "name": "Legacy" });
+        let cue = ImageCueFactory.from_json(json).expect("legacy load");
+        assert!(cue.visual_geometry().unwrap().is_default());
+    }
+
+    #[test]
+    fn from_json_ignores_legacy_fields() {
+        let factory = ImageCueFactory;
+        let json = serde_json::json!({
+            "type": "image",
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "Legacy Cue",
+            "screen_index": 1,
+            "stop_mode": "display_duration",
+            "display_duration_ms": 5000,
+        });
+        let cue = factory.from_json(json).expect("should load without error");
+        assert_eq!(cue.name(), "Legacy Cue");
+    }
+}

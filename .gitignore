@@ -1,0 +1,96 @@
+# Rust / Cargo
+target/
+# Isolated target dir used to validate while `pnpm tauri dev` holds target/.
+# Matched at any depth: a relative CARGO_TARGET_DIR resolves against the shell's
+# cwd, so the cache lands wherever cargo was invoked from — once inside src/.
+target-check/
+**/*.rs.bk
+# Cargo.lock is committed (this is an application, not a library) so CI and
+# release builds use the exact dependency versions developed/tested against.
+
+# Node / pnpm
+node_modules/
+dist/
+.pnpm-store/
+*.tsbuildinfo
+
+# Local research and scratch artifacts
+/tmp/
+
+# Build output and local artifacts
+build/
+coverage/
+*.log
+*.dmp
+*.tmp
+*.sqlite
+*.sqlite3
+*.db
+
+# Tauri
+src-tauri/target/
+src-tauri/WixTools/
+
+# Workspace files (user data, not source)
+*.inkue
+*.wincue
+
+# Loose user data at repo root (Open Stage Control sessions, runtime config) —
+# personal test artifacts, never source.
+/fixtures/
+/Inkue.config
+/Wincue.config
+/Export control.json
+/inkue interface mobile.json
+/inkue-monitor.json
+/wincue interface mobile.json
+/wincue-monitor.json
+
+# IDE & OS
+.vscode/
+.vs/
+.idea/
+*.suo
+*.user
+.DS_Store
+Thumbs.db
+
+# Claude Code local config
+.claude/
+
+# Figma redesign reference mock-up + archived docs (local only, not the app build).
+/App.tsx
+/docs/archive/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Secrets and signing material
+*.key
+*.pem
+*.pfx
+*.p12
+*.cer
+*.crt
+*.jks
+*.keystore
+secrets/
+private/
+
+# Proprietary or generated runtime binaries. Obtain/build them locally.
+Processing.NDI.Lib.*.dll
+ffmpeg.exe
+ffprobe.exe
+src-tauri/vendor/ndi/NDI License Agreement.pdf
+src-tauri/vendor/ndi/Processing.NDI.Lib.Licenses.txt
+src-tauri/vendor/mpv/
+src-tauri/vendor/mpv/libmpv-2.dll
+# Legacy local staging directory; contains copied runtime binaries and notices.
+src-tauri/vendor/network/
+
+# Vendor source SDKs, fonts, and their notices remain available to a clean checkout.
+
+# Release-asset copies downloaded during verification
+latest.json

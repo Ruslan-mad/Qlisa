@@ -1,0 +1,17 @@
+{
+  "bundle": {
+    "resources": {
+      "vendor/mpv/libmpv-2.dll": "libmpv-2.dll",
+      "vendor/ffmpeg/ffmpeg.exe": "ffmpeg/ffmpeg.exe",
+      "vendor/ffmpeg/ffprobe.exe": "ffmpeg/ffprobe.exe",
+      "vendor/ffmpeg/LICENSE": "ffmpeg/LICENSE",
+      "vendor/ffmpeg/README-Gyan-build.txt": "ffmpeg/README-Gyan-build.txt"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": false
+      }
+    }
+  }
+}

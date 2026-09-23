@@ -1,0 +1,170 @@
+[package]
+name = "qlisa"
+version = "1.5.2"
+edition = "2021"
+description = "Qlisa — Windows cue-based stage playback application"
+authors = ["Qlisa contributors; derived from Inkue"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Ruslan-mad/Qlisa"
+readme = "../README.md"
+
+[lib]
+name = "inkue_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "qlisa"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+# Pin iana-time-zone (transitive dep of chrono) to < 0.1.65.
+# Version 0.1.65 pulled windows-core 0.62 which conflicts with
+# cpal 0.18's windows 0.61 dependency on Windows — the two versions of the
+# windows_core::Interface trait cannot coexist in the same build.
+iana-time-zone = "=0.1.64"
+
+# Audio
+cpal = { version = "0.18", features = ["wasm-bindgen"] }
+
+# Video — libmpv loaded at runtime via libloading (no link-time import library needed)
+libloading = "0.8"
+
+# Lock-free comms
+ringbuf = "0.4"
+crossbeam-channel = "0.5"
+# Wait-free voice-list snapshot read by the real-time audio callback (no lock,
+# no allocation, no dealloc on the RT thread — see VoicePool in audio_engine).
+arc-swap = "1"
+
+# Image encoding (base64 data URLs for image surface windows)
+base64 = "0.22"
+
+# OSC
+rosc = "0.10"
+
+# MIDI
+midir = "0.11"
+# Standard MIDI File parsing for the MIDI File Cue.  `parallel` (rayon) is off:
+# show files are kilobytes, and a thread pool is not worth the dependency.
+midly = { version = "0.5", default-features = false, features = ["std", "alloc"] }
+
+# QLab workspace import. A .qlab4/.qlab5 is an Apple NSKeyedArchiver binary
+# plist; this reads the container, the object-graph resolution is ours.
+plist = { version = "1.10", default-features = false }
+
+# Logging
+log = { version = "0.4", features = ["std"] }
+
+symphonia = { version = "0.5", features = ["mp3", "aac", "flac", "ogg", "wav", "aiff", "pcm", "isomp4"] }
+
+# GL context management for the unified mpv Render API output path.
+# Direct dep on rwh 0.6 — same as Tauri 2.x and glutin 0.32 (no duplicate).
+raw-window-handle = "0.6"
+
+# Cross-platform window creation (Win32/X11/Wayland) — used by the unified
+# GL output path to create the native window that holds the GL surface.
+# winit 0.30 uses rwh 0.6 (same as glutin 0.32 and Tauri 2.x).
+# winit itself does NOT import comctl32 v6, so the test binary is safe.
+winit = "0.30"
+
+# Thin safe wrapper around OpenGL for the fade quad shader.
+glow = "0.13"
+if-addrs = "0.15.0"
+tauri-plugin-opener = "2.5.4"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-single-instance = "2"
+socket2 = "0.6.4"
+
+# glutin 0.32 — platform-specific features avoid unnecessary DLL dependencies.
+# On Windows we only enable WGL (opengl32 + gdi32, always present).
+# Enabling `egl` on Windows would link glutin_egl_sys against ANGLE's libEGL.dll
+# which is NOT installed by default — causing STATUS_ENTRYPOINT_NOT_FOUND at
+# test-binary load time.  CGL on macOS is auto-detected; no feature needed.
+[target.'cfg(target_os = "windows")'.dependencies]
+glutin = { version = "0.32", features = ["wgl"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+glutin = { version = "0.32" }
+# AppKit window creation for the unified GL output path (render.rs).  winit cannot
+# be used on macOS here — its EventLoop demands the AppKit main thread, which Tauri's
+# NSApplication already owns — so we create/manage the output NSWindow directly.
+# Versions pinned to match winit 0.30's own objc2 stack (objc2 0.5.2 / objc2-foundation
+# 0.2.2, already in the lock file) so no duplicate objc2 is pulled in. AppKit itself
+# is linked explicitly in build.rs; we drive it via raw `msg_send!` (stable Cocoa
+# selectors) rather than objc2-app-kit's churn-prone typed bindings.
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSGeometry"] }
+block2 = "0.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# `wayland` is compiled in only so the `INKUE_OUTPUT_BACKEND=wayland` escape hatch
+# (render.rs) can link; the default output backend is X11/XWayland (see build_event_loop).
+glutin = { version = "0.32", features = ["egl", "glx", "x11", "wayland"] }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+# windows-sys — monitor enumeration, camera COM enumeration, font registration.
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    # Camera enumeration — DirectShow COM (engine/camera_enum.rs).
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+# Enable ASIO support (Windows only). Requires:
+#   1. Steinberg ASIO SDK (free at steinberg.net/developers)
+#   2. CPAL_ASIO_DIR env var pointing to the SDK root before building
+#   3. Build with: cargo build --features asio-support  (Windows only)
+asio-support = ["cpal/asio"]
+
+[profile.release]
+opt-level = 3
+# Thin LTO retains cross-crate optimization while allowing code generation to
+# run in parallel. This keeps release runtime characteristics close to full
+# LTO, but avoids serializing the entire final build behind one codegen unit.
+lto = "thin"
+codegen-units = 16
+
+# `pnpm tauri dev` is otherwise fully unoptimized, which makes CPU-heavy work —
+# audio decoding (symphonia) and the 30fps event loop over a large show — slow
+# enough to feel laggy. Optimize all dependencies at full speed (they rarely
+# change, so it's a one-time compile cost that's then cached) and give our own
+# crate a light opt-level that keeps incremental rebuilds fast while speeding up
+# the hot loops. This makes dev builds usable for real shows without needing a
+# full release build to iterate.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

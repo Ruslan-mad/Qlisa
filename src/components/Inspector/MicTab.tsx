@@ -1,0 +1,198 @@
+// Inspector tab for Mic cues — routes a live audio input to an Output Patch.
+
+import { useEffect, useState } from "react";
+import type { MicCueData, InputPatch, OutputPatch, FadeCurve } from "../../lib/types";
+import { listInputPatches, getOutputPatches } from "../../lib/commands";
+import { Select } from "../common/Select";
+import { useLocale } from "../../i18n";
+import { DragNumber } from "../common/DragNumber";
+
+interface Props {
+  cue: MicCueData;
+  onSave: (partial: Partial<MicCueData>) => void;
+}
+
+const inputStyle: React.CSSProperties = {
+  background: "var(--wc-bg-app)",
+  border: "1px solid var(--wc-border-strong)",
+  borderRadius: 4,
+  color: "var(--wc-text)",
+  fontSize: 12,
+  padding: "3px 6px",
+};
+
+const selectStyle: React.CSSProperties = { ...inputStyle, cursor: "pointer", width: "100%" };
+const labelStyle: React.CSSProperties = { fontSize: 10, color: "var(--wc-text-muted)", marginBottom: 2 };
+const fieldStyle: React.CSSProperties = { marginBottom: 12 };
+
+const CURVES: FadeCurve[] = ["linear", "s_curve", "exponential"];
+
+export function MicTab({ cue, onSave }: Props) {
+  const { t, locale } = useLocale();
+  const [inputPatches, setInputPatches] = useState<InputPatch[]>([]);
+  const [outputPatches, setOutputPatches] = useState<OutputPatch[]>([]);
+
+  useEffect(() => {
+    listInputPatches().then(setInputPatches).catch(console.error);
+    getOutputPatches().then(setOutputPatches).catch(console.error);
+  }, []);
+
+  const selectedInput = inputPatches.find((p) => p.id === cue.input_patch_id) ?? null;
+  const inputChannelCount = cue.input_channels.length || (selectedInput?.channels.length ?? 0);
+
+  return (
+    <div>
+      {/* Input Patch */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>{t("sweepUi.inputPatch")}</div>
+        <Select
+          style={selectStyle}
+          value={cue.input_patch_id ?? ""}
+          onChange={(e) => onSave({ input_patch_id: e.target.value || null })}
+        >
+          <option value="">{t("sweepUi.noneOption")}</option>
+          {inputPatches.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+          {cue.input_patch_id && !selectedInput && (
+            <option value={cue.input_patch_id}>{t("sweepUi.missingPatch")}</option>
+          )}
+        </Select>
+        {inputPatches.length === 0 && (
+          <div style={{ marginTop: 4, fontSize: 11, color: "var(--wc-text-muted)" }}>
+            {locale === "ru" ? "Входных патчей пока нет — добавьте патч в панели аудиовходов." : "No Input Patches yet — add one in the Audio Inputs panel."}
+          </div>
+        )}
+      </div>
+
+      {/* Channel mode: mono vs stereo from the patch's channels */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>{t("components.sourceChannels")}</div>
+        <Select
+          style={selectStyle}
+          value={String(inputChannelCount === 1 ? 1 : 2)}
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10);
+            const patchChans = selectedInput?.channels ?? [0, 1];
+            const chans = n === 1 ? patchChans.slice(0, 1) : patchChans.slice(0, 2);
+            onSave({ input_channels: chans });
+          }}
+        >
+          <option value="1">{t("components.mono")}</option>
+          <option value="2">{t("components.stereo")}</option>
+        </Select>
+      </div>
+
+      {/* Output Patch */}
+      <div style={fieldStyle}>
+        <div style={labelStyle}>{t("inspector.output")}</div>
+        <Select
+          style={selectStyle}
+          value={outputPatches.find((p) => p.id === cue.output_patch_id)?.kind === "main" ? "" : (cue.output_patch_id ?? "")}
+          onChange={(e) => onSave({ output_patch_id: e.target.value || null })}
+        >
+          <option value="">{t("audioBusUi.main")}</option>
+          {outputPatches.filter((p) => p.kind === "aux" && p.enabled).map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </Select>
+      </div>
+
+      {/* Level + Pan */}
+      <div style={{ display: "flex", gap: 12, ...fieldStyle }}>
+        <div style={{ flex: 1 }}>
+          <div style={labelStyle}>{t("uiFixes.volumeDb")}</div>
+          <DragNumber
+            style={{ ...inputStyle, width: "100%" }}
+            min={-60}
+            max={12}
+            step={0.5}
+            value={cue.volume_db}
+            onChange={(e) =>
+              onSave({ volume_db: Math.max(-60, Math.min(12, parseFloat(e.target.value) || 0)) })
+            }
+          />
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={labelStyle}>{locale === "ru" ? "Панорама" : "Pan"} ({cue.pan.toFixed(2)})</div>
+          <input
+            style={{ width: "100%" }}
+            type="range"
+            min={-1}
+            max={1}
+            step={0.01}
+            value={cue.pan}
+            onChange={(e) => onSave({ pan: parseFloat(e.target.value) })}
+          />
+        </div>
+      </div>
+
+      {/* Fades */}
+      <FadeRow
+        label={t("inspector.fadeIn")}
+        ms={cue.fade_in_ms}
+        curve={cue.fade_in_curve}
+        onChange={(ms, curve) => onSave({ fade_in_ms: ms, fade_in_curve: curve })}
+      />
+      <FadeRow
+        label={locale === "ru" ? "Исчезновение (также при остановке)" : "Fade Out (also on stop)"}
+        ms={cue.fade_out_ms}
+        curve={cue.fade_out_curve}
+        onChange={(ms, curve) => onSave({ fade_out_ms: ms, fade_out_curve: curve })}
+      />
+
+      <div style={{ marginTop: 10, fontSize: 11, color: "var(--wc-text-muted)" }}>
+        {locale === "ru"
+          ? "Входной сигнал работает до остановки cue; устройство захвата освобождается после остановки."
+          : "Live input runs until the cue is stopped; the capture device is released when it stops."}
+      </div>
+    </div>
+  );
+}
+
+function FadeRow({
+  label,
+  ms,
+  curve,
+  onChange,
+}: {
+  label: string;
+  ms: number | null;
+  curve: FadeCurve | null;
+  onChange: (ms: number | null, curve: FadeCurve | null) => void;
+}) {
+  const { t } = useLocale();
+  const enabled = ms != null;
+  return (
+    <div style={fieldStyle}>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, ...labelStyle }}>
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => onChange(e.target.checked ? 500 : null, e.target.checked ? (curve ?? "s_curve") : null)}
+        />
+        {label}
+      </label>
+      {enabled && (
+        <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+          <DragNumber
+            style={{ ...inputStyle, width: 80 }}
+            min={0}
+            step={50}
+            value={ms ?? 0}
+            onChange={(e) => onChange(Math.max(0, parseInt(e.target.value, 10) || 0), curve ?? "s_curve")}
+          />
+          <Select
+            style={{ ...selectStyle, width: "auto", flex: 1 }}
+            value={curve ?? "s_curve"}
+            onChange={(e) => onChange(ms ?? 500, e.target.value as FadeCurve)}
+          >
+            {CURVES.map((c) => (
+              <option key={c} value={c}>{c === "s_curve" ? t("inspector.sCurve") : c === "linear" ? t("inspector.linear") : t("inspector.exponential")}</option>
+            ))}
+          </Select>
+        </div>
+      )}
+    </div>
+  );
+}

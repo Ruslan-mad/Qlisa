@@ -1,0 +1,7 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema/capability.json",
+  "identifier": "browser-surface",
+  "description": "External Browser Cue page: no Qlisa IPC or plugin permissions",
+  "windows": ["browser-surface"],
+  "permissions": []
+}
