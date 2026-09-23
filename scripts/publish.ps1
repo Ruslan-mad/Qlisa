@@ -148,7 +148,7 @@ $status = @(& $git.Source -C $script:Root status --porcelain --untracked-files=a
 if ($LASTEXITCODE -ne 0) { Fail 'Could not inspect Git working tree.' }
 if ($status.Count -gt 0) { Fail "Git working tree must be clean before release preparation:`n$($status -join "`n")" }
 $currentVersion = Get-VersionState
-if (Compare-SemVer $Version $currentVersion -le 0) { Fail "Requested version $Version must be greater than current version $currentVersion." }
+if ((Compare-SemVer $Version $currentVersion) -le 0) { Fail "Requested version $Version must be greater than current version $currentVersion." }
 $tag = "v$Version"
 $releaseNotes = Join-Path $script:Root "docs/RELEASE_NOTES_$Version.md"
 if (-not (Test-Path -LiteralPath $releaseNotes -PathType Leaf)) { Fail "Release notes are missing: $releaseNotes. Create reviewed notes before preparing the installer." }
