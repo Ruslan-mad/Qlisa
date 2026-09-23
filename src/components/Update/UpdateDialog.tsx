@@ -2,9 +2,9 @@
 // manual check from the About dialog).
 
 import { useUpdateStore } from "../../stores/updateStore";
-import { useLocale } from "../../i18n";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { flattenActiveCues } from "../ActiveCues/activeCueModel";
+import { useLocale } from "../../i18n";
 
 /** Render `**bold**` spans of a markdown line as JSX (no dependency). */
 function inlineBold(text: string): React.ReactNode {
@@ -65,14 +65,17 @@ function ReleaseNotes({ notes }: { notes: string }) {
 
 export function UpdateDialog() {
   const { t } = useLocale();
-  const { status, version, notes, progress, error, dismissed, canInstall, downloadAndInstall, dismiss } =
+  const { status, version, notes, progress, error, dismissed, checkForUpdates, downloadAndInstall, dismiss } =
     useUpdateStore();
-  const cues = useWorkspaceStore((state) => state.cues);
-  const hasActiveCues = flattenActiveCues(cues).length > 0;
-  const installAllowed = !hasActiveCues && canInstall();
+  const installBlock = useWorkspaceStore((state) => {
+    if (flattenActiveCues(state.cues).length > 0) return "activeCuesRunning";
+    if (state.workspaceInfo?.is_modified) return "unsavedWorkspace";
+    return null;
+  });
 
   const visible = !dismissed &&
-    (status === "available" || status === "downloading" || status === "installing" || status === "error");
+    (status === "checking" || status === "up-to-date" || status === "available" ||
+      status === "downloading" || status === "installing" || status === "error");
   if (!visible) return null;
 
   const busy = status === "downloading" || status === "installing";
@@ -95,12 +98,15 @@ export function UpdateDialog() {
         }}
       >
         <div style={{ fontSize: 16, fontWeight: 700, color: "var(--wc-text-bright)", marginBottom: 4 }}>
-          {version
-            ? t("systemUi.updateAvailable", { version })
-            : t("systemUi.checkUpdates")}
+          {version ? t("systemUi.updateAvailable", { version })
+            : status === "checking" ? t("systemUi.checkingUpdates")
+              : status === "up-to-date" ? t("systemUi.upToDate")
+                : t("systemUi.checkUpdates")}
         </div>
         <div style={{ fontSize: 12, color: "var(--wc-text-muted)", marginBottom: 16 }}>
-          {version ? t("systemUi.updateDescription") : t("systemUi.currentVersion", { version: useUpdateStore.getState().currentVersion })}
+          {version ? t("systemUi.updateDescription")
+            : status === "checking" ? t("systemUi.checkingDescription")
+              : t("systemUi.currentVersion", { version: useUpdateStore.getState().currentVersion })}
         </div>
 
         {notes && (
@@ -146,13 +152,18 @@ export function UpdateDialog() {
         {status === "error" && (
           <div style={{ fontSize: 12, color: "#ef4444", marginBottom: 16 }}>
             {error === "updates.localBuildUnavailable" ? t("systemUi.localBuildUnavailable")
-              : error === "updates.notConfigured" ? t("systemUi.updaterNotConfigured")
-                : error === "updates.activeCuesRunning" ? (hasActiveCues ? t("systemUi.activeCuesRunning") : null) : error}
+              : error === "updates.activeCuesRunning" || error === "updates.unsavedWorkspace"
+                ? installBlock === "activeCuesRunning" ? t("systemUi.activeCuesRunning")
+                  : installBlock === "unsavedWorkspace" ? t("systemUi.unsavedWorkspace") : null
+                  : error === "updates.checkFailed" ? t("systemUi.checkFailed")
+                    : error === "updates.installFailed" ? t("systemUi.installFailed")
+                      : error === "updates.checkAgain" ? t("systemUi.checkAgain") : error}
           </div>
         )}
-        {version && !installAllowed && status !== "error" && (
+        {version && installBlock && status !== "error" && (
           <div style={{ fontSize: 12, color: "#ef4444", marginBottom: 16 }}>
-            {t("systemUi.activeCuesRunning")}
+            {installBlock === "activeCuesRunning" ? t("systemUi.activeCuesRunning")
+              : installBlock === "unsavedWorkspace" ? t("systemUi.unsavedWorkspace") : null}
           </div>
         )}
 
@@ -169,15 +180,17 @@ export function UpdateDialog() {
             {t("systemUi.later")}
           </button>
           {version && <button
-            onClick={() => void downloadAndInstall()}
-            disabled={busy || !installAllowed}
+            onClick={() => void (status === "error" && error !== "updates.activeCuesRunning" && error !== "updates.unsavedWorkspace"
+              ? checkForUpdates()
+              : downloadAndInstall())}
+            disabled={busy}
             style={{
               background: "var(--wc-accent)", border: "1px solid var(--wc-accent-hover)",
-              borderRadius: 6, color: "var(--wc-accent-fg)", cursor: busy || !installAllowed ? "default" : "pointer",
-              fontSize: 13, fontWeight: 600, padding: "6px 16px", opacity: busy || !installAllowed ? 0.5 : 1,
+              borderRadius: 6, color: "var(--wc-accent-fg)", cursor: busy ? "default" : "pointer",
+              fontSize: 13, fontWeight: 600, padding: "6px 16px", opacity: busy ? 0.5 : 1,
             }}
           >
-            {status === "error" ? t("common.retry") : t("systemUi.installRestart")}
+            {status === "error" ? t("common.retry") : installBlock ? t("systemUi.downloadUpdate") : t("systemUi.installRestart")}
           </button>}
         </div>
       </div>

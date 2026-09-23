@@ -878,7 +878,12 @@ export default function App() {
   }, [showCueListTabs, rightPanel, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab]);
 
   useEffect(() => {
-    useUpdateStore.getState().setInstallGuard(() => flattenActiveCues(useWorkspaceStore.getState().cues).length === 0);
+    useUpdateStore.getState().setInstallGuard(() => {
+      const workspace = useWorkspaceStore.getState();
+      if (flattenActiveCues(workspace.cues).length > 0) return "activeCuesRunning";
+      if (workspace.workspaceInfo?.is_modified) return "unsavedWorkspace";
+      return null;
+    });
     const timer = window.setTimeout(() => void useUpdateStore.getState().checkForUpdates({ silent: true }), 5000);
     return () => window.clearTimeout(timer);
   }, []);
