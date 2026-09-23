@@ -4,6 +4,7 @@ import {
   artifactChanged,
   buildCommandArgs,
   compareVersions,
+  createUpdaterMetadata,
   createReleaseManifest,
   decideReleaseRollback,
   parseReleaseArgs,
@@ -13,6 +14,8 @@ import {
   replaceCargoLockVersion,
   replaceCargoTomlVersion,
   replaceJsonVersion,
+  validateReleasePreparationOptions,
+  validateUpdaterMetadata,
 } from "./release-helpers.mjs";
 
 test("accepts strict three-part SemVer and rejects prerelease or padded components", () => {
@@ -32,20 +35,61 @@ test("parses dry-run and one explicit installer target", () => {
   assert.deepEqual(parseReleaseArgs(["1.4.0", "--dry-run"]), {
     version: "1.4.0",
     dryRun: true,
+    prepareRelease: false,
     bundle: undefined,
   });
   assert.deepEqual(parseReleaseArgs(["--", "1.4.0", "--dry-run"]), {
     version: "1.4.0",
     dryRun: true,
+    prepareRelease: false,
     bundle: undefined,
   });
   assert.deepEqual(parseReleaseArgs(["--bundle=nsis", "1.4.0"]), {
     version: "1.4.0",
     dryRun: false,
+    prepareRelease: false,
     bundle: "nsis",
   });
   assert.throws(() => parseReleaseArgs(["1.4.0", "--bundle", "all"]));
   assert.throws(() => parseReleaseArgs(["1.4.0", "--bundle", "msi", "--bundle", "nsis"]));
+});
+
+test("parses the local preparation mode that builds after the version commit", () => {
+  assert.deepEqual(parseReleaseArgs(["1.5.3", "--prepare-release", "--bundle=nsis"]), {
+    version: "1.5.3",
+    dryRun: false,
+    prepareRelease: true,
+    bundle: "nsis",
+  });
+});
+
+test("release preparation requires NSIS before any version mutation or commit", () => {
+  assert.equal(validateReleasePreparationOptions({ prepareRelease: true, dryRun: false, bundle: "nsis" }), true);
+  assert.throws(() => validateReleasePreparationOptions({ prepareRelease: true, dryRun: false, bundle: "msi" }), /requires --bundle=nsis/);
+  assert.throws(() => validateReleasePreparationOptions({ prepareRelease: true, dryRun: false, bundle: undefined }), /requires --bundle=nsis/);
+  assert.equal(validateReleasePreparationOptions({ prepareRelease: true, dryRun: true, bundle: undefined }), true);
+});
+
+test("builds and validates Tauri metadata with signature content and exact HTTPS asset URL", () => {
+  const metadata = createUpdaterMetadata({
+    version: "1.5.3",
+    notes: "  Fixes and improvements  ",
+    pubDate: "2026-09-24T10:00:00Z",
+    url: "https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.3/Qlisa_1.5.3_x64-setup.exe",
+    signature: "signed-content",
+  });
+  assert.equal(metadata.version, "1.5.3");
+  assert.equal(metadata.notes, "Fixes and improvements");
+  assert.equal(metadata.platforms["windows-x86_64"].signature, "signed-content");
+  assert.equal(validateUpdaterMetadata(metadata, {
+    version: "1.5.3",
+    url: "https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.3/Qlisa_1.5.3_x64-setup.exe",
+    signature: "signed-content",
+  }), true);
+  assert.throws(() => createUpdaterMetadata({ version: "1.5.3", notes: "notes", pubDate: "2026-09-24", url: "http://example.com/a", signature: "sig" }));
+  assert.throws(() => createUpdaterMetadata({ version: "1.5.3", notes: "notes", pubDate: "2026-09-24", url: "https://example.com/a", signature: "https://example.com/a.sig" }));
+  assert.throws(() => createUpdaterMetadata({ version: "1.5.3", notes: "notes", pubDate: "2026-09-24", url: "https://example.com/a", signature: "signed-content\n" }));
+  assert.throws(() => validateUpdaterMetadata(metadata, { version: "1.5.3", url: "https://example.com/wrong", signature: "signed-content" }));
 });
 
 test("build commands forward asio-support through Cargo args and bundle only one target", () => {
@@ -65,6 +109,8 @@ test("manifest contains full executable and installer file metadata", () => {
     commit: "abc123",
     executable,
     installer,
+    updaterBundle: null,
+    updaterSignature: null,
     builtAt: "2026-09-18T12:02:00.000Z",
     bundle: "msi",
   }), {
@@ -75,6 +121,8 @@ test("manifest contains full executable and installer file metadata", () => {
     bundledTarget: "msi",
     executable,
     installer,
+    updaterBundle: null,
+    updaterSignature: null,
   });
   assert.equal(createReleaseManifest({
     version: "1.4.0", commit: "abc123", executable, builtAt: "2026-09-18T12:02:00.000Z",

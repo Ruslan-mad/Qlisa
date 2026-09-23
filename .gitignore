@@ -20,6 +20,8 @@ dist/
 # Build output and local artifacts
 build/
 coverage/
+/.release/
+/.release-compliance.json
 *.log
 *.dmp
 *.tmp

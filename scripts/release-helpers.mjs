@@ -25,6 +25,7 @@ export function parseReleaseArgs(args) {
   if (args[0] === "--") args = args.slice(1);
   let version;
   let dryRun = false;
+  let prepareRelease = false;
   let bundle;
 
   for (let index = 0; index < args.length; index += 1) {
@@ -33,6 +34,12 @@ export function parseReleaseArgs(args) {
     if (arg === "--dry-run") {
       if (dryRun) throw new Error("--dry-run may only be specified once");
       dryRun = true;
+      continue;
+    }
+
+    if (arg === "--prepare-release") {
+      if (prepareRelease) throw new Error("--prepare-release may only be specified once");
+      prepareRelease = true;
       continue;
     }
 
@@ -54,7 +61,45 @@ export function parseReleaseArgs(args) {
   if (version === undefined) throw new Error("Usage: pnpm release -- X.Y.Z [--dry-run] [--bundle nsis|msi]");
   parseVersion(version);
 
-  return { version, dryRun, bundle };
+  return { version, dryRun, prepareRelease, bundle };
+}
+
+export function validateReleasePreparationOptions(options) {
+  if (options.prepareRelease && !options.dryRun && options.bundle !== "nsis") {
+    throw new Error("Release preparation requires --bundle=nsis so the installer and updater signature exist before committing the release version.");
+  }
+  return true;
+}
+
+export function createUpdaterMetadata({ version, notes, pubDate, url, signature }) {
+  parseVersion(version);
+  const assetUrl = new URL(url);
+  if (assetUrl.protocol !== "https:") throw new Error("Updater asset URL must use HTTPS");
+  if (typeof notes !== "string" || notes.trim().length === 0) throw new Error("Release notes are required");
+  if (typeof signature !== "string" || signature.length === 0 || signature !== signature.trim() || /^https?:\/\//i.test(signature)) {
+    throw new Error("Updater signature must contain the generated signature text");
+  }
+  const timestamp = new Date(pubDate);
+  if (Number.isNaN(timestamp.getTime())) throw new Error("Updater publication date must be valid");
+  return {
+    version,
+    notes: notes.trim(),
+    pub_date: timestamp.toISOString(),
+    platforms: {
+      "windows-x86_64": { url: assetUrl.toString(), signature },
+    },
+  };
+}
+
+export function validateUpdaterMetadata(metadata, { version, url, signature }) {
+  if (metadata?.version !== version) throw new Error("Updater metadata version does not match the requested release");
+  const platform = metadata?.platforms?.["windows-x86_64"];
+  if (!platform || platform.url !== url) throw new Error("Updater metadata URL does not match the exact release asset URL");
+  if (typeof platform.signature !== "string" || platform.signature !== signature) {
+    throw new Error("Updater metadata must contain the generated signature text");
+  }
+  if (!metadata.notes || !metadata.pub_date) throw new Error("Updater metadata requires release notes and publication date");
+  return true;
 }
 
 export function buildCommandArgs(releaseOptions) {
@@ -65,7 +110,7 @@ export function buildCommandArgs(releaseOptions) {
   return args;
 }
 
-export function createReleaseManifest({ version, commit, executable, installer, builtAt, bundle }) {
+export function createReleaseManifest({ version, commit, executable, installer, updaterBundle, updaterSignature, builtAt, bundle }) {
   return {
     version,
     commit,
@@ -74,6 +119,8 @@ export function createReleaseManifest({ version, commit, executable, installer, 
     bundledTarget: bundle ?? null,
     executable,
     installer: installer ?? null,
+    updaterBundle: updaterBundle ?? null,
+    updaterSignature: updaterSignature ?? null,
   };
 }
 

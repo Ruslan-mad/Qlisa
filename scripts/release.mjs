@@ -17,6 +17,7 @@ import {
   buildCommandArgs,
   compareVersions,
   createReleaseManifest,
+  createUpdaterMetadata,
   decideReleaseRollback,
   parseReleaseArgs,
   readCargoLockVersion,
@@ -24,6 +25,8 @@ import {
   replaceCargoLockVersion,
   replaceCargoTomlVersion,
   replaceJsonVersion,
+  validateReleasePreparationOptions,
+  validateUpdaterMetadata,
 } from "./release-helpers.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -98,10 +101,9 @@ function printDryRun(currentVersion, release) {
   console.log("Planned actions:");
   console.log("1. Update package.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json, and the qlisa entry in src-tauri/Cargo.lock.");
   console.log("2. Validate the Cargo lockfile: cargo metadata --locked --no-deps --format-version 1 (from src-tauri/).");
-  console.log(`3. Stage only those version files: git add -- ${VERSION_PATHS.join(" ")}`);
-  console.log(`4. Commit them before building: git commit -m "release: v${release.version}"`);
-  console.log(`5. Build after the commit: pnpm ${buildArgs.join(" ")}`);
-  console.log(`6. Record full executable and ${release.bundle ? `${release.bundle} installer` : "no installer"} file details in src-tauri/target/release/qlisa.release.json.`);
+  console.log(`3. Commit only those version files: git add -- ${VERSION_PATHS.join(" ")} && git commit -m "release: v${release.version}".`);
+  console.log(`4. Build from that release commit: pnpm ${buildArgs.join(" ")}`);
+  console.log(`5. Record executable, installer, and updater artifacts in src-tauri/target/release/qlisa.release.json.`);
 }
 
 function ensureWindowsAsioPrerequisites() {
@@ -183,6 +185,14 @@ function artifactSnapshot(bundle) {
   }));
 }
 
+function updaterArtifactSnapshot(bundle) {
+  if (bundle !== "nsis") return new Map();
+  const directory = join(ROOT, "src-tauri", "target", "release", "bundle", "nsis");
+  const installers = collectFiles(directory, ".exe");
+  const paths = [...installers, ...installers.map((path) => `${path}.sig`).filter((path) => existsSync(path))];
+  return new Map(paths.map((path) => [path, snapshotFile(path)]));
+}
+
 function findNewInstaller(bundle, before) {
   if (!bundle) return undefined;
   const directory = join(ROOT, "src-tauri", "target", "release", "bundle", bundle);
@@ -200,6 +210,14 @@ function findNewInstaller(bundle, before) {
     throw new Error(`Expected exactly one newly built ${bundle.toUpperCase()} installer, found ${changed.length} in ${directory}`);
   }
   return changed[0];
+}
+
+function findNewUpdaterArtifacts(before, installer) {
+  const signaturePath = `${installer.path}.sig`;
+  if (!existsSync(signaturePath) || !artifactChanged(before.get(signaturePath), snapshotFile(signaturePath))) {
+    throw new Error(`NSIS installer updater signature was not freshly generated: ${signaturePath}`);
+  }
+  return { updaterBundle: installer, updaterSignature: fileInfo(signaturePath) };
 }
 
 function printArtifact(label, artifact) {
@@ -247,6 +265,7 @@ function rollbackVersionFiles(originals, written, staged, initialHead) {
 }
 
 function release(releaseOptions) {
+  validateReleasePreparationOptions(releaseOptions);
   ensureCleanTree();
   const initialHead = git(["rev-parse", "HEAD"]);
   const state = readVersionState();
@@ -292,10 +311,11 @@ function release(releaseOptions) {
     const executablePath = join(ROOT, "src-tauri", "target", "release", "qlisa.exe");
     const executableBefore = snapshotFile(executablePath);
     const beforeBundle = artifactSnapshot(releaseOptions.bundle);
+    const beforeUpdater = updaterArtifactSnapshot(releaseOptions.bundle);
     const buildArgs = buildCommandArgs(releaseOptions);
 
     console.log(`Building release from commit ${commit} with ASIO support...`);
-    run("pnpm.cmd", buildArgs, { cwd: ROOT, shell: true, inherit: true });
+    run(process.env.QLISA_PNPM_EXECUTABLE ?? "pnpm.cmd", buildArgs, { cwd: ROOT, shell: true, inherit: true });
 
     const executableAfter = snapshotFile(executablePath);
     if (!executableAfter) throw new Error(`Release executable was not created: ${executablePath}`);
@@ -304,12 +324,15 @@ function release(releaseOptions) {
     }
     const executable = fileInfo(executablePath);
     const installer = findNewInstaller(releaseOptions.bundle, beforeBundle);
+    const { updaterBundle, updaterSignature } = findNewUpdaterArtifacts(beforeUpdater, installer);
     const builtAt = new Date().toISOString();
     const manifest = createReleaseManifest({
       version: releaseOptions.version,
       commit,
       executable,
       installer,
+      updaterBundle,
+      updaterSignature,
       builtAt,
       bundle: releaseOptions.bundle,
     });
@@ -321,6 +344,8 @@ function release(releaseOptions) {
     console.log(`Build completed at: ${builtAt}`);
     printArtifact("Executable", executable);
     if (installer) printArtifact("Installer", installer);
+    if (updaterBundle) printArtifact("Updater bundle", updaterBundle);
+    if (updaterSignature) printArtifact("Updater signature", updaterSignature);
     else console.log("Installer: not built (--no-bundle)");
     console.log(`Manifest: ${manifestPath}`);
   } catch (error) {
@@ -331,7 +356,22 @@ function release(releaseOptions) {
 
 function main() {
   if (process.platform !== "win32") throw new Error("Qlisa release builds are Windows-only and must include asio-support.");
+  const args = process.argv.slice(2);
+  if (args[0] === "--write-updater-metadata") {
+    if (args.length !== 6) throw new Error("Usage: release.mjs --write-updater-metadata X.Y.Z NOTES_FILE HTTPS_URL SIGNATURE_FILE OUTPUT_FILE");
+    const [, version, notesPath, url, signaturePath, outputPath] = args;
+    const notes = readFileSync(notesPath, "utf8");
+    const signature = readFileSync(signaturePath, "utf8");
+    const metadata = createUpdaterMetadata({ version, notes, pubDate: new Date().toISOString(), url, signature });
+    validateUpdaterMetadata(metadata, { version, url, signature });
+    writeAtomically(resolve(outputPath), `${JSON.stringify(metadata, null, 2)}\n`);
+    return;
+  }
   const options = parseReleaseArgs(process.argv.slice(2));
+  validateReleasePreparationOptions(options);
+  if (!options.prepareRelease && !options.dryRun) {
+    throw new Error("Use scripts/publish.ps1 for release preparation, or pass --dry-run to inspect version/build arguments.");
+  }
   release(options);
 }
 
