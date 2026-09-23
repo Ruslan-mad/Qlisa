@@ -2,7 +2,7 @@
 
 ## Changes
 
-- Moved Active Cues into the main window's shared right sidebar (`7a5aafe`) alongside the
+- Moved Active Cues into the main window's shared right sidebar alongside the
   Inspector. The panel lists running and paused cues, including nested Group
   children, and provides per-cue pause, resume, and stop controls where
   supported.

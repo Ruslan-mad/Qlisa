@@ -13,9 +13,10 @@ command keeps the application version synchronized in `package.json`,
 `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.lock`.
 `.inkue` workspaces and several internal `inkue` names are retained for
 compatibility. This is not an official upstream Inkue release checkout. The
-current version is 1.5.2. The planned public source URL is
-<https://github.com/Ruslan-mad/Qlisa>; until publication, the source is only in
-the local checkout. No binary release is available.
+current version in this checkout is 1.5.2. The source repository is public at
+<https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for verified
+binary downloads. The updater and installer release process are not considered
+ready until signing, packaging, and update behavior have been verified.
 
 The app has a React/TypeScript Tauri front end and a Rust backend. The backend
 owns cue state, playback, native audio/video/output windows, networking,
@@ -403,12 +404,9 @@ the commit, executable SHA256, build timestamp, and bundle target in
 `src-tauri/target/release/qlisa.release.json`. Packaged output is under
 `src-tauri/target/release/bundle/`; the Windows config declares local
 libmpv/FFmpeg resources. NDI Runtime is user-installed and is not included.
-The in-app updater remains disabled until Qlisa has its own signing key and
-update endpoint; do not reuse Inkue updater metadata. Help and About expose a
-manual check that reports this state; the startup check is silent and makes no
-update request. Release artifacts are not checked into Git. See the
-[updater signing plan](release-signing-plan.md); it documents future steps and
-does not enable the updater.
+The Qlisa updater has not been verified for release use. Do not reuse Inkue
+updater metadata. Release artifacts are not checked into Git. See the
+[updater signing plan](release-signing-plan.md) for release requirements.
 
 `scripts/publish.ps1` is a separate source/release preflight. By default it
 reads local repository state and reports blockers. `-RunChecks` also runs
@@ -456,9 +454,7 @@ hash used to produce each build artifact so it can be traced to its source.
   file before treating the rebuild as updated.
 - A configured cue with missing/unreadable media cannot play. Use Preflight and
   Relink Media; inspect the log and health banner for decode/runtime errors.
-- `docs/README.md`, `docs/stagecue-*.md`, and `docs/source-register.md` describe
-  external StageCUE research. They are not documentation of Qlisa's code or
-  promises about Qlisa features.
+- Use `docs/README.md` to find current Qlisa technical and release documentation.
 
 ### Runtime control status (post-fix)
 
@@ -635,7 +631,7 @@ including private media paths, OSC passwords, or SRT passphrases in bug reports.
 
 ## First-pass workflow for a new coding session
 
-1. Read `CLAUDE.md`, `PROGRESS.md`, this guide, and relevant focused docs.
+1. Read this guide and the focused docs relevant to the change.
 2. Inspect `git status --short` and current source before using historical notes.
 3. Trace the feature in both directions: UI → `lib/commands.ts` → Rust command
    → show/cue/engine, and backend event → `useTauriEvents.ts` → store/UI.

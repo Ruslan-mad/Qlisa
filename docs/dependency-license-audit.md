@@ -4,7 +4,7 @@ Audit date: 2026-09-24. This is a repository and release-preparation record, not
 
 ## Source repository
 
-The locked Rust dependency graph was inspected with `cargo metadata --locked` and `cargo tree --locked --target x86_64-pc-windows-msvc --features asio-support -e all`. `cargo metadata` reported 673 packages across targets/build dependencies and supplied their license fields from package manifests/registry metadata; `Cargo.lock` itself records versions and checksums, not license metadata. Every dependency package returned a license field. No AGPL, SSPL, BUSL, proprietary, or unknown-license Rust dependency was found. The LGPL-2.1-or-later alternatives occur only in `r-efi` packages, which are target-specific and do not enter the Windows build. The app itself is GPL-3.0-or-later.
+The locked Rust dependency graph was inspected with `cargo metadata --locked` and `cargo tree --locked --target x86_64-pc-windows-msvc --features asio-support -e all`. `cargo metadata` supplied license fields from package manifests/registry metadata; `Cargo.lock` itself records versions and checksums, not license metadata. Every dependency package in that audit returned a license field. No AGPL, SSPL, BUSL, proprietary, or unknown-license Rust dependency was found. The LGPL-2.1-or-later alternatives occur only in `r-efi` packages, which are target-specific and do not enter the Windows build. The app itself is GPL-3.0-or-later.
 
 ### MPL-2.0 in the Windows graph
 
@@ -21,7 +21,7 @@ The lockfile and crate registry identify exact source versions, and the correspo
 
 ### Frontend graph
 
-The `pnpm-lock.yaml` registry package/version graph was checked against npm registry metadata: 203 package/version records were successfully checked. The metadata declared MIT, Apache-2.0, BSD-2-Clause/3-Clause, ISC, 0BSD, Unlicense, Zlib, Unicode-3.0, CC-BY-4.0, and LGPL-3.0-or-later or combinations of those licenses. No AGPL, SSPL, BUSL, proprietary, or other GPL declaration was found.
+The `pnpm-lock.yaml` registry package/version graph was checked against npm registry metadata. The metadata declared MIT, Apache-2.0, BSD-2-Clause/3-Clause, ISC, 0BSD, Unlicense, Zlib, Unicode-3.0, CC-BY-4.0, and LGPL-3.0-or-later or combinations of those licenses. No AGPL, SSPL, BUSL, proprietary, or other GPL declaration was found in that audit.
 
 LGPL declarations are on platform-specific Sharp 0.35.2 packages (`@img/sharp-*` and `@img/sharp-libvips-*`); [package.json](../package.json) lists Sharp only under `devDependencies`. The CC-BY-4.0 declaration is `caniuse-lite`, a build-time browser-compatibility database. I checked the existing `dist` frontend output: it contains no `sharp`, `libvips`, or `caniuse-lite` references. This supports that these packages are build tools rather than frontend runtime code. The final Tauri installer payload was not inspected in this subtask, so this does not certify every installer file. Preserve their package notices if distributing build tooling or a source bundle that includes installed frontend dependencies. They do not create a source-repository blocker.
 
