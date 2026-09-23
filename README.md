@@ -22,7 +22,7 @@ Screenshots are not included yet. The `docs/design/` directory contains Qlisa br
 
 ## Download and installation
 
-Check [GitHub Releases](https://github.com/Ruslan-mad/Qlisa/releases) for Windows installers when available. The source repository is public; a published source tree alone does not mean a binary release or signed in-app updater is ready. Current release and updater status must be confirmed from a verified release.
+Check [GitHub Releases](https://github.com/Ruslan-mad/Qlisa/releases) for Windows installers when available. Qlisa includes an in-app updater configured for signed GitHub Releases. The updater and binary release are not ready for distribution until runtime compliance is complete and an end-to-end update is verified. See [Windows release preparation](docs/RELEASING.md) for the local release process and current requirements.
 
 Windows 10 or 11 is the supported release target. The application uses WebView2; current supported Windows versions normally include the WebView2 Runtime. If it is missing, install Microsoft's [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 

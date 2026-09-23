@@ -14,9 +14,10 @@ command keeps the application version synchronized in `package.json`,
 `.inkue` workspaces and several internal `inkue` names are retained for
 compatibility. This is not an official upstream Inkue release checkout. The
 current version in this checkout is 1.5.2. The source repository is public at
-<https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for verified
-binary downloads. The updater and installer release process are not considered
-ready until signing, packaging, and update behavior have been verified.
+<https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
+downloads. The Tauri updater is configured for signed GitHub Releases. Binary
+distribution and updater readiness still require complete runtime compliance
+and an end-to-end update test; see [Windows release preparation](RELEASING.md).
 
 The app has a React/TypeScript Tauri front end and a Rust backend. The backend
 owns cue state, playback, native audio/video/output windows, networking,
@@ -394,33 +395,35 @@ release compile. The expected trade-off is a much shorter release build for a
 small possible change in binary size or peak optimization; verify playback on
 the normal Windows ASIO path before distributing a release.
 
-The release command requires a clean Git working tree and a strictly greater
-SemVer `X.Y.Z`. It updates `package.json`, `src-tauri/Cargo.toml`,
-`src-tauri/tauri.conf.json`, and the qlisa entry in `src-tauri/Cargo.lock`, then
-creates `release: vX.Y.Z` before starting the build. By default it builds the
-Windows ASIO executable without an installer. Pass exactly one `--bundle nsis`
-or `--bundle msi` to create one installer; never use `all`. The command records
-the commit, executable SHA256, build timestamp, and bundle target in
-`src-tauri/target/release/qlisa.release.json`. Packaged output is under
-`src-tauri/target/release/bundle/`; the Windows config declares local
-libmpv/FFmpeg resources. NDI Runtime is user-installed and is not included.
-The Qlisa updater has not been verified for release use. Do not reuse Inkue
-updater metadata. Release artifacts are not checked into Git. See the
-[updater signing plan](release-signing-plan.md) for release requirements.
+The Windows release pipeline starts with `scripts/publish.ps1 -Version X.Y.Z`.
+It requires a clean `main` branch, synchronized version fields, a signing key,
+release notes, staged runtime files, and a reviewed FFmpeg/libmpv compliance
+manifest. It runs frontend and Rust checks, creates the local
+`release: vX.Y.Z` version commit, then builds the Windows ASIO NSIS installer
+and Tauri updater artifact. Tauri updater artifacts are the NSIS executable and
+its `.exe.sig`; NDI Runtime is not included. The script prepares local assets
+and metadata only. It does not tag, push, or publish to GitHub. See
+[Windows release preparation](RELEASING.md) for prerequisites, compliance
+checks, and publication steps.
 
-`scripts/publish.ps1` is a separate source/release preflight. By default it
-reads local repository state and reports blockers. `-RunChecks` also runs
-frontend and Rust checks; Cargo may download dependencies. Its
-`-PrepareRelease` mode is reserved for future work and currently fails closed
-because updater configuration and signing credentials are not ready. This
-script does not build installers or release metadata and does not publish to
-GitHub.
-`--dry-run` performs read-only platform, clean-tree, version-consistency, and
-higher-SemVer checks, then prints the plan without editing, staging, committing,
-or building. A failure before the release commit restores only version files
-changed by that run. Once committed, the command leaves the version and history
-in place even if the build fails; if Git cannot confirm HEAD, it skips rollback
-rather than guessing.
+The updater plugin is registered in the Rust app and configured with Qlisa's
+public key and GitHub Releases `latest.json` endpoint. It checks for updates at
+startup and through the Help/About UI. It downloads the signed update, then
+blocks installation while cues run or the workspace has unsaved changes.
+The implementation has not passed an end-to-end test against a published
+signed release. FFmpeg and libmpv corresponding-source archives are also still
+required before binary distribution. Release artifacts are not checked into
+Git; do not reuse Inkue updater metadata.
+
+`scripts/release.mjs` performs the version update, local release commit, and
+build used by the release pipeline. Its `--dry-run` checks version consistency
+and the requested version, then prints the release plan without editing,
+committing, or building. The full `publish.ps1 -DryRun` also checks release
+prerequisites and the compliance manifest, but does not run tests or build
+artifacts. Before the version
+commit, failures restore only version files changed by that run. After the
+commit, failures preserve it for inspection. The recorded commit and artifact
+hashes support release traceability.
 
 After each completed and verified logical task, the team lead must create a
 separate Git commit before building or handing off that version. Create a

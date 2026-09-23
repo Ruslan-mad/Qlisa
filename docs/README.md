@@ -23,8 +23,8 @@
 
 ## Maintainer and license references
 
-- [Updater signing plan](release-signing-plan.md) — signing and release
-  requirements. The updater has not been verified for release use.
+- [Windows release preparation](RELEASING.md) — local signing, compliance,
+  packaging, updater checks, and the separate publication steps.
 - [Dependency license audit](dependency-license-audit.md) — dependency and
   binary source review dated 2026-09-24; recheck against the exact payload
   before any binary distribution.
