@@ -4512,9 +4512,10 @@ mod tests {
         assert!(!diagnostics.refill_requested);
         assert!(!diagnostics.job_requested);
         assert!(!diagnostics.job_running);
+        let (left_gain, right_gain) = voice.pan_gains();
         assert!(output.chunks_exact(2).any(|frame| {
-            (frame[0] - frames[2][0]).abs() < 1e-6
-                && (frame[1] - frames[2][1]).abs() < 1e-6
+            (frame[0] - frames[2][0] * left_gain).abs() < 1e-6
+                && (frame[1] - frames[2][1] * right_gain).abs() < 1e-6
         }), "the final PCM frame must reach the output");
     }
 

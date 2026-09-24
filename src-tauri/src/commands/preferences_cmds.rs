@@ -1511,6 +1511,9 @@ mod display_output_monitor_preference_tests {
         let mut preferences = AppPreferences::default();
         preferences.display.output_screen = Some(1);
         let mut aux = preferences.display.output_destinations[0].clone();
+        // Keep the legacy mirror aligned with the default destination, as it
+        // is after preferences migration from the legacy format.
+        preferences.display.output_destinations[0].monitor = Some(1);
         aux.id = "confidence".into();
         aux.name = "Confidence".into();
         preferences.display.output_destinations.push(aux);

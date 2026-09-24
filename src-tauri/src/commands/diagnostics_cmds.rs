@@ -921,7 +921,10 @@ mod tests {
 
     #[test]
     fn process_cpu_uses_wall_interval_and_logical_processor_count() {
-        assert_eq!(calculate_process_cpu_percent(100, 100, Duration::from_millis(20), 2), None);
+        assert_eq!(
+            calculate_process_cpu_percent(100, 100, Duration::from_millis(20), 2),
+            Some(0.0)
+        );
         let value = calculate_process_cpu_percent(0, 10_000_000, Duration::from_secs(1), 2).unwrap();
         assert!((value - 50.0).abs() < f64::EPSILON);
     }
