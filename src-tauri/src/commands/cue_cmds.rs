@@ -1980,7 +1980,10 @@ mod bulk_update_tests {
 
         assert!(summary.media_file_missing);
         assert!(summary.is_broken);
-        assert!(summary.error_message.is_none());
+        assert_eq!(
+            summary.error_message.as_deref(),
+            Some("Media file was not found.")
+        );
     }
 
     fn prepare_all(

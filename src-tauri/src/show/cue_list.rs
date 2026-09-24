@@ -1120,7 +1120,7 @@ mod tests {
             let child_id = child.id();
             list.push(child);
             let error = list.add_to_group(&child_id, &number_id, -1).unwrap_err();
-            assert!(error.to_string().contains("Audio, Video and Image"));
+            assert!(error.to_string().contains("Audio, Video, Image, and Group"));
             assert!(list.get(&child_id).is_some());
         }
     }

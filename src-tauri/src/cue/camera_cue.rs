@@ -1281,7 +1281,8 @@ mod tests {
         });
         let rebuilt = CameraCueFactory.from_json(json).expect("audio settings load");
         assert_eq!(rebuilt.serialize()["volume_db"], -9.0);
-        assert_eq!(rebuilt.serialize()["pan"], 0.4);
+        let round_tripped_pan = rebuilt.serialize()["pan"].as_f64().unwrap();
+        assert!((round_tripped_pan - 0.4).abs() < 1e-6);
         assert_eq!(rebuilt.serialize()["level_matrix"][1][0], -12.0);
     }
 

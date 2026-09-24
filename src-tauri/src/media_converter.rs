@@ -1878,7 +1878,9 @@ mod tests {
         };
         let result = analyze_compatibility(&metadata);
         assert!(!result.compatible);
-        assert!(result.reasons.len() >= 3);
+        assert_eq!(result.reasons.len(), 2);
+        assert!(result.reasons.iter().any(|reason| reason.contains("AV1/VP9")));
+        assert!(result.reasons.iter().any(|reason| reason.contains("Audio codec opus")));
     }
 
     #[test]

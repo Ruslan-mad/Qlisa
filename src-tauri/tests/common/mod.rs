@@ -170,6 +170,7 @@ pub fn write_wav_float32(path: &Path, samples: &[f32], channels: u16, sample_rat
 /// types are present so drift is caught.
 pub fn full_registry() -> CueRegistry {
     use inkue_lib::cue::audio_cue::AudioCueFactory;
+    use inkue_lib::cue::browser_cue::BrowserCueFactory;
     use inkue_lib::cue::devamp_cue::DevampCueFactory;
     use inkue_lib::cue::fade_cue::FadeCueFactory;
     use inkue_lib::cue::group_cue::GroupCueFactory;
@@ -187,6 +188,7 @@ pub fn full_registry() -> CueRegistry {
 
     let mut r = CueRegistry::new();
     r.register(CueType::Audio, Box::new(AudioCueFactory));
+    r.register(CueType::Browser, Box::new(BrowserCueFactory));
     r.register(CueType::Devamp, Box::new(DevampCueFactory));
     r.register(CueType::Fade, Box::new(FadeCueFactory));
     r.register(CueType::Midi, Box::new(MidiCueFactory));
@@ -220,6 +222,18 @@ pub fn full_registry() -> CueRegistry {
         );
     }
     r
+}
+
+/// Give recording-engine video tests an already-decoded silent audio track.
+/// Their media paths are deliberately virtual, so those tests must not invoke
+/// libmpv's real audio decoder just to exercise cue transport behavior.
+pub fn preload_silent_video_audio(cue: &mut dyn inkue_lib::cue::traits::Cue) {
+    cue.accept_preloaded_audio(
+        Arc::new(vec![0.0_f32; 4_800]),
+        2,
+        48_000,
+        Duration::from_millis(100),
+    );
 }
 
 /// Every built-in cue type — the single source of truth for "what should the
@@ -321,6 +335,7 @@ pub enum EngineCall {
         preload: bool,
     },
     OutputStopContent,
+    OutputStopVoice { fade_ms: u32 },
     OutputTextOverlay {
         ass: String,
     },
@@ -537,7 +552,8 @@ impl OutputEngineApi for RecOutput {
     fn set_voice_opacity(&self, _v: VoiceId, opacity: f32) {
         record(&self.log, EngineCall::OutputSetOpacity { opacity });
     }
-    fn stop_voice(&self, _v: VoiceId, _f: u32) -> Result<()> {
+    fn stop_voice(&self, _v: VoiceId, fade_ms: u32) -> Result<()> {
+        record(&self.log, EngineCall::OutputStopVoice { fade_ms });
         Ok(())
     }
     fn pause_voice(&self, _v: VoiceId) -> Result<()> {

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use common::{
     full_registry, recording_context, recording_context_with, recording_context_with_video_audio,
-    EngineCall,
+    preload_silent_video_audio, EngineCall,
 };
 use inkue_lib::cue::context::CueContext;
 use inkue_lib::cue::fade_cue::FadeCue;
@@ -98,6 +98,7 @@ fn deleting_running_visual_also_stops_paired_audio_voice() {
     let mut json = registry.create(&CueType::Video).unwrap().serialize();
     json["file_path"] = serde_json::json!("test.mp4");
     let mut video = registry.from_json(json).unwrap();
+    preload_silent_video_audio(video.as_mut());
     let (context, _events, log) = recording_context_with_video_audio();
 
     video.go(&context).unwrap();
@@ -110,7 +111,7 @@ fn deleting_running_visual_also_stops_paired_audio_voice() {
         .any(|call| matches!(call, EngineCall::AudioStopVoice { fade_ms: 0 })));
     assert!(calls
         .iter()
-        .any(|call| matches!(call, EngineCall::OutputStopContent)));
+        .any(|call| matches!(call, EngineCall::OutputStopVoice { fade_ms: 0 })));
     assert!(!video.is_running());
     assert_ne!(visual_id, uuid::Uuid::nil());
 }
@@ -720,7 +721,8 @@ fn pause_resume_freezes_action_clocks_for_media_and_timed_cues() {
 
     let mut video_json = registry.create(&CueType::Video).unwrap().serialize();
     video_json["file_path"] = serde_json::json!("video/test.mp4");
-    let video = registry.from_json(video_json).unwrap();
+    let mut video = registry.from_json(video_json).unwrap();
+    preload_silent_video_audio(video.as_mut());
 
     let mut image_json = registry.create(&CueType::Image).unwrap().serialize();
     image_json["file_path"] = serde_json::json!("image/test.png");
@@ -1101,6 +1103,7 @@ fn video_auto_continue_starts_audio_then_targeted_stop_stops_video() {
     let mut video_json = registry.create(&CueType::Video).unwrap().serialize();
     video_json["file_path"] = serde_json::json!("video/loop.mp4");
     let mut video = registry.from_json(video_json).unwrap();
+    preload_silent_video_audio(video.as_mut());
     video.set_continue_mode(ContinueMode::AutoContinue);
     let video_id = video.id();
 
@@ -1147,6 +1150,7 @@ fn start_video_audio_stop_scenario(
     video_json["file_path"] = serde_json::json!("video/loop.mp4");
     video_json["loop_count"] = serde_json::json!(u32::MAX);
     let mut video = registry.from_json(video_json).unwrap();
+    preload_silent_video_audio(video.as_mut());
     video.set_continue_mode(ContinueMode::AutoContinue);
     let video_id = video.id();
 
@@ -1259,6 +1263,7 @@ fn explicit_goto_cancels_delayed_captured_auto_follow() {
     video_json["file_path"] = serde_json::json!("video/loop.mp4");
     video_json["loop_count"] = serde_json::json!(u32::MAX);
     let mut video = registry.from_json(video_json).unwrap();
+    preload_silent_video_audio(video.as_mut());
     video.set_continue_mode(ContinueMode::AutoContinue);
     let video_id = video.id();
 
@@ -1338,6 +1343,7 @@ fn short_audio_completing_before_auto_continue_post_wait_keeps_captured_successo
     video_json["file_path"] = serde_json::json!("video/loop.mp4");
     video_json["loop_count"] = serde_json::json!(u32::MAX);
     let mut video = registry.from_json(video_json).unwrap();
+    preload_silent_video_audio(video.as_mut());
     video.set_continue_mode(ContinueMode::AutoContinue);
     let video_id = video.id();
 

@@ -16,8 +16,8 @@ use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
 use common::{
-    full_registry, recording_context, recording_context_headless, recording_context_with,
-    recording_context_with_video_audio, EngineCall,
+    full_registry, preload_silent_video_audio, recording_context, recording_context_headless,
+    recording_context_with, recording_context_with_video_audio, EngineCall,
 };
 use inkue_lib::cue::group_cue::GroupCue;
 use inkue_lib::cue::light_cue::{LightCue, ParamTarget};
@@ -509,6 +509,7 @@ fn video_cue_fades_its_sound_out_when_it_reaches_its_natural_end() {
     vj["cached_duration_ms"] = serde_json::json!(3000);
     vj["fade_out_ms"] = serde_json::json!(1000);
     let mut cue = reg.from_json(vj).unwrap();
+    preload_silent_video_audio(cue.as_mut());
 
     cue.go(&ctx).unwrap();
     cue.tick(&ctx).unwrap();
@@ -544,6 +545,7 @@ fn video_cue_arms_picture_and_sound_fades_from_their_own_specs() {
     vj["video_fade_out_ms"] = serde_json::json!(3000);
     vj["fade_out_ms"] = serde_json::json!(1500);
     let mut cue = reg.from_json(vj).unwrap();
+    preload_silent_video_audio(cue.as_mut());
 
     cue.go(&ctx).unwrap();
     cue.seek(2500, &ctx); // inside the picture window, short of the sound one

@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use crossbeam_channel::Receiver;
 
-use common::{recording_context, recording_context_headless, full_registry, CallLog, EngineCall};
+use common::{
+    full_registry, preload_silent_video_audio, recording_context, recording_context_headless,
+    CallLog, EngineCall,
+};
 use inkue_lib::cue::context::{CueContext, CueEvent};
 use inkue_lib::cue::devamp_cue::DevampCue;
 use inkue_lib::cue::fade_cue::FadeCue;
@@ -328,7 +331,8 @@ fn load_command_prepares_a_video_without_putting_it_on_screen() {
 
     let mut vj = reg.create(&CueType::Video).unwrap().serialize();
     vj["file_path"] = serde_json::json!("video/act2.mp4");
-    let video = reg.from_json(vj).unwrap();
+    let mut video = reg.from_json(vj).unwrap();
+    preload_silent_video_audio(video.as_mut());
     let video_id = video.id();
     let mut list = list_of(vec![video, command(&reg, CueType::Load, vec![video_id])]);
     list.playhead_cue_id = list.cues.last().map(|c| c.id());
@@ -356,7 +360,8 @@ fn starting_a_loaded_video_reveals_it_instead_of_reloading() {
 
     let mut vj = reg.create(&CueType::Video).unwrap().serialize();
     vj["file_path"] = serde_json::json!("video/act2.mp4");
-    let video = reg.from_json(vj).unwrap();
+    let mut video = reg.from_json(vj).unwrap();
+    preload_silent_video_audio(video.as_mut());
     let video_id = video.id();
     let mut list = list_of(vec![
         video,
