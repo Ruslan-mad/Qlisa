@@ -124,6 +124,63 @@
       "version": "v0.41.0-458-g062f4bf04",
       "path": "src-tauri/vendor/mpv/libmpv-2.dll",
       "sha256": "9936e45ba4c5c8a93ce4e978634de369af0a1d61595447699b17393ba2dec417",
+      "binaryEvidence": {
+        "sha256": "9936e45ba4c5c8a93ce4e978634de369af0a1d61595447699b17393ba2dec417",
+        "architecture": "windows-x86_64",
+        "peTimestampUtc": "2026-04-12T00:06:31Z",
+        "versionText": "v0.41.0-458-g062f4bf04"
+      },
+      "buildCandidates": [
+        {
+          "status": "candidate-only-byte-match-unverified",
+          "provider": "shinchiro",
+          "archive": {
+            "url": "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-20260412-git-062f4bf.7z/download",
+            "listingUrl": "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/",
+            "listedAtUtc": "2026-04-12T00:10:07Z",
+            "reportedSize": "30.3 MB"
+          },
+          "buildRun": {
+            "url": "https://github.com/shinchiro/mpv-winbuild-cmake/actions/runs/24294476072",
+            "workflow": "mpv clang",
+            "status": "success",
+            "createdAtUtc": "2026-04-12T00:00:02Z",
+            "buildRepositoryCommit": "ec6f81cd420b1fb80a682fd58b30b6ad61aa114b",
+            "workflowAtBuildCommit": "https://github.com/shinchiro/mpv-winbuild-cmake/blob/ec6f81cd420b1fb80a682fd58b30b6ad61aa114b/.github/workflows/mpv_clang.yml"
+          },
+          "artifacts": {
+            "genericX64": {
+              "name": "mpv-x86_64",
+              "sizeBytes": 32698482,
+              "expired": true,
+              "expiresAtUtc": "2026-07-11T00:00:04Z"
+            },
+            "x64V3": {
+              "name": "mpv-x86_64_v3",
+              "sizeBytes": 34034381,
+              "expired": true,
+              "expiresAtUtc": "2026-07-11T00:00:04Z"
+            },
+            "genericX64BuildLogsExpiredAtUtc": "2026-04-13T00:09:01Z",
+            "x64V3BuildLogsExpiredAtUtc": "2026-04-13T00:09:05Z",
+            "releaseTag20260412Available": false
+          },
+          "dependencyPinsAndCorrespondingSourceVerified": false,
+          "byteForByteDllMatchVerified": false,
+          "evidenceNotes": "The matching date and mpv revision make this a candidate only. The generic and x86_64-v3 payloads were not distinguished by a DLL hash comparison. SourceForge download redirects to an unreachable master mirror in the inspected environment. The run workflow executes ninja update; exact dependency revisions, patches, and corresponding source were not recovered. GitHub Actions artifacts are expired and the 20260412 release tag is unavailable."
+        },
+        {
+          "status": "candidate-only-byte-match-unverified",
+          "provider": "shinchiro",
+          "archive": {
+            "url": "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-v3-20260412-git-062f4bf.7z/download",
+            "listingUrl": "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/",
+            "listedAtUtc": "2026-04-12T00:10:08Z",
+            "reportedSize": "31.6 MB"
+          },
+          "byteForByteDllMatchVerified": false
+        }
+      ],
       "source": {
         "url": "https://github.com/mpv-player/mpv/commit/062f4bf04",
         "revision": "062f4bf04",
