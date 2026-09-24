@@ -235,6 +235,23 @@ The signed `latest.json` tests the Tauri updater signature. If it fails, record
 the exact updater error and compare the configured public key with the key that
 signed the `.sig`; do not bypass signature verification.
 
+## Recorded result — 2026-09-24
+
+The isolated signed NSIS update from 1.5.2 to 1.5.3 passed through the local
+loopback feed at `http://127.0.0.1:8765`. Both installers used the same Tauri
+signing key. With an invalid signature, the downloaded update was rejected and
+the app remained at 1.5.2. With the valid signature, an unsaved workspace
+blocked installation after download. After saving, the signed NSIS installer
+applied the update and restarted the app. The executable FileVersion and About
+both reported 1.5.3, and the next update check reported that the app was
+current. A workspace test file remained present and opened with Wait 1:00.
+
+The audio/video cue installation guards were not tested in the UI. A separate
+libmpv smoke test was performed earlier; it does not verify those guards. This
+was a local test only: no GitHub Release, tag, or push was created. It does not
+resolve the FFmpeg or libmpv source and compliance blockers for public binary
+distribution.
+
 ## Cleanup
 
 Close QlisaUpdaterTest and uninstall only the app with the `QlisaUpdaterTest`
