@@ -222,6 +222,12 @@ version. Confirm detection, notes, signature acceptance, active-cue install
 guard, installation, restart, and the new running version. Type checks and a
 successful build do not establish updater readiness.
 
+The isolated test-feed procedure, including its separate Windows install
+identity and tag-specific metadata URL, is in
+[`UPDATER_TESTING.md`](UPDATER_TESTING.md). Run it only after runtime
+compliance is ready. The procedure uses `--latest=false` and removes its
+temporary test release and tag after verification.
+
 If preparation fails before the version commit, `scripts/release.mjs` restores
 the version files it changed and unstages them. If Cargo metadata or commit
 creation fails, it attempts the same rollback. Once the version commit exists,
