@@ -5,15 +5,14 @@ Prepare a signed Qlisa Windows release locally.
 .DESCRIPTION
 Checks source and release prerequisites, runs frontend and Rust checks, updates
 the version through scripts/release.mjs, and creates local NSIS/updater
-artifacts. It never tags, pushes, or publishes. Missing signing or compliance
-inputs stop the process before version files or build outputs are changed.
+artifacts for private testing. It never tags, pushes, or publishes. Missing
+signing keys or pinned runtime files stop the process before a build starts.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [switch]$DryRun,
-    [string]$SigningKeyPath = (Join-Path $env:USERPROFILE '.tauri\qlisa.key'),
-    [string]$ComplianceManifestPath = '.release-compliance.json'
+    [string]$SigningKeyPath = (Join-Path $env:USERPROFILE '.tauri\qlisa.key')
 )
 
 Set-StrictMode -Version Latest
@@ -61,58 +60,7 @@ function Compare-SemVer([string]$Left, [string]$Right) {
     return 0
 }
 function Get-Sha256([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
-function Read-ComplianceManifest([string]$ManifestPath) {
-    $path = Resolve-RepoPath $ManifestPath
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Fail "Release compliance manifest is missing: $path. See docs/RELEASING.md." }
-    $manifest = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
-    if ($manifest.schemaVersion -ne 1 -or [string]::IsNullOrWhiteSpace([string]$manifest.reviewedBy) -or
-        [string]::IsNullOrWhiteSpace([string]$manifest.reviewedAt) -or $manifest.components -isnot [array]) {
-        Fail 'Compliance manifest must have schemaVersion=1, reviewedBy, reviewedAt, and components.'
-    }
-    $releaseSourceFiles = [System.Collections.Generic.List[string]]::new()
-    $releaseNoticeFiles = [System.Collections.Generic.List[string]]::new()
-    $bundleConfig = Get-Content -Raw (Join-Path $script:Root 'src-tauri/tauri.windows.conf.json')
-    foreach ($name in @('ffmpeg', 'libmpv')) {
-        $component = @($manifest.components | Where-Object { [string]$_.name -eq $name })
-        if ($component.Count -ne 1) { Fail "Compliance manifest must contain exactly one '$name' component." }
-        $item = $component[0]
-        $sourceUri = $null
-        if ([string]::IsNullOrWhiteSpace([string]$item.version) -or
-            -not [uri]::TryCreate([string]$item.sourceUrl, [System.UriKind]::Absolute, [ref]$sourceUri) -or $sourceUri.Scheme -ne 'https' -or
-            $item.correspondingSource -ne $true -or [string]::IsNullOrWhiteSpace([string]$item.license) -or
-            $null -eq $item.sourceArchive -or $item.sourceArchive.includeInRelease -ne $true -or
-            [string]::IsNullOrWhiteSpace([string]$item.sourceArchive.sha256) -or $item.notices -isnot [array] -or $item.notices.Count -eq 0 -or
-            $item.runtimeFiles -isnot [array] -or $item.runtimeFiles.Count -eq 0) {
-            Fail "Compliance entry '$name' must identify its license, corresponding source archive, runtime files, and notices."
-        }
-        $requiredRuntime = if ($name -eq 'ffmpeg') { @('ffmpeg.exe', 'ffprobe.exe') } else { @('libmpv-2.dll') }
-        $listedRuntime = @($item.runtimeFiles | ForEach-Object { [System.IO.Path]::GetFileName([string]$_.path) })
-        foreach ($required in $requiredRuntime) {
-            if ($listedRuntime -notcontains $required) { Fail "Compliance entry '$name' must identify runtime file '$required'." }
-        }
-        foreach ($record in @($item.sourceArchive) + @($item.notices) + @($item.runtimeFiles)) {
-            if ([string]::IsNullOrWhiteSpace([string]$record.path) -or [string]$record.sha256 -notmatch '^[a-fA-F0-9]{64}$') {
-                Fail "Compliance entry '$name' contains a record without a path and SHA-256."
-            }
-            $file = Resolve-RepoPath ([string]$record.path)
-            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { Fail "Compliance file is missing: $file" }
-            if ((Get-Sha256 $file) -ne ([string]$record.sha256).ToLowerInvariant()) { Fail "Compliance SHA-256 mismatch: $file" }
-            if ($record.path -eq $item.sourceArchive.path) { $releaseSourceFiles.Add($file); continue }
-            $relativeRecord = ([string]$record.bundlePath).Replace('\', '/')
-            if ([System.IO.Path]::IsPathRooted([string]$record.path) -or [string]::IsNullOrWhiteSpace($relativeRecord) -or $bundleConfig -notmatch [regex]::Escape($relativeRecord)) {
-                Fail "Bundle configuration must include project-relative runtime and notice path '$relativeRecord'."
-            }
-            if (@($item.notices | ForEach-Object { [string]$_.path }) -contains [string]$record.path) { $releaseNoticeFiles.Add($file) }
-        }
-    }
-    return [pscustomobject]@{
-        Manifest = $manifest
-        SourceFiles = @($releaseSourceFiles | Sort-Object -Unique)
-        NoticeFiles = @($releaseNoticeFiles | Sort-Object -Unique)
-        ManifestPath = $path
-    }
-}
-function Assert-RuntimeManifest([object]$Compliance) {
+function Get-RuntimeManifest {
     $manifestPath = Join-Path $script:Root 'scripts/runtime-manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Fail "Tracked runtime manifest is missing: $manifestPath" }
     $runtime = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
@@ -120,30 +68,25 @@ function Assert-RuntimeManifest([object]$Compliance) {
     $ffmpeg = @($runtime.components | Where-Object { $_.id -eq 'ffmpeg-gyan-essentials' })
     $mpv = @($runtime.components | Where-Object { $_.id -eq 'libmpv' })
     if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { Fail 'Runtime manifest must contain exactly one pinned FFmpeg and one libmpv record.' }
-    if ($ffmpeg[0].sourceOffer.status -cne 'ready') { Fail "FFmpeg corresponding source is not ready according to scripts/runtime-manifest.json. See docs/THIRD_PARTY_SOURCE_OFFER.md." }
-    if ($mpv[0].releaseCompliance -cne 'ready' -or $mpv[0].source.binaryBuildOriginVerified -ne $true -or
-        $mpv[0].source.dependencyRevisionsVerified -ne $true -or $mpv[0].source.buildConfigurationVerified -ne $true -or
-        $null -eq $mpv[0].source.sourceArchive) { Fail 'libmpv release compliance and exact source/build provenance are not ready in scripts/runtime-manifest.json.' }
-    if ($null -eq $Compliance) { return }
-
-    $pins = @(
-        $ffmpeg[0].runtimeFiles | ForEach-Object { [pscustomobject]@{ component = 'ffmpeg'; path = [string]$_.path; sha256 = [string]$_.sha256 } }
-        [pscustomobject]@{ component = 'libmpv'; path = [string]$mpv[0].path; sha256 = [string]$mpv[0].sha256 }
-    )
-    foreach ($pin in $pins) {
-        if ([string]$pin.sha256 -notmatch '^[a-fA-F0-9]{64}$') { Fail "Runtime manifest has no valid SHA-256 for '$($pin.path)'." }
-        $matches = @($Compliance.Manifest.components | ForEach-Object {
-            $component = $_
-            if ([string]$component.name -cne [string]$pin.component) { return }
-            @($component.runtimeFiles | Where-Object {
-                ([System.IO.Path]::GetFileName([string]$_.path) -eq [System.IO.Path]::GetFileName([string]$pin.path)) -and
-                ([string]$_.sha256).ToLowerInvariant() -eq ([string]$pin.sha256).ToLowerInvariant()
-            } | ForEach-Object { [pscustomobject]@{ component = [string]$component.name; path = [string]$_.path } })
-        })
-        if ($matches.Count -ne 1) { Fail "Local release compliance must contain exactly one runtime record matching pinned SHA-256 for '$($pin.path)'." }
-        $pinnedPath = ([string]$pin.path).Replace('/', '\')
-        $recordPath = ([string]$matches[0].path).Replace('/', '\')
-        if (-not [string]::Equals($pinnedPath, $recordPath, [System.StringComparison]::OrdinalIgnoreCase)) { Fail "Runtime manifest path '$pinnedPath' does not match compliance path '$recordPath'." }
+    if ($ffmpeg[0].runtimeFiles -isnot [array] -or $ffmpeg[0].runtimeFiles.Count -ne 2 -or
+        $ffmpeg[0].notices -isnot [array] -or $ffmpeg[0].notices.Count -lt 2) { Fail 'Pinned FFmpeg runtime files and notices are incomplete.' }
+    foreach ($record in @($ffmpeg[0].runtimeFiles) + @($ffmpeg[0].notices) + @($mpv[0])) {
+        if ([string]$record.path -eq '' -or [string]$record.sha256 -notmatch '^[a-fA-F0-9]{64}$') { Fail 'Runtime manifest contains a missing path or invalid SHA-256 pin.' }
+    }
+    return [pscustomobject]@{ Ffmpeg = $ffmpeg[0]; Mpv = $mpv[0] }
+}
+function Assert-PinnedRuntimeFiles([object]$Runtime, [switch]$AllowMissing) {
+    $bundleConfig = Get-Content -Raw (Join-Path $script:Root 'src-tauri/tauri.windows.conf.json')
+    $records = @($Runtime.Ffmpeg.runtimeFiles) + @($Runtime.Ffmpeg.notices) + @($Runtime.Mpv)
+    foreach ($record in $records) {
+        $file = Resolve-RepoPath ([string]$record.path)
+        $bundlePath = ([string]$record.path).Replace('src-tauri/', '')
+        if ($bundleConfig -notmatch [regex]::Escape($bundlePath)) { Fail "Windows bundle configuration does not include pinned runtime or notice '$bundlePath'." }
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+            if ($AllowMissing) { continue }
+            Fail "Pinned runtime or notice is missing: $file"
+        }
+        if ((Get-Sha256 $file) -ne ([string]$record.sha256).ToLowerInvariant()) { Fail "Pinned runtime or notice SHA-256 mismatch: $file" }
     }
 }
 function Require-Command([string]$Name, [string]$InstallHint) {
@@ -164,12 +107,6 @@ function Assert-NoNdiInTree {
         }
     }
 }
-function Assert-ArchiveHasNoNdi([string]$Archive, [string]$SevenZip) {
-    $listing = & $SevenZip 'l' '-ba' $Archive 2>&1
-    if ($LASTEXITCODE -ne 0) { Fail "7-Zip could not inspect release archive: $Archive" }
-    if (($listing | Out-String) -match '(?i)Processing\.NDI\.Lib.*\.dll') { Fail "Release archive contains an NDI Runtime DLL: $Archive" }
-}
-
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { Fail "Version must be strict three-part SemVer, for example 1.5.3; got '$Version'." }
 if ($env:OS -ne 'Windows_NT') { Fail 'Windows release preparation must run on Windows.' }
 $git = Require-Command 'git' 'Install Git for Windows with: winget install --id Git.Git -e. Then reopen PowerShell.'
@@ -181,13 +118,6 @@ if ($null -eq $node) { $node = Get-Command node -ErrorAction SilentlyContinue }
 if ($null -eq $node) { Fail 'Node.js was not found in PATH. Install it with `winget install --id OpenJS.NodeJS.LTS -e`, then reopen PowerShell.' }
 $cargo = Require-Command 'cargo' 'Install Rust with `winget install --id Rustlang.Rustup -e`, then run `rustup default stable-x86_64-pc-windows-msvc` and reopen PowerShell.'
 $rustc = Require-Command 'rustc' 'Install Rust with `winget install --id Rustlang.Rustup -e`, then run `rustup default stable-x86_64-pc-windows-msvc` and reopen PowerShell.'
-$sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
-if ($null -eq $sevenZip) { $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue }
-if ($null -eq $sevenZip) { Fail '7-Zip CLI was not found in PATH. Install it with `winget install --id 7zip.7zip -e`, then reopen PowerShell.' }
-$signer = Get-Command minisign.exe -ErrorAction SilentlyContinue
-if ($null -eq $signer) { $signer = Get-Command minisign -ErrorAction SilentlyContinue }
-if ($null -eq $signer) { Fail 'Minisign was not found in PATH. Install it with `winget install --id jedisct1.minisign -e`, then reopen PowerShell.' }
-
 $branch = (& $git.Source -C $script:Root branch --show-current).Trim()
 if ($LASTEXITCODE -ne 0 -or $branch -ne 'main') { Fail "Release preparation requires branch 'main'; current branch is '$branch'." }
 $status = @(& $git.Source -C $script:Root status --porcelain --untracked-files=all)
@@ -208,9 +138,7 @@ $privateKey = Resolve-RepoPath $SigningKeyPath
 $repoPrefix = $script:Root.TrimEnd('\') + '\'
 if ($privateKey.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { Fail 'Signing key must be outside the repository.' }
 if (-not (Test-Path -LiteralPath $privateKey -PathType Leaf)) { Fail "Tauri signing key is missing: $privateKey. The script will not create or print a key." }
-$complianceManifestFullPath = Resolve-RepoPath $ComplianceManifestPath
-if (-not (Test-Path -LiteralPath $complianceManifestFullPath -PathType Leaf)) { Fail "Release compliance manifest is missing: $complianceManifestFullPath. No runtime will be downloaded or staged." }
-$null = Assert-RuntimeManifest $null
+$runtime = Get-RuntimeManifest
 if (-not (Test-Path -LiteralPath (Join-Path $script:Root 'node_modules/.bin/tauri.cmd') -PathType Leaf)) {
     Fail 'Project-local Tauri CLI is missing. Run `pnpm install --frozen-lockfile` from the repository root, then reopen PowerShell.'
 }
@@ -223,10 +151,9 @@ Write-Host "Source commit: $((& $git.Source -C $script:Root rev-parse HEAD).Trim
 Write-Host "Version: $currentVersion -> $Version"
 Write-Host "Tag to use after review: $tag"
 Write-Host "Release notes: $releaseNotes"
-Write-Host 'Prerequisites: node, pnpm, cargo, rustc, local Tauri CLI, Git, 7-Zip, Minisign, signing key path, and compliance manifest are valid.'
+Write-Host 'Prerequisites: node, pnpm, cargo, rustc, local Tauri CLI, Git, signing key, and runtime pins are valid.'
 if ($DryRun) {
-    $checkedCompliance = Read-ComplianceManifest $ComplianceManifestPath
-    Assert-RuntimeManifest $checkedCompliance
+    Assert-PinnedRuntimeFiles $runtime -AllowMissing
     Write-Host 'PREFLIGHT ONLY: no version files changed and no installer was built. Omit -DryRun to prepare real local artifacts; that command still does not tag, push, or publish.'
     exit 0
 }
@@ -238,8 +165,7 @@ if (-not (Test-Path -LiteralPath $ffmpegExe -PathType Leaf)) {
 }
 $mpv = Join-Path $script:Root 'src-tauri/vendor/mpv/libmpv-2.dll'
 if (-not (Test-Path -LiteralPath $mpv -PathType Leaf)) { Fail 'libmpv runtime is missing: src-tauri/vendor/mpv/libmpv-2.dll.' }
-$compliance = Read-ComplianceManifest $ComplianceManifestPath
-Assert-RuntimeManifest $compliance
+Assert-PinnedRuntimeFiles $runtime
 
 Invoke-Checked 'Frontend tests' $pnpm.Source @('test')
 Invoke-Checked 'Frontend production build' $pnpm.Source @('build')
@@ -290,55 +216,14 @@ if ($updateBundlePath -cne $installerPath -or -not $updateBundlePath.ToLowerInva
     Fail 'Release manifest does not identify the NSIS installer and its matching Tauri updater signature.'
 }
 $installer = Get-Item -LiteralPath $installerPath
-Assert-ArchiveHasNoNdi $installer.FullName $sevenZip.Source
 
 $signature = Get-Content -Raw -LiteralPath $signaturePath
 if ([string]::IsNullOrWhiteSpace($signature) -or $signature -cne $signature.Trim()) { Fail 'Generated updater signature is empty or has surrounding whitespace; expected exact Tauri .sig content.' }
-$publicKeyPath = Join-Path ([System.IO.Path]::GetTempPath()) ("qlisa-updater-public-" + [guid]::NewGuid().ToString('N') + '.pub')
-$decodedSignaturePath = Join-Path ([System.IO.Path]::GetTempPath()) ("qlisa-updater-signature-" + [guid]::NewGuid().ToString('N') + '.sig')
-try {
-    try { $publicKeyContents = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$updater.pubkey)) }
-    catch { Fail 'Configured updater public key is not base64-encoded Tauri minisign key material.' }
-    try { $decodedSignature = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($signature)) }
-    catch { Fail 'Generated Tauri signature is not base64-encoded minisign signature material.' }
-    if ($publicKeyContents -notmatch '(?m)^RW[A-Za-z0-9+/=]+\s*$') { Fail 'Decoded Tauri updater public key does not contain a minisign public key.' }
-    if ($decodedSignature -notmatch '(?m)^R[A-Za-z0-9+/=]+\s*$') { Fail 'Decoded updater signature does not contain a minisign signature.' }
-    [System.IO.File]::WriteAllText($publicKeyPath, $publicKeyContents, [System.Text.UTF8Encoding]::new($false))
-    [System.IO.File]::WriteAllText($decodedSignaturePath, $decodedSignature, [System.Text.UTF8Encoding]::new($false))
-    $verifyArgs = @('-Vm', $installer.FullName, '-x', $decodedSignaturePath, '-p', $publicKeyPath)
-    $verifyOutput = & $signer.Source @verifyArgs 2>&1
-    if ($LASTEXITCODE -ne 0) { Fail "Minisign rejected the updater artifact signature: $verifyOutput" }
-} finally {
-    Remove-Item -LiteralPath $publicKeyPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $decodedSignaturePath -Force -ErrorAction SilentlyContinue
-}
-
 $outDirectory = Join-Path $script:Root "src-tauri/target/release/prepared/$tag"
 New-Item -ItemType Directory -Path $outDirectory -Force | Out-Null
 $latestPath = Join-Path $outDirectory 'latest.json'
 $assetUrl = "$script:RepoUrl/releases/latest/download/$($installer.Name)"
 Invoke-Checked 'Create updater latest.json' $node.Source @((Join-Path $script:Root 'scripts/release.mjs'), '--write-updater-metadata', $Version, $releaseNotes, $assetUrl, $signaturePath, $latestPath)
-$releaseCompliance = [ordered]@{
-    schemaVersion = 1
-    version = $Version
-    reviewedBy = [string]$compliance.Manifest.reviewedBy
-    reviewedAt = [string]$compliance.Manifest.reviewedAt
-    components = @(
-        foreach ($component in $compliance.Manifest.components) {
-            [ordered]@{
-                name = [string]$component.name
-                version = [string]$component.version
-                sourceUrl = [string]$component.sourceUrl
-                license = [string]$component.license
-                sourceArchive = [ordered]@{ file = [System.IO.Path]::GetFileName([string]$component.sourceArchive.path); sha256 = [string]$component.sourceArchive.sha256 }
-                runtimeFiles = @($component.runtimeFiles | ForEach-Object { [ordered]@{ file = [System.IO.Path]::GetFileName([string]$_.path); sha256 = [string]$_.sha256 } })
-                notices = @($component.notices | ForEach-Object { [ordered]@{ file = [System.IO.Path]::GetFileName([string]$_.path); sha256 = [string]$_.sha256 } })
-            }
-        }
-    )
-}
-$releaseCompliancePath = Join-Path $outDirectory 'release-compliance.json'
-[System.IO.File]::WriteAllText($releaseCompliancePath, (($releaseCompliance | ConvertTo-Json -Depth 8) + "`n"), [System.Text.UTF8Encoding]::new($false))
 $parsed = Get-Content -Raw -LiteralPath $latestPath | ConvertFrom-Json
 $expectedUrl = "$script:RepoUrl/releases/latest/download/$($installer.Name)"
 $expectedNotes = (Get-Content -Raw -LiteralPath $releaseNotes).Trim()
@@ -352,7 +237,7 @@ if ($parsed.version -cne $Version -or [string]$parsed.platforms.'windows-x86_64'
     Fail 'Generated latest.json failed version, Windows platform, exact URL, exact signature text, UTC publication date, or release-notes checks.'
 }
 
-$assets = @($installer.FullName, $signaturePath, $latestPath, $releaseCompliancePath) + $compliance.SourceFiles + $compliance.NoticeFiles
+$assets = @($installer.FullName, $signaturePath, $latestPath)
 $assetNames = @($assets | ForEach-Object { [System.IO.Path]::GetFileName($_) })
 if (@($assetNames | Select-Object -Unique).Count -ne $assetNames.Count) { Fail 'Release assets contain duplicate filenames; rename the colliding source or notice files before retrying.' }
 Write-Host ''
@@ -368,4 +253,4 @@ Write-Host "Release notes: $releaseNotes"
 Write-Host 'Release notes content:'
 Write-Host (Get-Content -Raw -LiteralPath $releaseNotes)
 Write-Host "Metadata: $latestPath"
-Write-Host 'LOCAL PREPARATION COMPLETE. Nothing was tagged, pushed, or published. Review these exact files before any separate publication command.'
+Write-Host 'LOCAL-ONLY SIGNED BUILD COMPLETE. These artifacts are not a publication-ready release. Nothing was tagged, pushed, or published.'

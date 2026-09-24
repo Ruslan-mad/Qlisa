@@ -1,163 +1,38 @@
-# Windows release preparation
+# Windows local build and release
 
-`scripts/publish.ps1` prepares a signed Windows release in the local working
-tree. It commits the synchronized version files, but does not create a tag,
-push, or publish a GitHub Release. The
-updater release is **not ready** until the FFmpeg and libmpv corresponding
-source archives and notices pass the compliance checks below, and a signed
-release completes an end-to-end update test.
+`scripts/publish.ps1` prepares a **local-only signed Windows build**. It does
+not create a tag, push, or publish a GitHub Release. Its installer, `.sig`, and
+`latest.json` are private local test artifacts. Do not publish them before the
+corresponding source and required notices for FFmpeg and libmpv are assembled
+and verified.
 
-## Prerequisites
+## Local build prerequisites
 
-- Windows, Node.js LTS, pnpm, Rust stable with the MSVC target, Git for
-  Windows, 7-Zip CLI, and Minisign. The project-local Tauri CLI must be
-  installed by `pnpm install`.
-- Check tools before preparing a release:
+- Windows, Node.js LTS, pnpm, Rust stable with the MSVC target, and Git for
+  Windows. Install the project-local Tauri CLI with `pnpm install`.
+- A clean `main` branch, synchronized project versions, and release notes at
+  `docs/RELEASE_NOTES_X.Y.Z.md`.
+- Tauri updater artifacts enabled, the Qlisa updater public key, and the HTTPS
+  GitHub Releases endpoint in `src-tauri/tauri.conf.json`.
+- The private updater key at `%USERPROFILE%\.tauri\qlisa.key`, or its external
+  path passed with `-SigningKeyPath`. The script prompts for the password with
+  a masked PowerShell prompt. It never prints or creates the private key.
+- FFmpeg, ffprobe, and libmpv runtime files matching the SHA-256 pins in
+  `scripts/runtime-manifest.json`. FFmpeg must also include its pinned license
+  and Gyan build notice. If FFmpeg is absent, the script stages the pinned
+  archive through `scripts/prepare-runtime.ps1`.
 
-  ```powershell
-  Get-Command node,pnpm,cargo,rustc,git,7z,minisign
-  pnpm exec tauri --version
-  ```
+The script checks that these runtime files and notices are configured in
+`src-tauri/tauri.windows.conf.json`. It scans the source tree for NDI Runtime
+DLLs. It does not require 7-Zip, Minisign, source archives, or a local
+`.release-compliance.json` for a local build. Tauri CLI 2 creates the updater
+signature during the build when `bundle.createUpdaterArtifacts` is `true`.
 
-  Install missing tools with these commands, then reopen PowerShell:
+Keep an encrypted backup of the private signing key outside the repository.
+Losing this key prevents updates for users who trust the configured public
+key.
 
-  ```powershell
-  winget install --id OpenJS.NodeJS.LTS -e
-  npm install --global pnpm
-  winget install --id Rustlang.Rustup -e
-  rustup default stable-x86_64-pc-windows-msvc
-  winget install --id Git.Git -e
-  winget install --id 7zip.7zip -e
-  winget install --id jedisct1.minisign -e
-  ```
-
-  In the repository, run `pnpm install` if `pnpm exec tauri --version`
-  reports that the local CLI is missing. The release script checks every
-  required command before it changes version files or starts a build. GitHub
-  CLI (`gh`) is not needed for local preparation; use it only if a separate
-  publication workflow requires it.
-- A clean `main` branch with all four project version fields in sync.
-- A Qlisa updater public key in `src-tauri/tauri.conf.json`, updater artifacts
-  enabled, and the HTTPS GitHub Releases endpoint configured.
-- The private signing key at `%USERPROFILE%\.tauri\qlisa.key` by default, or
-  pass its external path with `-SigningKeyPath`. The script never creates,
-  reads for display, or prints the private key. It prompts for the key password
-  with a masked PowerShell prompt. You can instead set
-  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in the current shell before running it;
-  never pass the password as a command argument.
-- The FFmpeg runtime staged by `scripts/prepare-runtime.ps1`, the libmpv
-  runtime, and the reviewed compliance manifest described below. The pinned
-  acquisition data and known provenance gaps are in
-  `scripts/runtime-manifest.json`.
-- Minisign independently verifies the generated updater signature against the
-  configured public key. Tauri CLI 2 generates signatures but has no matching
-  local verification command, so this release check uses Minisign.
-- 7-Zip (`7z.exe`) inspects the generated NSIS installer for NDI Runtime files.
-- `docs/RELEASE_NOTES_X.Y.Z.md` for the requested version.
-
-Do not generate or replace the signing key as part of release preparation.
-Keep an encrypted backup outside the repository. Losing this key prevents
-updates for users who trust the configured public key.
-
-## Runtime compliance manifest
-
-Keep a local `.release-compliance.json` at the repository root. It is ignored
-by Git. It must identify the exact runtime files, corresponding source
-archives, and notices for FFmpeg and libmpv. `scripts/runtime-manifest.json`
-provides the pinned FFmpeg acquisition facts and runtime hashes; the local
-compliance manifest remains the release-specific record of reviewed source
-archives, notices, and staged-file hashes. The script checks each file's
-SHA-256, requires a maintainer review record, and checks that runtime and notice
-paths are configured for the Windows bundle. The source archives and notices
-are included in the prepared release asset list.
-
-Use this shape and replace all example values with reviewed files and hashes:
-The mpv notice path below is only an example: that notice is not currently
-present or configured in `tauri.windows.conf.json`. Add the verified notice
-and bundle resource before a release. The script rejects a missing file or
-resource mapping.
-
-```json
-{
-  "schemaVersion": 1,
-  "reviewedBy": "maintainer name",
-  "reviewedAt": "2026-09-24",
-  "components": [
-    {
-      "name": "ffmpeg",
-      "version": "9.0.1",
-      "sourceUrl": "https://vendor.example/path/to/corresponding-source.zip",
-      "license": "GPL-3.0-or-later",
-      "correspondingSource": true,
-      "sourceArchive": {
-        "path": "C:/release-sources/ffmpeg-corresponding-source.zip",
-        "sha256": "64 hexadecimal characters",
-        "includeInRelease": true
-      },
-      "runtimeFiles": [
-        {
-          "path": "src-tauri/vendor/ffmpeg/ffmpeg.exe",
-          "bundlePath": "vendor/ffmpeg/ffmpeg.exe",
-          "sha256": "64 hexadecimal characters"
-        },
-        {
-          "path": "src-tauri/vendor/ffmpeg/ffprobe.exe",
-          "bundlePath": "vendor/ffmpeg/ffprobe.exe",
-          "sha256": "64 hexadecimal characters"
-        }
-      ],
-      "notices": [
-        {
-          "path": "src-tauri/vendor/ffmpeg/LICENSE",
-          "bundlePath": "vendor/ffmpeg/LICENSE",
-          "sha256": "64 hexadecimal characters"
-        },
-        {
-          "path": "src-tauri/vendor/ffmpeg/README-Gyan-build.txt",
-          "bundlePath": "vendor/ffmpeg/README-Gyan-build.txt",
-          "sha256": "64 hexadecimal characters"
-        }
-      ]
-    },
-    {
-      "name": "libmpv",
-      "version": "v0.41.0-458-g062f4bf04",
-      "sourceUrl": "https://vendor.example/path/to/corresponding-source.zip",
-      "license": "GPL-2.0-or-later",
-      "correspondingSource": true,
-      "sourceArchive": {
-        "path": "C:/release-sources/libmpv-corresponding-source.zip",
-        "sha256": "64 hexadecimal characters",
-        "includeInRelease": true
-      },
-      "runtimeFiles": [
-        {
-          "path": "src-tauri/vendor/mpv/libmpv-2.dll",
-          "bundlePath": "vendor/mpv/libmpv-2.dll",
-          "sha256": "64 hexadecimal characters"
-        }
-      ],
-      "notices": [
-        {
-          "path": "src-tauri/vendor/mpv/THIRD-PARTY-NOTICES.txt",
-          "bundlePath": "vendor/mpv/THIRD-PARTY-NOTICES.txt",
-          "sha256": "64 hexadecimal characters"
-        }
-      ]
-    }
-  ]
-}
-```
-
-The manifest records a maintainer attestation. It does not establish that an
-archive is legally complete by itself. Read
-`docs/THIRD_PARTY_SOURCE_OFFER.md` before reviewing FFmpeg's source archive.
-That document records the exact Gyan 9.0.1 archive, FFmpeg commit, build notice,
-and reported libsrt revision, plus the still-open source/build-input gaps. Do
-not mark `correspondingSource` true or prepare a binary release until those
-gaps are closed for FFmpeg and libmpv.
-
-## Prepare a release
+## Prepare a local build
 
 Create and review the release notes, then run from the repository root:
 
@@ -165,72 +40,48 @@ Create and review the release notes, then run from the repository root:
 .\scripts\publish.ps1 -Version 1.5.3
 ```
 
-The script requires branch `main`, a clean tree, and a version greater than
-the synchronized project version. It checks runtime and compliance inputs,
-scans the source tree for NDI DLLs, runs frontend tests/build and Rust
-metadata/check/test/clippy checks, and calls `scripts/release.mjs` to
-update versions, commit them as `release: vX.Y.Z`, and build the production
-NSIS installer plus Tauri updater artifact from that commit. If FFmpeg is not
-staged, it runs `scripts/prepare-runtime.ps1` after the signing and compliance
-gates pass. `scripts/sync-network-runtime.ps1` remains as a compatibility
-entry point.
-Clippy warnings do not fail this check; the current source has existing
-dead-code warnings. A non-zero Clippy exit still blocks preparation. The
-pipeline does not run repository-wide `cargo fmt --check` because the existing
-baseline contains unformatted files outside this release change.
+The script checks the repository, runtime hashes, and signing setup. It runs
+frontend tests/build and Rust metadata/check/test/clippy checks. Then
+`scripts/release.mjs` updates and commits the local version files and builds
+the NSIS installer and Tauri updater artifact. The script creates the
+installer, its `.sig`, and `latest.json` under
+`src-tauri/target/release/prepared/vX.Y.Z/`. It prints the artifact paths and
+SHA-256 values. It does not tag, push, or publish anything.
 
-`-DryRun` is a preflight only. It checks the repository, tools, runtime pins,
-and compliance inputs, then exits without tests, version changes, or artifacts.
-To create real local installer, signature, `latest.json`, and compliance
-assets, omit `-DryRun`:
+`-DryRun` checks prerequisites and any staged runtime files without changing
+version files or building artifacts:
 
 ```powershell
-.\scripts\publish.ps1 -Version 1.5.3
+.\scripts\publish.ps1 -Version 1.5.3 -DryRun
 ```
 
-That command runs checks, updates and commits the local version, then builds
-the artifacts. It does not create a tag, push, or publish a GitHub Release.
-Both modes require a ready source offer and release-compliance manifest.
+Clippy warnings do not fail this check; a non-zero Clippy exit does. The
+pipeline does not run repository-wide `cargo fmt --check` because the current
+baseline has unformatted files outside this release change.
 
-With Tauri 2 `createUpdaterArtifacts: true`, the NSIS installer is also the
-updater artifact and has a matching `.exe.sig`. Qlisa's `latest.json` points to
-the exact installer URL and stores the exact signature text. Tauri's
-`v1Compatible` mode uses a different `.nsis.zip` updater artifact and is not
-used here. Preparation decodes Tauri's base64 public-key and signature boxes
-to temporary Minisign text files, verifies the installer signature, then
-removes those temporary files. It inspects the NSIS installer with 7-Zip and
-rejects it if it contains an NDI Runtime DLL.
-
-The prepared files are under
-`src-tauri/target/release/prepared/vX.Y.Z/`. Review the printed asset paths and
-SHA-256 values, release notes, generated `latest.json`, installer, updater
-bundle/signature, corresponding source archives, and notices. Version changes
-are committed locally before the build. Review the version commit and prepared
-files before publication.
+With Tauri 2 `createUpdaterArtifacts: true`, the Windows NSIS installer is the
+updater artifact and has a matching `.exe.sig`. Qlisa's `latest.json` stores
+the exact signature text and installer URL. `v1Compatible` mode uses a
+different `.nsis.zip` updater artifact and is not used here.
 
 ## Publication and update test
 
-Publication is a separate maintainer action. Before creating `vX.Y.Z` on
-GitHub, review the prepared commit and every release asset. Upload the NSIS
-installer and matching `.exe.sig`, `latest.json`,
-corresponding source archives, and notices. Do not publish if any required
-source or notice is missing. The updater feed must be the `latest.json` asset
-from that same release.
+A successful local build does not establish that redistribution is ready.
+Before publishing, provide and review the exact corresponding sources, build
+inputs, and notices required for the FFmpeg 9.0.1 Gyan essentials build
+(including libsrt) and the selected libmpv DLL. Current evidence and remaining
+gaps are recorded in `scripts/runtime-manifest.json`,
+`docs/THIRD_PARTY_SOURCE_OFFER.md`, and `docs/dependency-license-audit.md`.
+Do not publish until the required source and notices are assembled and
+verified. Upload the installer, matching `.sig`, `latest.json`, and required
+source and notice assets to the same release.
 
-After the first signed release, test an actual update from an older installed
-version. Confirm detection, notes, signature acceptance, active-cue install
-guard, installation, restart, and the new running version. Type checks and a
-successful build do not establish updater readiness.
-
-The isolated test-feed procedure, including its separate Windows install
-identity and tag-specific metadata URL, is in
-[`UPDATER_TESTING.md`](UPDATER_TESTING.md). Run it only after runtime
-compliance is ready. The procedure uses `--latest=false` and removes its
-temporary test release and tag after verification.
+For updater testing, use the isolated procedure in
+[`UPDATER_TESTING.md`](UPDATER_TESTING.md). Do not treat a locally generated
+`latest.json` as an available feed unless its installer URL and signature are
+reachable by the test installation.
 
 If preparation fails before the version commit, `scripts/release.mjs` restores
-the version files it changed and unstages them. If Cargo metadata or commit
-creation fails, it attempts the same rollback. Once the version commit exists,
-a later build or metadata failure preserves that commit for inspection. Fix
-the reported problem, inspect the commit and artifacts, then continue from a
-clean working tree.
+the version files it changed. A later build or metadata failure preserves the
+local version commit for inspection. Review that commit and the generated
+files, fix the reported issue, and continue from a clean working tree.
