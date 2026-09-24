@@ -38,3 +38,9 @@ source offer for the statically linked build. Do not label it GPL/MPL compliant
 or provide a source archive made only from FFmpeg and SRT trees. Ask Gyan for
 the exact build workflow, patches, and source inputs for this archive; then
 preserve those materials with the release.
+
+## shinchiro 20260923 build candidate
+
+The `shinchiro/mpv-winbuild-cmake` release tagged [`20260923`](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260923) is a candidate for replacing the Gyan and separately sourced libmpv binaries. Its build-system commit is [`05a60b3cfd04e3e3b89918f4a27f3dde2935dff2`](https://github.com/shinchiro/mpv-winbuild-cmake/tree/05a60b3cfd04e3e3b89918f4a27f3dde2935dff2). The release identifies FFmpeg commit [`7d14defcc1b56a53f35dc78072844daaf50d58ea`](https://github.com/FFmpeg/FFmpeg/commit/7d14defcc1b56a53f35dc78072844daaf50d58ea) and mpv commit [`6fd80b2003873ef2bed09e78374549687a143236`](https://github.com/mpv-player/mpv/commit/6fd80b2003873ef2bed09e78374549687a143236). The release assets include `ffmpeg.exe` and a libmpv development archive, but no `ffprobe.exe`.
+
+At that build-system commit, `packages/ffmpeg.cmake` passes `--disable-ffprobe`; obtaining `ffprobe.exe` requires changing that build configuration and rebuilding FFmpeg. The FFmpeg, mpv, and libsrt ExternalProject definitions do not pin `GIT_TAG`, so the build-system commit alone does not fix their dependency revisions. This candidate is **not** a replacement for the staged runtime and does not close the corresponding-source or compliance gap. The exact build inputs, dependency commits, configuration, applicable notices, and a matching source archive still need verification before any runtime switch.
