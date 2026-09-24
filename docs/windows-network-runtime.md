@@ -27,7 +27,7 @@ The FFmpeg and libsrt source obligations apply when redistributing the installer
 
 The Windows bundle maps local FFmpeg files through `src-tauri/tauri.windows.conf.json`. Release packaging expects the local FFmpeg staging files and fails if they are missing. The NDI runtime is dynamically discovered from the user's installation and is not a build input. Development of NDI paths requires a separately installed NDI Runtime; compilation does not require an NDI DLL import library.
 
-The local Windows `libmpv-2.dll` is a separate visual playback prerequisite. It reports the enabled `gpl` feature and file version `v0.41.0-458-g062f4bf04` (source commit `062f4bf04`). Treat this binary as GPL; the full build configuration and dependency sources still require verification. See the third-party notices before making a binary release.
+The local Windows `libmpv-2.dll` is a separate visual playback prerequisite. The staged DLL is from the generic x86_64, non-LGPL asset in [zhongfly/mpv-winbuild release 2026-09-23-f9850ee727](https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-09-23-f9850ee727), built from mpv commit [`f9850ee727ed54a4feb042a5c0802768f141810b`](https://github.com/mpv-player/mpv/commit/f9850ee727ed54a4feb042a5c0802768f141810b). Its DLL SHA-256 is `861ac44349277bdb17f2a2d229111edaa4438e0a3eca88fb49b7b684c66828e5`. Qlisa smoke checks passed for WASAPI audio, GPU video, seek, and two simultaneous video contexts. The combined license and corresponding source for its dependencies still require verification before binary distribution.
 
 ## Operational limits
 

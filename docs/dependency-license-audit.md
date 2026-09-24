@@ -37,9 +37,7 @@ This is a static FFmpeg build with many external libraries. The FFmpeg source co
 
 ### libmpv
 
-The local `libmpv-2.dll` reports `v0.41.0-458-g062f4bf04` and appears associated with the shinchiro Windows build project, but its exact mapping to a shinchiro release asset/build is unverified. The version string points to upstream mpv commit [`062f4bf04`](https://github.com/mpv-player/mpv/commit/062f4bf04); the embedded feature list reports `gpl`. mpv identifies its default license as GPL-2.0-or-later and documents a distinct LGPL mode that excludes GPL-only files. The upstream mpv source is available at [mpv-player/mpv](https://github.com/mpv-player/mpv); the Windows build project and its build scripts are [shinchiro/mpv-winbuild-cmake](https://github.com/shinchiro/mpv-winbuild-cmake).
-
-The exact dependency revisions, local patches, full build configuration, and corresponding source package for this DLL have not yet been verified. The mpv commit alone is not sufficient to identify source for all statically linked dependencies. Collect that source and all applicable notices/licenses for the actual DLL before shipping it. **Binary release blocker.**
+The locally staged `libmpv-2.dll` is from the generic x86_64, non-LGPL asset in [zhongfly/mpv-winbuild release 2026-09-23-f9850ee727](https://github.com/zhongfly/mpv-winbuild/releases/tag/2026-09-23-f9850ee727). The release identifies mpv source commit [`f9850ee727ed54a4feb042a5c0802768f141810b`](https://github.com/mpv-player/mpv/commit/f9850ee727ed54a4feb042a5c0802768f141810b), and the associated [clang GitHub Actions run](https://github.com/zhongfly/mpv-winbuild/actions/runs/35864255638) succeeded. The DLL passed Qlisa ABI and playback smoke checks. Treat the binary as GPL-enabled. The exact combined license and notices for statically linked dependencies remain unverified: the workflow produces a source-revision summary, but its artifact requires GitHub authentication, and the downloaded release archive does not include corresponding dependency sources. **Binary release blocker until the exact dependency source and notices are available.**
 
 ## Decision
 
