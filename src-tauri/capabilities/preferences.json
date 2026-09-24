@@ -10,6 +10,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-hide",
     "core:window:allow-show",
+    "process:allow-restart",
     "dialog:allow-open"
   ]
 }
