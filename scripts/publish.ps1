@@ -6,7 +6,8 @@ Prepare a signed Qlisa Windows release locally.
 Checks source and release prerequisites, runs frontend and Rust checks, updates
 the version through scripts/release.mjs, and creates local NSIS/updater
 artifacts for private testing. It never tags, pushes, or publishes. Missing
-signing keys or pinned runtime files stop the process before a build starts.
+signing keys stop the process before a build starts. Media binaries are fetched
+by Qlisa after installation and are not release build inputs.
 #>
 [CmdletBinding()]
 param(
@@ -68,26 +69,19 @@ function Get-RuntimeManifest {
     $ffmpeg = @($runtime.components | Where-Object { $_.id -eq 'ffmpeg-btbn-gpl-n9.0' })
     $mpv = @($runtime.components | Where-Object { $_.id -eq 'libmpv' })
     if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { Fail 'Runtime manifest must contain exactly one pinned FFmpeg and one libmpv record.' }
-    if ($ffmpeg[0].runtimeFiles -isnot [array] -or $ffmpeg[0].runtimeFiles.Count -ne 2 -or
-        $ffmpeg[0].notices -isnot [array] -or $ffmpeg[0].notices.Count -lt 2) { Fail 'Pinned FFmpeg runtime files and notices are incomplete.' }
-    foreach ($record in @($ffmpeg[0].runtimeFiles) + @($ffmpeg[0].notices) + @($mpv[0])) {
-        if ([string]$record.path -eq '' -or [string]$record.sha256 -notmatch '^[a-fA-F0-9]{64}$') { Fail 'Runtime manifest contains a missing path or invalid SHA-256 pin.' }
-    }
+    if ([string]$ffmpeg[0].archive.url -notmatch '^https://github\.com/BtbN/FFmpeg-Builds/releases/download/' -or
+        [string]$ffmpeg[0].archive.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
+        [string]$mpv[0].build.archiveUrl -notmatch '^https://github\.com/shinchiro/mpv-winbuild-cmake/releases/download/' -or
+        [string]$mpv[0].build.archiveSha256 -notmatch '^[a-fA-F0-9]{64}$') { Fail 'Runtime manifest upstream URLs or archive SHA-256 pins are incomplete.' }
     return [pscustomobject]@{ Ffmpeg = $ffmpeg[0]; Mpv = $mpv[0] }
 }
-function Assert-PinnedRuntimeFiles([object]$Runtime, [switch]$AllowMissing) {
-    $bundleConfig = Get-Content -Raw (Join-Path $script:Root 'src-tauri/tauri.windows.conf.json')
-    $records = @($Runtime.Ffmpeg.runtimeFiles) + @($Runtime.Ffmpeg.notices) + @($Runtime.Mpv)
-    foreach ($record in $records) {
-        $file = Resolve-RepoPath ([string]$record.path)
-        $bundlePath = ([string]$record.path).Replace('src-tauri/', '')
-        if ($bundleConfig -notmatch [regex]::Escape($bundlePath)) { Fail "Windows bundle configuration does not include pinned runtime or notice '$bundlePath'." }
-        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
-            if ($AllowMissing) { continue }
-            Fail "Pinned runtime or notice is missing: $file"
-        }
-        if ((Get-Sha256 $file) -ne ([string]$record.sha256).ToLowerInvariant()) { Fail "Pinned runtime or notice SHA-256 mismatch: $file" }
-    }
+function Assert-BundleConfiguration {
+    $windows = Get-Content -Raw (Join-Path $script:Root 'src-tauri/tauri.windows.conf.json') | ConvertFrom-Json
+    $config = Get-Content -Raw (Join-Path $script:Root 'src-tauri/tauri.conf.json') | ConvertFrom-Json
+    $resourceText = $windows.bundle.resources | ConvertTo-Json -Depth 10 -Compress
+    if ($resourceText -match '(?i)ffmpeg\.exe|ffprobe\.exe|libmpv-2\.dll') { Fail 'Windows bundle resources must not contain FFmpeg, ffprobe, or libmpv binaries.' }
+    if ($windows.bundle.windows.nsis.installMode -ne 'perMachine') { Fail 'NSIS bundle.windows.nsis.installMode must be perMachine.' }
+    if ($config.plugins.updater.windows.installMode -ne 'passive') { Fail 'Updater installMode must remain passive, separately from NSIS installMode.' }
 }
 function Require-Command([string]$Name, [string]$InstallHint) {
     $command = Get-Command $Name -ErrorAction SilentlyContinue
@@ -105,6 +99,19 @@ function Assert-NoNdiInTree {
         foreach ($child in Get-ChildItem -LiteralPath $directory -Directory -Force -ErrorAction SilentlyContinue) {
             if ($skip -notcontains $child.Name) { $stack.Push($child.FullName) }
         }
+    }
+}
+function Assert-NoMediaBinariesInInstaller([string]$Path) {
+    $archiver = Get-Command 7z.exe -ErrorAction SilentlyContinue
+    if ($null -eq $archiver) { $archiver = Get-Command 7zz.exe -ErrorAction SilentlyContinue }
+    if ($null -eq $archiver) {
+        Write-Warning '7-Zip is unavailable; installer payload could not be listed. Tauri resource configuration was checked.'
+        return
+    }
+    $listing = & $archiver.Source l -slt $Path 2>&1
+    if ($LASTEXITCODE -ne 0) { Fail "Could not inspect installer contents with 7-Zip: $Path" }
+    if (($listing -join "`n") -match '(?im)^Path = .*?(?:ffmpeg\.exe|ffprobe\.exe|libmpv-2\.dll)\s*$') {
+        Fail 'Final NSIS installer contains a media runtime binary.'
     }
 }
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { Fail "Version must be strict three-part SemVer, for example 1.5.3; got '$Version'." }
@@ -139,6 +146,7 @@ $repoPrefix = $script:Root.TrimEnd('\') + '\'
 if ($privateKey.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { Fail 'Signing key must be outside the repository.' }
 if (-not (Test-Path -LiteralPath $privateKey -PathType Leaf)) { Fail "Tauri signing key is missing: $privateKey. The script will not create or print a key." }
 $runtime = Get-RuntimeManifest
+Assert-BundleConfiguration
 if (-not (Test-Path -LiteralPath (Join-Path $script:Root 'node_modules/.bin/tauri.cmd') -PathType Leaf)) {
     Fail 'Project-local Tauri CLI is missing. Run `pnpm install --frozen-lockfile` from the repository root, then reopen PowerShell.'
 }
@@ -153,19 +161,9 @@ Write-Host "Tag to use after review: $tag"
 Write-Host "Release notes: $releaseNotes"
 Write-Host 'Prerequisites: node, pnpm, cargo, rustc, local Tauri CLI, Git, signing key, and runtime pins are valid.'
 if ($DryRun) {
-    Assert-PinnedRuntimeFiles $runtime -AllowMissing
-    Write-Host 'PREFLIGHT ONLY: no version files changed and no installer was built. Omit -DryRun to prepare real local artifacts; that command still does not tag, push, or publish.'
+    Write-Host 'PREFLIGHT ONLY: no version files changed and no installer was built. Media runtime binaries are not required for release packaging.'
     exit 0
 }
-
-# Staging FFmpeg is allowed only after all secret/compliance gates pass.
-$ffmpegExe = Join-Path $script:Root 'src-tauri/vendor/ffmpeg/ffmpeg.exe'
-if (-not (Test-Path -LiteralPath $ffmpegExe -PathType Leaf)) {
-    Invoke-Checked 'Prepare pinned FFmpeg runtime' (Join-Path $script:Root 'scripts/prepare-runtime.ps1') @()
-}
-$mpv = Join-Path $script:Root 'src-tauri/vendor/mpv/libmpv-2.dll'
-if (-not (Test-Path -LiteralPath $mpv -PathType Leaf)) { Fail 'libmpv runtime is missing: src-tauri/vendor/mpv/libmpv-2.dll.' }
-Assert-PinnedRuntimeFiles $runtime
 
 Invoke-Checked 'Frontend tests' $pnpm.Source @('test')
 Invoke-Checked 'Frontend production build' $pnpm.Source @('build')
@@ -216,6 +214,7 @@ if ($updateBundlePath -cne $installerPath -or -not $updateBundlePath.ToLowerInva
     Fail 'Release manifest does not identify the NSIS installer and its matching Tauri updater signature.'
 }
 $installer = Get-Item -LiteralPath $installerPath
+Assert-NoMediaBinariesInInstaller $installerPath
 
 $signature = Get-Content -Raw -LiteralPath $signaturePath
 if ([string]::IsNullOrWhiteSpace($signature) -or $signature -cne $signature.Trim()) { Fail 'Generated updater signature is empty or has surrounding whitespace; expected exact Tauri .sig content.' }

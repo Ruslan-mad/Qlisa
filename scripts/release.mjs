@@ -37,14 +37,6 @@ const FILES = {
   cargoLock: join(ROOT, "src-tauri", "Cargo.lock"),
 };
 const VERSION_PATHS = Object.values(FILES).map((path) => path.slice(ROOT.length + 1));
-const NETWORK_RUNTIME_FILES = [
-  "src-tauri/vendor/mpv/libmpv-2.dll",
-  "src-tauri/vendor/ffmpeg/ffmpeg.exe",
-  "src-tauri/vendor/ffmpeg/ffprobe.exe",
-  "src-tauri/vendor/ffmpeg/LICENSE",
-  "src-tauri/vendor/ffmpeg/README-BtbN-build.txt",
-];
-
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd ?? ROOT,
@@ -111,19 +103,33 @@ function ensureWindowsAsioPrerequisites() {
 
   const sdkDirectory = join(ROOT, "vendor", "asiosdk");
   if (!existsSync(sdkDirectory)) throw new Error(`ASIO SDK is missing: ${sdkDirectory}`);
-
-  for (const relativePath of NETWORK_RUNTIME_FILES) {
-    const path = join(ROOT, relativePath);
-    if (!existsSync(path) || statSync(path).size === 0) {
-      const preparation = relativePath.includes("/ffmpeg/")
-        ? " Run scripts/prepare-runtime.ps1 to download the pinned BtbN archive, verify its SHA-256, and extract FFmpeg/ffprobe."
-        : "";
-      throw new Error(`Required Windows release runtime file is missing or empty: ${path}.${preparation}`);
-    }
+  const windowsConfig = JSON.parse(readFileSync(join(ROOT, "src-tauri", "tauri.windows.conf.json"), "utf8"));
+  const bundleConfig = JSON.parse(readFileSync(join(ROOT, "src-tauri", "tauri.conf.json"), "utf8"));
+  const serializedResources = JSON.stringify(windowsConfig.bundle?.resources ?? {}).toLowerCase();
+  if (["ffmpeg.exe", "ffprobe.exe", "libmpv-2.dll"].some((name) => serializedResources.includes(name))) {
+    throw new Error("Windows Tauri bundle resources must not include FFmpeg, ffprobe, or libmpv binaries.");
+  }
+  if (windowsConfig.bundle?.windows?.nsis?.installMode !== "perMachine") {
+    throw new Error("Windows NSIS bundle must set bundle.windows.nsis.installMode to perMachine.");
+  }
+  if (bundleConfig.plugins?.updater?.windows?.installMode !== "passive") {
+    throw new Error("Tauri updater installMode must remain passive; this is separate from the NSIS install mode.");
   }
   const ndiRuntime = join(ROOT, "src-tauri", "vendor", "ndi", "Processing.NDI.Lib.x64.dll");
   if (existsSync(ndiRuntime)) {
     throw new Error(`NDI Runtime DLL must not be bundled with Qlisa: ${ndiRuntime}. Remove this stale local copy; users install NDI Runtime separately.`);
+  }
+}
+
+function removeStaleTargetMediaFiles() {
+  const paths = [
+    join(ROOT, "src-tauri", "target", "release", "libmpv-2.dll"),
+    join(ROOT, "src-tauri", "target", "release", "resources", "libmpv-2.dll"),
+    join(ROOT, "src-tauri", "target", "release", "resources", "ffmpeg", "ffmpeg.exe"),
+    join(ROOT, "src-tauri", "target", "release", "resources", "ffmpeg", "ffprobe.exe"),
+  ];
+  for (const path of paths) {
+    if (existsSync(path)) unlinkSync(path);
   }
 }
 
@@ -314,6 +320,7 @@ function release(releaseOptions) {
     const beforeUpdater = updaterArtifactSnapshot(releaseOptions.bundle);
     const buildArgs = buildCommandArgs(releaseOptions);
 
+    removeStaleTargetMediaFiles();
     console.log(`Building release from commit ${commit} with ASIO support...`);
     run(process.env.QLISA_PNPM_EXECUTABLE ?? "pnpm.cmd", buildArgs, { cwd: ROOT, shell: true, inherit: true });
 

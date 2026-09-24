@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "purpose": "Pinned Windows runtime acquisition metadata. This file records provenance evidence; it is not a compliance attestation.",
+  "purpose": "Pinned Windows runtime configuration and acquisition provenance. The application embeds this manifest to locate and verify runtime downloads; this file also records provenance evidence and is not a compliance attestation.",
   "components": [
     {
       "id": "ffmpeg-btbn-gpl-n9.0",
@@ -19,6 +19,7 @@
       },
       "license": {
         "identifier": "GPL-3.0-or-later",
+        "url": "https://www.gnu.org/licenses/gpl-3.0.html",
         "evidence": "The archive contains LICENSE.txt; ffmpeg.exe -version reports --enable-gpl --enable-version3."
       },
       "buildReference": {
@@ -32,12 +33,14 @@
       "runtimeFiles": [
         {
           "fileName": "ffmpeg.exe",
+          "archiveMember": "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0/bin/ffmpeg.exe",
           "path": "src-tauri/vendor/ffmpeg/ffmpeg.exe",
           "sha256": "288ef71027b17e4d83d5d95777f14495fc59cc53e7b4c35637d0d68269c6d151",
           "versionText": "ffmpeg version n9.0.2-3-ga5923073bf-20260923"
         },
         {
           "fileName": "ffprobe.exe",
+          "archiveMember": "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0/bin/ffprobe.exe",
           "path": "src-tauri/vendor/ffmpeg/ffprobe.exe",
           "sha256": "8603cd025c0fa317091ea5e3f6b3a4181bf21c71a2dc30ac049789459265db7a",
           "versionText": "ffprobe version n9.0.2-3-ga5923073bf-20260923"
@@ -46,6 +49,7 @@
       "notices": [
         {
           "archivePath": "LICENSE.txt",
+          "archiveMember": "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0/LICENSE.txt",
           "path": "src-tauri/vendor/ffmpeg/LICENSE",
           "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
         },
@@ -90,6 +94,7 @@
         "archiveUrl": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260923/mpv-dev-x86_64-20260923-git-6fd80b2003.7z",
         "archiveSizeBytes": 31476420,
         "archiveSha256": "372f29c292d0c8b4ce916225739e5872e35b8e11f3f4590c285baed8ba551100",
+        "extractMember": "libmpv-2.dll",
         "buildRun": "https://github.com/shinchiro/mpv-winbuild-cmake/actions/runs/35800030374",
         "buildRepositoryCommit": "05a60b3cfd04e3e3b89918f4a27f3dde2935dff2",
         "workflowAtBuildCommit": "https://github.com/shinchiro/mpv-winbuild-cmake/blob/05a60b3cfd04e3e3b89918f4a27f3dde2935dff2/.github/workflows/mpv_clang.yml",
