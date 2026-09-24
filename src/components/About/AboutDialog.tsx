@@ -44,6 +44,9 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
         <div style={{ fontSize: 12, color: "var(--wc-text-secondary)", marginBottom: 20 }}>
           {t("aboutUi.description")}
         </div>
+        <div style={{ fontSize: 11, color: "var(--wc-text-muted)", marginTop: -12, marginBottom: 18, lineHeight: 1.45 }}>
+          {t("aboutUi.mediaRuntime")}
+        </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "var(--wc-text-secondary)", marginBottom: 20 }}>
           <Row label={t("aboutUi.builtWith")} value="Tauri v2 · Rust · React · TypeScript" />
           <Row label={t("aboutUi.audio")} value="cpal · symphonia" />

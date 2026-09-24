@@ -49,12 +49,13 @@ import { DragNumber } from "../common/DragNumber";
 import { useLocale } from "../../i18n";
 import { ColorPicker } from "../Inspector/ColorPicker";
 import { mergeOutputMonitorAssignments } from "./preferencesModel";
+import { MediaRuntimeSection } from "./MediaRuntimeSection";
 
 // ---------------------------------------------------------------------------
 // Sidebar categories
 // ---------------------------------------------------------------------------
 
-type Category = "audio" | "general" | "network" | "networkOutput" | "display" | "personalization";
+type Category = "audio" | "general" | "network" | "networkOutput" | "display" | "personalization" | "mediaRuntime";
 
 const CATEGORIES: { id: Category; icon: string }[] = [
   { id: "audio",           icon: "🔊" },
@@ -63,6 +64,7 @@ const CATEGORIES: { id: Category; icon: string }[] = [
   { id: "networkOutput",   icon: "📡" },
   { id: "display",         icon: "🖥" },
   { id: "personalization", icon: "🎨" },
+  { id: "mediaRuntime", icon: "🎞" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1947,7 +1949,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
                 }}
               >
                 <span style={{ fontSize: 14 }}>{cat.icon}</span>
-                {cat.id === "audio" ? t("preferences.audio") : cat.id === "general" ? t("preferences.defaults") : cat.id === "network" ? t("preferencesUi.network") : cat.id === "networkOutput" ? t("networkOutputUi.title") : cat.id === "display" ? t("preferencesUi.display") : t("preferencesUi.personalization")}
+                {cat.id === "audio" ? t("preferences.audio") : cat.id === "general" ? t("preferences.defaults") : cat.id === "network" ? t("preferencesUi.network") : cat.id === "networkOutput" ? t("networkOutputUi.title") : cat.id === "display" ? t("preferencesUi.display") : cat.id === "personalization" ? t("preferencesUi.personalization") : t("mediaRuntimeUi.settings")}
               </button>
             ))}
           </div>
@@ -2033,6 +2035,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
                 {category === "networkOutput" && (
                   <NetworkOutputContent outputs={draftOutputs} onOutputsChange={handleDraftOutputsChange} />
                 )}
+                {category === "mediaRuntime" && <MediaRuntimeSection />}
               </>
             )}
           </div>

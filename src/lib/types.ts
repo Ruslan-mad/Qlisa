@@ -2,6 +2,20 @@
 
 export type CueId = string; // UUID as string
 
+export interface MediaRuntimeStatus {
+  ffmpeg: boolean;
+  ffprobe: boolean;
+  libmpv: boolean;
+  ready: boolean;
+  version?: string;
+}
+
+export interface MediaRuntimeProgress {
+  phase: string;
+  percent?: number;
+  message?: string;
+}
+
 export type CueType = "audio" | "memo" | "wait" | "group" | "number" | "fade" | "stop" | "devamp" | "video" | "image" | "osc" | "midi" | "midi_file" | "light" | "mic" | "timecode" | "text" | "camera" | "browser" | "script" | CommandCueType;
 
 /** Cues whose action is performed on *other* cues (QLab's control cues).

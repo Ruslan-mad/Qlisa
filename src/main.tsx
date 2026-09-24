@@ -6,6 +6,7 @@ import { FloatTimerWindow } from "./windows/FloatTimer";
 import { MixerWindow } from "./windows/MixerWindow";
 import { OutputMonitorWindow } from "./windows/OutputMonitorWindow";
 import { DiagnosticsStandalone } from "./components/Diagnostics/DiagnosticsStandalone";
+import { MediaRuntimeBootstrap } from "./components/MediaRuntimeBootstrap";
 
 // Synchronously read window label from Tauri internals — no function call,
 // no async, no crash if the object isn't present (e.g. pure browser dev).
@@ -27,7 +28,7 @@ root.render(
     ) : tauriLabel === "diagnostics" ? (
       <DiagnosticsStandalone />
     ) : (
-      <App />
+      <MediaRuntimeBootstrap><App /></MediaRuntimeBootstrap>
     )}
   </React.StrictMode>
 );
