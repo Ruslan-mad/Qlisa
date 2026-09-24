@@ -12,8 +12,8 @@ These checks used an isolated profile. They do not replace the pending signed pe
 - After ffprobe was removed, the app restored it and kept the already loaded libmpv DLL unchanged.
 - Qlisa's media conversion reached 100% and created the converted output file.
 - A 32-second video cue ran on the Main output. Dragging the Time slider from about 24.8 seconds to about 4.7 seconds changed playback position, confirming seek.
-- The BtbN FFmpeg pair passed a CLI SRT loopback check: the receiver decoded 149 frames. SRT playback through Qlisa remains untested.
-- Physical audio output and multiple Qlisa outputs remain untested.
+- An Audio cue loaded `tone.wav`, started, and completed in Qlisa. Physical sound was not independently heard.
+- A video cue was assigned to Main and the isolated Local SRT Smoke output at `127.0.0.1:19077`. The loopback receiver received MPEG-TS with H.264/AAC and decoded sampled frames from the actual color-bar cue; the receiver exited successfully. This also exercised simultaneous Main and SRT destinations.
 - A clean per-machine installer run, uninstall, and signed updater end-to-end run remain pending.
 
 ## Build the signed baseline and update
