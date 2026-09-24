@@ -120,16 +120,18 @@ pub enum CueState {
     Completed,
 }
 
-/// Determines what happens after the Post-Wait expires.
+/// Determines when the next cue in a sequence starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ContinueMode {
     /// Wait for manual GO before the next cue fires.
     #[default]
     DoNotContinue,
-    /// Automatically GO the next cue after this cue's Post-Wait expires.
+    /// Start the next cue after this cue's Post-Wait expires. The Post-Wait
+    /// begins when this cue starts, so the cues can overlap.
     AutoContinue,
-    /// Automatically GO the next cue as soon as this cue's action starts (after Pre-Wait).
+    /// Start the next cue after this cue's action completes, then apply its
+    /// Post-Wait before starting the next cue.
     AutoFollow,
 }
 

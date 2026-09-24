@@ -132,7 +132,7 @@ fn looping_playlist_never_completes_and_always_plays() {
         "looping playlist should still be playing after wrapping");
 }
 
-/// A short WaitCue set to Auto-Follow (chains to the next child at action start).
+/// A short WaitCue set to Auto-Follow (the next child starts after completion).
 fn af_wait(ms: u64) -> Box<dyn Cue> {
     WaitCueFactory
         .from_json(serde_json::json!({
@@ -144,24 +144,23 @@ fn af_wait(ms: u64) -> Box<dyn Cue> {
 }
 
 #[test]
-fn sequential_group_with_overlapping_auto_follow_children_completes() {
-    // Reproduces the tutorial's sub-section (#8): auto-follow children chain at
-    // start so they overlap; the last (do_not_continue) is the shortest and
-    // finishes first. The group must still reap the longer siblings and complete
-    // — none may linger in Running.
+fn sequential_group_with_auto_follow_children_completes_in_order() {
+    // Auto-Follow waits for each action to complete before starting the next
+    // child. The group must reap each completed child and finish the sequence.
     let (ctx, _rx, _log) = recording_context();
     let mut g = GroupCue::new();
     g.mode = GroupMode::Sequential;
     g.children.push(af_wait(60));
     g.children.push(af_wait(50));
     g.children.push(af_wait(40));
-    g.children.push(short_wait(20)); // last child, do_not_continue, shortest
+    g.children.push(short_wait(20)); // final child; do not auto-advance beyond it
     g.go(&ctx).unwrap();
-    assert_eq!(running_children(&g), 4, "auto-follow chain overlaps all children");
+    assert_eq!(running_children(&g), 1, "only the first Auto-Follow child starts initially");
 
-    let (done, _) = tick_group_until_complete(&mut g, &ctx, Duration::from_millis(700));
-    assert!(done, "sequential group must complete after overlapping children finish");
-    assert_eq!(running_children(&g), 0, "no child left stuck Running (regression #8)");
+    let (done, max_concurrent) = tick_group_until_complete(&mut g, &ctx, Duration::from_millis(700));
+    assert!(done, "sequential group must complete after each Auto-Follow child finishes");
+    assert_eq!(max_concurrent, 1, "Auto-Follow children run in sequence");
+    assert_eq!(running_children(&g), 0, "no child left stuck Running");
 }
 
 #[test]
