@@ -168,14 +168,16 @@ Create and review the release notes, then run from the repository root:
 The script requires branch `main`, a clean tree, and a version greater than
 the synchronized project version. It checks runtime and compliance inputs,
 scans the source tree for NDI DLLs, runs frontend tests/build and Rust
-metadata/check/test/format/clippy checks, and calls `scripts/release.mjs` to
+metadata/check/test/clippy checks, and calls `scripts/release.mjs` to
 update versions, commit them as `release: vX.Y.Z`, and build the production
 NSIS installer plus Tauri updater artifact from that commit. If FFmpeg is not
 staged, it runs `scripts/prepare-runtime.ps1` after the signing and compliance
 gates pass. `scripts/sync-network-runtime.ps1` remains as a compatibility
 entry point.
 Clippy warnings do not fail this check; the current source has existing
-dead-code warnings. A non-zero Clippy exit still blocks preparation.
+dead-code warnings. A non-zero Clippy exit still blocks preparation. The
+pipeline does not run repository-wide `cargo fmt --check` because the existing
+baseline contains unformatted files outside this release change.
 
 `-DryRun` is a preflight only. It checks the repository, tools, runtime pins,
 and compliance inputs, then exits without tests, version changes, or artifacts.

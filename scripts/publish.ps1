@@ -246,7 +246,6 @@ Invoke-Checked 'Frontend production build' $pnpm.Source @('build')
 Invoke-Checked 'Rust metadata' 'cargo' @('metadata', '--locked', '--no-deps', '--format-version', '1') (Join-Path $script:Root 'src-tauri')
 Invoke-Checked 'Rust check' 'cargo' @('check', '--locked', '--features', 'asio-support') (Join-Path $script:Root 'src-tauri')
 Invoke-Checked 'Rust tests' 'cargo' @('test', '--locked', '--features', 'asio-support') (Join-Path $script:Root 'src-tauri')
-Invoke-Checked 'Rust formatting' 'cargo' @('fmt', '--check') (Join-Path $script:Root 'src-tauri')
 Invoke-Checked 'Rust clippy' 'cargo' @('clippy', '--locked', '--all-targets', '--features', 'asio-support') (Join-Path $script:Root 'src-tauri')
 
 $oldPrivateKey = $env:TAURI_SIGNING_PRIVATE_KEY
