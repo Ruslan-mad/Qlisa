@@ -23,10 +23,13 @@ release completes an end-to-end update test.
   with a masked PowerShell prompt. You can instead set
   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in the current shell before running it;
   never pass the password as a command argument.
-- The FFmpeg and libmpv runtime files and the reviewed compliance manifest
-  described below.
-- 7-Zip (`7z.exe`) to inspect both generated NSIS archives for NDI Runtime
-  files, and Minisign to cryptographically verify the Tauri updater signature.
+- The FFmpeg runtime staged by `scripts/prepare-runtime.ps1`, the libmpv
+  runtime, and the reviewed compliance manifest described below. The pinned
+  acquisition data and known provenance gaps are in
+  `scripts/runtime-manifest.json`.
+- 7-Zip (`7z.exe`) to inspect the generated NSIS installer/updater `.exe` for
+  NDI Runtime files, and Minisign to cryptographically verify its Tauri
+  updater signature.
   Both commands must be available in `PATH`.
 - `docs/RELEASE_NOTES_X.Y.Z.md` for the requested version.
 
@@ -38,7 +41,10 @@ updates for users who trust the configured public key.
 
 Keep a local `.release-compliance.json` at the repository root. It is ignored
 by Git. It must identify the exact runtime files, corresponding source
-archives, and notices for FFmpeg and libmpv. The script checks each file's
+archives, and notices for FFmpeg and libmpv. `scripts/runtime-manifest.json`
+provides the pinned FFmpeg acquisition facts and runtime hashes; the local
+compliance manifest remains the release-specific record of reviewed source
+archives, notices, and staged-file hashes. The script checks each file's
 SHA-256, requires a maintainer review record, and checks that runtime and notice
 paths are configured for the Windows bundle. The source archives and notices
 are included in the prepared release asset list.
@@ -122,12 +128,12 @@ resource mapping.
 ```
 
 The manifest records a maintainer attestation. It does not establish that an
-archive is legally complete by itself. Before marking `correspondingSource`
-true, match the source archive, patches, build configuration, and all
-third-party notices to the exact binaries being shipped. The FFmpeg archive
-must cover the documented Gyan build and included libraries, including
-libsrt. The libmpv archive must cover its exact dependency revisions and build
-inputs. Do not prepare a binary release until that work is complete.
+archive is legally complete by itself. Read
+`docs/THIRD_PARTY_SOURCE_OFFER.md` before reviewing FFmpeg's source archive.
+That document records the exact Gyan 9.0.1 archive, FFmpeg commit, build notice,
+and reported libsrt revision, plus the still-open source/build-input gaps. Do
+not mark `correspondingSource` true or prepare a binary release until those
+gaps are closed for FFmpeg and libmpv.
 
 ## Prepare a release
 
@@ -142,8 +148,10 @@ the synchronized project version. It checks runtime and compliance inputs,
 scans the source tree for NDI DLLs, runs frontend tests/build and Rust
 metadata/check/test/format/clippy checks, and calls `scripts/release.mjs` to
 update versions, commit them as `release: vX.Y.Z`, and build the production
-NSIS installer plus Tauri updater artifact from that commit. If FFmpeg is not staged, it runs
-`scripts/sync-network-runtime.ps1` after the signing and compliance gates pass.
+NSIS installer plus Tauri updater artifact from that commit. If FFmpeg is not
+staged, it runs `scripts/prepare-runtime.ps1` after the signing and compliance
+gates pass. `scripts/sync-network-runtime.ps1` remains as a compatibility
+entry point.
 Clippy warnings do not fail this check; the current source has existing
 dead-code warnings. A non-zero Clippy exit still blocks preparation.
 
