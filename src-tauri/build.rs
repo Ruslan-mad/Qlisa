@@ -70,7 +70,7 @@ fn main() {
             println!("cargo:warning=vendor/mpv/libmpv-2.dll not found — video playback will fail at runtime");
         }
 
-        // FFmpeg is generated locally from the pinned archive for Windows
+        // FFmpeg is staged from the pinned BtbN archive for Windows
         // releases. NDI is loaded from the user's installed NDI Runtime and is
         // never copied into the application or installer.
         let stale_ndi_paths = [
@@ -101,7 +101,7 @@ fn main() {
             ("vendor/ffmpeg/ffmpeg.exe", "FFmpeg executable with SRT"),
             ("vendor/ffmpeg/ffprobe.exe", "ffprobe executable"),
             ("vendor/ffmpeg/LICENSE", "FFmpeg GPL licence"),
-            ("vendor/ffmpeg/README-Gyan-build.txt", "FFmpeg build notice"),
+            ("vendor/ffmpeg/README-BtbN-build.txt", "FFmpeg build notice"),
         ] {
             println!("cargo:rerun-if-changed={relative}");
             let path = manifest_dir.join(relative);
@@ -111,7 +111,7 @@ fn main() {
             if length == 0 {
                 let message = format!("{description} is missing or empty at {}", path.display());
                 if std::env::var("PROFILE").as_deref() == Ok("release") {
-                    panic!("{message}; run scripts/sync-network-runtime.ps1 before creating a Windows release");
+                    panic!("{message}; run scripts/prepare-runtime.ps1 before creating a Windows release");
                 }
                 println!("cargo:warning={message}");
             } else {

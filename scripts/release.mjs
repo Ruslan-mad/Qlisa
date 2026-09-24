@@ -42,7 +42,7 @@ const NETWORK_RUNTIME_FILES = [
   "src-tauri/vendor/ffmpeg/ffmpeg.exe",
   "src-tauri/vendor/ffmpeg/ffprobe.exe",
   "src-tauri/vendor/ffmpeg/LICENSE",
-  "src-tauri/vendor/ffmpeg/README-Gyan-build.txt",
+  "src-tauri/vendor/ffmpeg/README-BtbN-build.txt",
 ];
 
 function run(command, args, options = {}) {
@@ -116,7 +116,7 @@ function ensureWindowsAsioPrerequisites() {
     const path = join(ROOT, relativePath);
     if (!existsSync(path) || statSync(path).size === 0) {
       const preparation = relativePath.includes("/ffmpeg/")
-        ? " Run scripts/sync-network-runtime.ps1 to download the pinned Gyan archive, verify its SHA-256, and extract FFmpeg/ffprobe."
+        ? " Run scripts/prepare-runtime.ps1 to download the pinned BtbN archive, verify its SHA-256, and extract FFmpeg/ffprobe."
         : "";
       throw new Error(`Required Windows release runtime file is missing or empty: ${path}.${preparation}`);
     }

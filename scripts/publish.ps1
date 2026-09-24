@@ -65,7 +65,7 @@ function Get-RuntimeManifest {
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Fail "Tracked runtime manifest is missing: $manifestPath" }
     $runtime = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
     if ($runtime.schemaVersion -ne 1 -or $runtime.components -isnot [array]) { Fail 'scripts/runtime-manifest.json must have schemaVersion=1 and a components array.' }
-    $ffmpeg = @($runtime.components | Where-Object { $_.id -eq 'ffmpeg-gyan-essentials' })
+    $ffmpeg = @($runtime.components | Where-Object { $_.id -eq 'ffmpeg-btbn-gpl-n9.0' })
     $mpv = @($runtime.components | Where-Object { $_.id -eq 'libmpv' })
     if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { Fail 'Runtime manifest must contain exactly one pinned FFmpeg and one libmpv record.' }
     if ($ffmpeg[0].runtimeFiles -isnot [array] -or $ffmpeg[0].runtimeFiles.Count -ne 2 -or
@@ -161,7 +161,7 @@ if ($DryRun) {
 # Staging FFmpeg is allowed only after all secret/compliance gates pass.
 $ffmpegExe = Join-Path $script:Root 'src-tauri/vendor/ffmpeg/ffmpeg.exe'
 if (-not (Test-Path -LiteralPath $ffmpegExe -PathType Leaf)) {
-    Invoke-Checked 'Prepare pinned FFmpeg runtime' (Join-Path $script:Root 'scripts/sync-network-runtime.ps1') @()
+    Invoke-Checked 'Prepare pinned FFmpeg runtime' (Join-Path $script:Root 'scripts/prepare-runtime.ps1') @()
 }
 $mpv = Join-Path $script:Root 'src-tauri/vendor/mpv/libmpv-2.dll'
 if (-not (Test-Path -LiteralPath $mpv -PathType Leaf)) { Fail 'libmpv runtime is missing: src-tauri/vendor/mpv/libmpv-2.dll.' }

@@ -3,13 +3,14 @@
 Stage the pinned Windows FFmpeg runtime outside Git.
 
 .DESCRIPTION
-Downloads the pinned Gyan FFmpeg essentials archive, verifies the archive
-checksum and the tracked notice files, then stages ffmpeg.exe and ffprobe.exe
-under src-tauri/vendor/ffmpeg. Runtime binaries are ignored by Git.
+Downloads or accepts the pinned BtbN FFmpeg archive, verifies its checksum,
+runtime files, license, and tracked provenance notice, then stages ffmpeg.exe
+and ffprobe.exe under src-tauri/vendor/ffmpeg. Runtime binaries are ignored by Git.
 #>
 [CmdletBinding()]
 param(
-    [string]$StagingDirectory
+    [string]$StagingDirectory,
+    [string]$ArchivePath
 )
 
 Set-StrictMode -Version Latest
@@ -18,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $runtimeManifestPath = Join-Path $PSScriptRoot 'runtime-manifest.json'
 $runtimeManifest = Get-Content -Raw -LiteralPath $runtimeManifestPath | ConvertFrom-Json
-$ffmpeg = $runtimeManifest.components | Where-Object { $_.id -eq 'ffmpeg-gyan-essentials' } | Select-Object -First 1
+$ffmpeg = $runtimeManifest.components | Where-Object { $_.id -eq 'ffmpeg-btbn-gpl-n9.0' } | Select-Object -First 1
 if ($null -eq $ffmpeg -or $runtimeManifest.schemaVersion -ne 1) {
     throw "Runtime manifest is missing schemaVersion=1 or the ffmpeg component: $runtimeManifestPath"
 }
@@ -47,9 +48,13 @@ $temporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('qlisa-runtim
 
 try {
     New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
-    $archive = Join-Path $temporaryDirectory 'ffmpeg-essentials.zip'
-    Write-Host "Downloading $($ffmpeg.archive.url)"
-    Invoke-WebRequest -Uri $ffmpeg.archive.url -OutFile $archive
+    $archive = Join-Path $temporaryDirectory ([System.IO.Path]::GetFileName(([uri]$ffmpeg.archive.url).AbsolutePath))
+    if ([string]::IsNullOrWhiteSpace($ArchivePath)) {
+        Write-Host "Downloading $($ffmpeg.archive.url)"
+        Invoke-WebRequest -Uri $ffmpeg.archive.url -OutFile $archive
+    } else {
+        $archive = (Resolve-Path -LiteralPath $ArchivePath).Path
+    }
 
     $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($archiveHash -ne $ffmpeg.archive.sha256.ToLowerInvariant()) {
@@ -58,7 +63,7 @@ try {
 
     $extractRoot = Join-Path $temporaryDirectory 'extracted'
     Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot
-    $buildRootName = "ffmpeg-$($ffmpeg.version)-essentials_build"
+    $buildRootName = [string]$ffmpeg.archive.rootDirectory
     $buildRoot = Join-Path $extractRoot $buildRootName
     if (-not (Test-Path -LiteralPath $buildRoot -PathType Container)) {
         throw "Unexpected FFmpeg archive layout; expected directory '$buildRootName'."
@@ -76,21 +81,25 @@ try {
     }
 
     foreach ($notice in @($ffmpeg.notices)) {
-        $archiveNotice = Join-Path $buildRoot $notice.archivePath
         $trackedNotice = Join-Path $repositoryRoot $notice.path
-        if (-not (Test-Path -LiteralPath $archiveNotice -PathType Leaf)) { throw "FFmpeg archive is missing $($notice.archivePath)." }
         if (-not (Test-Path -LiteralPath $trackedNotice -PathType Leaf)) { throw "Tracked FFmpeg notice is missing: $($notice.path)." }
-        $archiveNoticeHash = (Get-FileHash -LiteralPath $archiveNotice -Algorithm SHA256).Hash.ToLowerInvariant()
         $trackedNoticeHash = (Get-FileHash -LiteralPath $trackedNotice -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($archiveNoticeHash -ne $notice.sha256.ToLowerInvariant() -or $trackedNoticeHash -ne $notice.sha256.ToLowerInvariant()) {
+        if ($trackedNoticeHash -ne $notice.sha256.ToLowerInvariant()) {
             throw "FFmpeg notice hash mismatch for $($notice.path). Review the pinned archive and tracked notice before staging."
+        }
+        if ($notice.PSObject.Properties['archivePath'] -and $notice.archivePath) {
+            $archiveNotice = Join-Path $buildRoot $notice.archivePath
+            if (-not (Test-Path -LiteralPath $archiveNotice -PathType Leaf)) { throw "FFmpeg archive is missing $($notice.archivePath)." }
+            $archiveNoticeHash = (Get-FileHash -LiteralPath $archiveNotice -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($archiveNoticeHash -ne $notice.sha256.ToLowerInvariant()) { throw "FFmpeg archive notice SHA-256 mismatch for $($notice.archivePath)." }
         }
     }
 
-    $ffmpegVersionRecord = @($ffmpeg.runtimeFiles | Where-Object { $_.fileName -eq 'ffmpeg.exe' }) | Select-Object -First 1
-    $ffmpegVersionOutput = (& (Join-Path $buildRoot 'bin\ffmpeg.exe') -hide_banner -version 2>&1) -join "`n"
-    if ($LASTEXITCODE -ne 0 -or $null -eq $ffmpegVersionRecord -or $ffmpegVersionOutput -notmatch [regex]::Escape($ffmpegVersionRecord.versionText)) {
-        throw 'The downloaded ffmpeg.exe does not report the pinned Gyan version.'
+    foreach ($record in @($ffmpeg.runtimeFiles)) {
+        $versionOutput = (& (Join-Path $buildRoot (Join-Path 'bin' $record.fileName)) -hide_banner -version 2>&1) -join "`n"
+        if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch [regex]::Escape($record.versionText)) {
+            throw "The selected $($record.fileName) does not report the pinned BtbN version."
+        }
     }
     $protocolOutput = (& (Join-Path $buildRoot 'bin\ffmpeg.exe') -hide_banner -protocols 2>&1) -join "`n"
     if ($LASTEXITCODE -ne 0 -or -not [regex]::IsMatch($protocolOutput, '(?m)^\s*srt\s*$')) {
@@ -102,6 +111,23 @@ try {
         Copy-Item -LiteralPath (Join-Path $buildRoot (Join-Path 'bin' $name)) -Destination (Join-Path $destination $name) -Force
     }
 
+    foreach ($notice in @($ffmpeg.notices)) {
+        if ($notice.PSObject.Properties['archivePath'] -and $notice.archivePath) {
+            $source = Join-Path $buildRoot $notice.archivePath
+        } else {
+            $source = Join-Path $repositoryRoot $notice.path
+        }
+        $destinationNotice = Join-Path $destination ([System.IO.Path]::GetFileName([string]$notice.path))
+        if (-not [string]::Equals(
+            [System.IO.Path]::GetFullPath($source),
+            [System.IO.Path]::GetFullPath($destinationNotice),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            Copy-Item -LiteralPath $source -Destination $destinationNotice -Force
+        }
+    }
+    Remove-Item -LiteralPath (Join-Path $destination 'README-Gyan-build.txt') -Force -ErrorAction SilentlyContinue
+
     foreach ($name in $requiredNames) {
         $stagedPath = Join-Path $destination $name
         $stagedHash = (Get-FileHash -LiteralPath $stagedPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -109,7 +135,7 @@ try {
         if ($stagedHash -ne $expected.sha256.ToLowerInvariant()) { throw "Staged $name failed its SHA-256 check." }
     }
 
-    Write-Host "Staged Gyan FFmpeg $($ffmpeg.version) and ffprobe in $destination"
+    Write-Host "Staged BtbN FFmpeg $($ffmpeg.version) and ffprobe in $destination"
     Write-Host "Archive SHA-256: $archiveHash"
     Write-Host 'SRT protocol: present. NDI Runtime remains installed separately by the user.'
 } finally {

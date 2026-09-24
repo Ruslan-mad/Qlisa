@@ -5,7 +5,7 @@
       "vendor/ffmpeg/ffmpeg.exe": "ffmpeg/ffmpeg.exe",
       "vendor/ffmpeg/ffprobe.exe": "ffmpeg/ffprobe.exe",
       "vendor/ffmpeg/LICENSE": "ffmpeg/LICENSE",
-      "vendor/ffmpeg/README-Gyan-build.txt": "ffmpeg/README-Gyan-build.txt"
+      "vendor/ffmpeg/README-BtbN-build.txt": "ffmpeg/README-BtbN-build.txt"
     },
     "windows": {
       "webviewInstallMode": {
