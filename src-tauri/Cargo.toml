@@ -78,7 +78,8 @@ raw-window-handle = "0.6"
 # Cross-platform window creation (Win32/X11/Wayland) — used by the unified
 # GL output path to create the native window that holds the GL surface.
 # winit 0.30 uses rwh 0.6 (same as glutin 0.32 and Tauri 2.x).
-# winit itself does NOT import comctl32 v6, so the test binary is safe.
+# Windows test targets need the app's Common Controls 6.0 activation manifest;
+# native GUI dependencies import TaskDialogIndirect, which is absent from 5.82.
 winit = "0.30"
 
 # Thin safe wrapper around OpenGL for the fade quad shader.

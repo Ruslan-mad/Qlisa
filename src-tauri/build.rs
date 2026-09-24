@@ -8,6 +8,18 @@ fn main() {
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
+    if target_os == "windows" {
+        // The generic linker args also reach the lib unit-test harness, which
+        // Cargo does not treat as a `rustc-link-arg-tests` target. The qlisa
+        // binary already embeds Tauri's manifest resource, so suppress a second
+        // generated manifest there.
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+        );
+        println!("cargo:rustc-link-arg-bin=qlisa=/MANIFEST:NO");
+    }
+
     // macOS: the GL output path creates/manages its own NSWindow via raw `msg_send!`
     // (engine/output_engine/macos_window.rs), so AppKit must be linked. Foundation is
     // pulled in transitively by objc2-foundation.
