@@ -131,3 +131,59 @@ NDI Runtime is installed by the user and must not be bundled. libmpv is a
 separate unresolved runtime: its local DLL hash and reported mpv commit are
 recorded in the runtime manifest, but its originating build, dependencies,
 configuration, and corresponding source are not verified by this document.
+
+## Appendix: provenance and possible replacement build
+
+### Gyan source and recipe availability
+
+The [Gyan 9.0.1 release](https://github.com/GyanD/codexffmpeg/releases/tag/9.0.1)
+links the FFmpeg source revision and offers binary archives. Its
+[9.0.1 repository tree](https://github.com/GyanD/codexffmpeg/tree/9.0.1)
+contains no complete build scripts, patches, or source bundle for the reported
+external libraries. The [Gyan builds page](https://www.gyan.dev/ffmpeg/builds/)
+offers binary builds and FFmpeg source links, but no matching complete source
+package for this archive. The repository describes itself as support for that
+build service; it does not identify the workflow revision that produced this
+asset. Therefore the release build script provenance is unavailable from the
+public release materials checked here. This is evidence of what those materials
+contain, not proof that Gyan has no such materials elsewhere.
+
+Request Gyan to provide, for archive SHA-256
+`fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9`:
+
+- the immutable build-workflow and build-script revision, with all patches and
+  configuration files used for the 9.0.1 essentials build;
+- the exact MinGW/MSYS2 toolchain package revisions and build environment;
+- source commits or source archives with checksums for FFmpeg and every enabled
+  external library, including local modifications and submodules;
+- reproducible build instructions and the mapping from those inputs to the
+  shipped `ffmpeg.exe` and `ffprobe.exe` hashes;
+- the notices and source-offer materials required for the resulting linked
+  components.
+
+Until those materials are received and checked against the binaries, this
+source offer remains **not ready**.
+
+### Proposed own build (not performed)
+
+If Gyan cannot provide the materials, a possible replacement is a controlled
+Windows build from the [official FFmpeg 9.0.1 source release](https://ffmpeg.org/releases/),
+with exact source archives, checksums, build scripts, toolchain versions, and
+patches preserved for every input. Pin SRT to the reported
+[1.5.6 source commit](https://github.com/Haivision/srt/commit/fcae57145c000a9e7b72aa777adb8f85c2463242),
+and independently pin and record x264 and x265 sources. Build only the external
+libraries required by Qlisa (SRT, x264, and x265) and retain their complete
+corresponding source and notices. This would reduce the dependency set, but
+would create a new runtime whose behavior and source offer must be verified.
+
+SRT encryption must remain enabled because Qlisa uses passphrases. SRT's
+[build options at the pinned commit](https://github.com/Haivision/srt/blob/fcae57145c000a9e7b72aa777adb8f85c2463242/docs/build/build-options.md)
+document Mbed TLS as an encryption provider. Mbed TLS is Apache-2.0; FFmpeg's
+[license matrix](https://ffmpeg.org/doxygen/trunk/md_LICENSE.html) lists it as
+compatible with GPLv3 builds. Avoid OpenSSL in this proposed GPL-linked binary:
+FFmpeg documents OpenSSL as incompatible with GPLv2/v3 absent the nonfree
+exception, which prevents redistribution. A starting FFmpeg configuration
+could enable GPL, version 3, static linking, SRT, x264, and x265 while disabling
+shared libraries and autodetection. The exact flags and dependency versions
+must be selected, built, and tested; this proposal is not a completed build or
+a corresponding-source package.
