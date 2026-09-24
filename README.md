@@ -22,7 +22,7 @@ Screenshots are not included yet. The `docs/design/` directory contains Qlisa br
 
 ## Download and installation
 
-Check [GitHub Releases](https://github.com/Ruslan-mad/Qlisa/releases) for Windows installers when available. Qlisa includes an in-app updater configured for signed GitHub Releases. The updater and binary release are not ready for distribution until runtime compliance is complete and an end-to-end update is verified. See [Windows release preparation](docs/RELEASING.md) for the local release process and current requirements.
+Check [GitHub Releases](https://github.com/Ruslan-mad/Qlisa/releases) for Windows installers when available. Qlisa includes an in-app updater configured for signed GitHub Releases. Verify the per-machine installation and updater flow before a release. Media runtime pins and source evidence are tracked separately; downloading from upstream does not establish legal compliance. See [Windows release preparation](docs/RELEASING.md) for the local release process and current requirements.
 
 Windows 10 or 11 is the supported release target. The application uses WebView2; current supported Windows versions normally include the WebView2 Runtime. If it is missing, install Microsoft's [Evergreen WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).
 
@@ -32,7 +32,7 @@ NDI is optional. Install the official [NDI Runtime](https://ndi.video/) separate
 
 The Windows development and packaging path uses Windows 10/11, Rust stable, Node.js, pnpm, Tauri 2 prerequisites, Visual Studio C++ Build Tools, and the Windows SDK. Install frontend dependencies with `pnpm install`.
 
-Windows Qlisa builds use the ASIO-enabled Cargo feature and the ASIO 2.3 interfaces in `vendor/asiosdk/`. The Windows visual output engine loads `src-tauri/vendor/mpv/libmpv-2.dll` at runtime; this DLL is a local prerequisite and is not in Git. Development that uses NDI needs the separately installed NDI Runtime. NDI DLL files are not build or installer inputs. FFmpeg/ffprobe are needed to exercise media conversion and SRT and are staged from one pinned BtbN archive for Windows installer creation; the runtime executables are not stored in Git. See the [FFmpeg source and build record](docs/THIRD_PARTY_SOURCE_OFFER.md).
+Windows Qlisa builds use the ASIO-enabled Cargo feature and the ASIO 2.3 interfaces in `vendor/asiosdk/`. The NSIS installer installs Qlisa for all users under Program Files. On first launch, Qlisa downloads the pinned FFmpeg, ffprobe, and libmpv runtime archives directly from their upstream release URLs, verifies SHA-256, and stores the required files in `%LOCALAPPDATA%\Qlisa\runtime\`. Qlisa installers and updater packages do not host these media binaries. Development that uses NDI needs the separately installed NDI Runtime; NDI DLL files are not build or installer inputs. See the [Windows runtime notes](docs/windows-network-runtime.md) and [upstream source records](docs/THIRD_PARTY_SOURCE_OFFER.md).
 
 Useful commands from the repository root:
 
@@ -44,7 +44,7 @@ pnpm tauri:dev
 pnpm tauri:check
 ```
 
-The Windows app commands above enable ASIO through the project scripts. `pnpm tauri:build` creates a bundled installer and requires the local runtime files described above. See the [project guide](docs/PROJECT_GUIDE.md) for prerequisites and current build limitations.
+The Windows app commands above enable ASIO through the project scripts. `pnpm tauri:build` creates a bundled installer and does not require local media runtime binaries. See the [project guide](docs/PROJECT_GUIDE.md) for prerequisites and current build limitations.
 
 ## Origin and licensing
 

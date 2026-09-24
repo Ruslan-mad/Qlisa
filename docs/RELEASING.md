@@ -2,9 +2,11 @@
 
 `scripts/publish.ps1` prepares a **local-only signed Windows build**. It does
 not create a tag, push, or publish a GitHub Release. Its installer, `.sig`, and
-`latest.json` are private local test artifacts. Do not publish them before the
-corresponding source and required notices for FFmpeg and libmpv are assembled
-and verified.
+`latest.json` are private local test artifacts. The installer and updater
+package contain Qlisa, not FFmpeg, ffprobe, or libmpv binaries. Qlisa downloads
+the pinned media archives directly from upstream when needed. This packaging
+choice does not determine or remove legal obligations for those upstream
+binaries.
 
 ## Local build prerequisites
 
@@ -17,16 +19,17 @@ and verified.
 - The private updater key at `%USERPROFILE%\.tauri\qlisa.key`, or its external
   path passed with `-SigningKeyPath`. The script prompts for the password with
   a masked PowerShell prompt. It never prints or creates the private key.
-- FFmpeg, ffprobe, and libmpv runtime files matching the SHA-256 pins in
-  `scripts/runtime-manifest.json`. FFmpeg must also include its pinned license
-  and `README-BtbN-build.txt` notice. If FFmpeg is absent, the script stages
-  the pinned archive through `scripts/prepare-runtime.ps1`.
-- The libmpv pin is the generic x86_64 `mpv-dev` asset from shinchiro release
-  `20260923`; its exact DLL and archive hashes are in the runtime manifest.
+- `scripts/runtime-manifest.json` with the pinned upstream archive URLs and
+  SHA-256 values. The app embeds this manifest as runtime configuration. No
+  local media binaries, staging directory, or `prepare-runtime.ps1` step is
+  required for a release build.
+- NSIS per-machine install mode and updater `passive` install mode are checked
+  separately. The former installs under Program Files and can trigger UAC.
 
-The script checks that these runtime files and notices are configured in
-`src-tauri/tauri.windows.conf.json`. It scans the source tree for NDI Runtime
-DLLs. It does not require 7-Zip, Minisign, source archives, or a local
+The script checks that media binaries are absent from the Windows bundle
+resource map. When 7-Zip is available, it also lists the completed installer
+and rejects media runtime binaries in its payload. It scans the source tree
+for NDI Runtime DLLs. It does not require 7-Zip, Minisign, source archives, or a local
 `.release-compliance.json` for a local build. Tauri CLI 2 creates the updater
 signature during the build when `bundle.createUpdaterArtifacts` is `true`.
 
@@ -39,10 +42,10 @@ key.
 Create and review the release notes, then run from the repository root:
 
 ```powershell
-.\scripts\publish.ps1 -Version 1.5.3
+.\scripts\publish.ps1 -Version 1.5.5
 ```
 
-The script checks the repository, runtime hashes, and signing setup. It runs
+The script checks the repository, runtime manifest pins, and signing setup. It runs
 frontend tests/build and Rust metadata/check/test/clippy checks. Then
 `scripts/release.mjs` updates and commits the local version files and builds
 the NSIS installer and Tauri updater artifact. The script creates the
@@ -50,11 +53,11 @@ installer, its `.sig`, and `latest.json` under
 `src-tauri/target/release/prepared/vX.Y.Z/`. It prints the artifact paths and
 SHA-256 values. It does not tag, push, or publish anything.
 
-`-DryRun` checks prerequisites and any staged runtime files without changing
+`-DryRun` checks prerequisites without changing
 version files or building artifacts:
 
 ```powershell
-.\scripts\publish.ps1 -Version 1.5.3 -DryRun
+.\scripts\publish.ps1 -Version 1.5.5 -DryRun
 ```
 
 Clippy warnings do not fail this check; a non-zero Clippy exit does. The
@@ -68,16 +71,14 @@ different `.nsis.zip` updater artifact and is not used here.
 
 ## Publication and update test
 
-A successful local build does not establish that redistribution is ready.
-Before publishing, provide and review the exact corresponding sources, build
-inputs, and notices required for the pinned BtbN FFmpeg 9.0 GPL static build
-(including its statically linked components) and the selected libmpv DLL.
-Current evidence and remaining gaps are recorded in
+A successful local build does not establish legal compliance. Qlisa packages
+do not host the media binaries, but the application downloads them directly
+from upstream. Do not treat that choice as proof that legal obligations do not
+apply. Current pin evidence and source gaps are recorded in
 `scripts/runtime-manifest.json`, `docs/THIRD_PARTY_SOURCE_OFFER.md`, and
-`docs/dependency-license-audit.md`.
-Do not publish until the required source and notices are assembled and
-verified. Upload the installer, matching `.sig`, `latest.json`, and required
-source and notice assets to the same release.
+`docs/dependency-license-audit.md`. Review applicable obligations before
+publication. Upload the installer, matching `.sig`, and `latest.json`; do not
+upload media runtime binaries as Qlisa release assets.
 
 For updater testing, use the isolated procedure in
 [`UPDATER_TESTING.md`](UPDATER_TESTING.md). Do not treat a locally generated

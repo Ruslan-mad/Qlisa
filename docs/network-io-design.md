@@ -63,13 +63,14 @@ frames. Neither is remote receiver confirmation.
 
 ## Packaging and tests
 
-Windows bundling maps staged FFmpeg files from `src-tauri/vendor/ffmpeg`
-through `src-tauri/tauri.windows.conf.json`. `build.rs` rejects missing/empty
-FFmpeg payloads for release builds. The pinned FFmpeg archive is fetched and
-staged outside Git; the NDI Runtime is installed separately by the user and
-must never be copied into Qlisa or its installer. Windows libmpv is also a
-local prerequisite and is not tracked. See `windows-network-runtime.md` for
-the pinned build and notices.
+The Windows installer and updater package do not contain FFmpeg, ffprobe, or
+libmpv binaries. On first launch Qlisa obtains the pinned archives directly
+from upstream, verifies their SHA-256 values, and installs required files in
+`%LOCALAPPDATA%\Qlisa\runtime\`. The pins and provenance are in
+`scripts/runtime-manifest.json`. This download flow does not determine or
+remove legal obligations for upstream binaries. The NDI Runtime is installed
+separately by the user and is never copied into Qlisa or its installer. See
+`windows-network-runtime.md` for details.
 
 Pure validation, queue behavior, frame/audio handling, and worker state tests
 are in the network module. NDI integration tests require a working runtime and

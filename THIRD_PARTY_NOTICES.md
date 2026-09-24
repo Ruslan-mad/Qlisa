@@ -1,6 +1,6 @@
 # Third-party notices
 
-This file identifies upstream projects and runtime components used by Qlisa. Versions below describe the checked-out project and its currently documented Windows packaging inputs. They must be reviewed when any runtime binary changes. This summary does not replace the license texts or notices distributed with each component.
+This file identifies upstream projects and runtime components used by Qlisa. Windows installer and updater packages do not contain FFmpeg, ffprobe, or libmpv binaries. On first launch, Qlisa downloads pinned upstream assets directly and stores required runtime files under `%LOCALAPPDATA%\Qlisa\runtime\`. This download flow does not determine or remove legal obligations for those binaries. Versions below describe the pinned upstream assets and must be reviewed when any runtime pin changes. This summary does not replace applicable license texts or notices.
 
 ## Qlisa and Inkue
 
@@ -16,7 +16,7 @@ Release checklist: confirm that no NDI Runtime DLL is present in the source expo
 
 ## FFmpeg, ffprobe, and SRT
 
-The selected Windows runtime is BtbN/FFmpeg-Builds release tag
+The selected Windows runtime is downloaded directly from BtbN/FFmpeg-Builds release tag
 [`autobuild-2026-09-23-14-55`](https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-09-23-14-55),
 asset `ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip`. It is a Windows x86_64,
 GPL static build. The archive SHA-256 is
@@ -28,7 +28,7 @@ FFmpeg source commit, and pinned BtbN build-system commit are recorded in the
 The FFmpeg version string is `n9.0.2-3-ga5923073bf-20260923`. Its source is
 [FFmpeg commit `a5923073bfd8f25b7300d93af3f8e690174ebd30`](https://github.com/FFmpeg/FFmpeg/commit/a5923073bfd8f25b7300d93af3f8e690174ebd30).
 The build identifies GPL version 3 (`--enable-gpl --enable-version3`) and
-enables `libsrt`. The archive's `LICENSE.txt` is GPLv3; the staged
+enables `libsrt`. The archive's `LICENSE.txt` is GPLv3; the tracked
 `src-tauri/vendor/ffmpeg/LICENSE` has the same SHA-256 and contents. Qlisa
 invokes FFmpeg for SRT; Qlisa does not link SRT directly.
 
@@ -44,9 +44,9 @@ offer remain in Git history; they do not describe the selected runtime.
 
 ## mpv / libmpv
 
-Windows visual playback loads `libmpv-2.dll` at runtime. The staged Windows x64 DLL is `v0.41.0-1055-g6fd80b200` from the generic x86_64 `mpv-dev` asset in [shinchiro/mpv-winbuild-cmake release 20260923](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260923). The asset is `mpv-dev-x86_64-20260923-git-6fd80b2003.7z`, SHA-256 `372f29c292d0c8b4ce916225739e5872e35b8e11f3f4590c285baed8ba551100`; the extracted DLL SHA-256 is `751131f81b5ce485d046ff08d1a44a93c5455be5135d53c0ab19c56780925ff0`. It reports mpv source commit [`6fd80b2003873ef2bed09e78374549687a143236`](https://github.com/mpv-player/mpv/commit/6fd80b2003873ef2bed09e78374549687a143236). The release's [build run](https://github.com/shinchiro/mpv-winbuild-cmake/actions/runs/35800030374) and build-system commit [`05a60b3cfd04e3e3b89918f4a27f3dde2935dff2`](https://github.com/shinchiro/mpv-winbuild-cmake/tree/05a60b3cfd04e3e3b89918f4a27f3dde2935dff2) identify the clang generic x86_64 build.
+Windows visual playback loads `libmpv-2.dll` at runtime. Qlisa pins Windows x64 DLL version `v0.41.0-1055-g6fd80b200` from the generic x86_64 `mpv-dev` asset in [shinchiro/mpv-winbuild-cmake release 20260923](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260923). The asset is `mpv-dev-x86_64-20260923-git-6fd80b2003.7z`, SHA-256 `372f29c292d0c8b4ce916225739e5872e35b8e11f3f4590c285baed8ba551100`; the extracted DLL SHA-256 is `751131f81b5ce485d046ff08d1a44a93c5455be5135d53c0ab19c56780925ff0`. It reports mpv source commit [`6fd80b2003873ef2bed09e78374549687a143236`](https://github.com/mpv-player/mpv/commit/6fd80b2003873ef2bed09e78374549687a143236). The release's [build run](https://github.com/shinchiro/mpv-winbuild-cmake/actions/runs/35800030374) and build-system commit [`05a60b3cfd04e3e3b89918f4a27f3dde2935dff2`](https://github.com/shinchiro/mpv-winbuild-cmake/tree/05a60b3cfd04e3e3b89918f4a27f3dde2935dff2) identify the clang generic x86_64 build.
 
-The DLL passed isolated playback, seek, and two simultaneous libmpv context checks. WASAPI audio was configured; physical audio output was not verified. The exact combined license, dependency revisions, patches, and corresponding source for its statically linked components remain unverified. Do not distribute this DLL until those source revisions and notices are available. See [`scripts/runtime-manifest.json`](scripts/runtime-manifest.json) and [the 20260923 source/build record](docs/shinchiro-20260923-source-build-manifest.md) for hashes, build evidence, and the remaining source gap.
+The DLL passed isolated playback, seek, and two simultaneous libmpv context checks. WASAPI audio was configured; physical audio output was not verified. The exact combined license, dependency revisions, patches, and corresponding source for its statically linked components remain unverified. The Qlisa package does not contain this DLL and obtains it directly from upstream; that delivery flow does not establish or remove legal obligations. See [`scripts/runtime-manifest.json`](scripts/runtime-manifest.json) and [the 20260923 source/build record](docs/shinchiro-20260923-source-build-manifest.md) for hashes, build evidence, and the remaining source gap.
 
 ## Steinberg ASIO SDK
 

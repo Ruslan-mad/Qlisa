@@ -13,11 +13,13 @@ command keeps the application version synchronized in `package.json`,
 `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.lock`.
 `.inkue` workspaces and several internal `inkue` names are retained for
 compatibility. This is not an official upstream Inkue release checkout. The
-current version in this checkout is 1.5.2. The source repository is public at
+current version in this checkout is 1.5.4. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
-downloads. The Tauri updater is configured for signed GitHub Releases. Binary
-distribution and updater readiness still require complete runtime compliance
-and an end-to-end update test; see [Windows release preparation](RELEASING.md).
+downloads. The Tauri updater is configured for signed GitHub Releases. The
+1.5.4 local updater E2E check passed. The 1.5.5 per-machine installation and
+runtime-bootstrap checks are pending. Runtime source and license evidence is
+tracked separately; fetching the media files from upstream does not establish
+legal compliance. See [Windows release preparation](RELEASING.md).
 
 The app has a React/TypeScript Tauri front end and a Rust backend. The backend
 owns cue state, playback, native audio/video/output windows, networking,
@@ -90,8 +92,7 @@ src-tauri/src/
 
 docs/                                  Project guide and focused implementation notes
 vendor/asiosdk/                        Required Windows ASIO SDK for Qlisa builds
-src-tauri/vendor/ffmpeg/               Local staged FFmpeg payload (Git-ignored)
-src-tauri/vendor/mpv/                  Local libmpv payload (Git-ignored)
+src-tauri/vendor/ffmpeg/               FFmpeg license/provenance notices
 scripts/                               Native runtime sync and asset helpers
 ```
 
@@ -340,18 +341,17 @@ stored at the same scope; inspect the struct before deciding.
 
 - Rust stable toolchain, Node.js, pnpm, and Tauri 2 platform prerequisites.
 - `pnpm install` at repository root.
-- libmpv for visual playback. Windows dev/release requires the local
-  `src-tauri/vendor/mpv/libmpv-2.dll`; macOS/Linux use platform libmpv.
+- libmpv for visual playback. Windows first launch downloads the pinned DLL
+  from upstream into `%LOCALAPPDATA%\Qlisa\runtime\`; macOS/Linux use
+  platform libmpv.
 - Windows Qlisa app builds always use `vendor/asiosdk/` via
   `src-tauri/.cargo/config.toml` and enable `asio-support`.
-- Windows release builds require locally staged FFmpeg/ffprobe files under
-  `src-tauri/vendor/ffmpeg/`. The selected runtime pair comes from one pinned
-  BtbN FFmpeg 9.0 GPL static archive. See
-  [FFmpeg source and build provenance](THIRD_PARTY_SOURCE_OFFER.md). NDI Runtime
-  is installed separately by the user and is not a build or installer input.
-  The Windows libmpv DLL under `src-tauri/vendor/mpv/` remains a local
-  prerequisite and is not tracked. A checkout alone is not a complete Windows
-  app build environment.
+- Windows Qlisa downloads FFmpeg/ffprobe from the pinned BtbN FFmpeg 9.0 GPL
+  static archive on first launch and installs them under
+  `%LOCALAPPDATA%\Qlisa\runtime\`. See [runtime pins and source provenance](THIRD_PARTY_SOURCE_OFFER.md).
+  NSIS installs Qlisa per-machine under Program Files; the media binaries are
+  not inputs to the installer or updater package. NDI Runtime is installed
+  separately by the user.
 
 ### Commands
 
@@ -364,9 +364,9 @@ pnpm tauri:check            # Windows debug/no-bundle build, with ASIO
 pnpm test
 pnpm build                 # TypeScript check + Vite build
 pnpm exec tauri build --debug --no-bundle -- --features asio-support # Windows test build, no installer
-pnpm release -- 1.5.3 --dry-run # validate versions and show the release plan
-pnpm release -- 1.5.3          # Windows ASIO exe; sync version and commit before build
-pnpm release -- 1.5.3 --bundle msi # explicitly create only an MSI installer
+pnpm release -- 1.5.5 --dry-run # validate versions and show the release plan
+pnpm release -- 1.5.5          # Windows ASIO exe; sync version and commit before build
+pnpm release -- 1.5.5 --bundle msi # explicitly create only an MSI installer
 pnpm tauri:build                  # lower-level ASIO build; bundles installers
 ```
 
@@ -398,30 +398,31 @@ the normal Windows ASIO path before distributing a release.
 
 The Windows release pipeline starts with `scripts/publish.ps1 -Version X.Y.Z`.
 It requires a clean `main` branch, synchronized version fields, a signing key,
-release notes, staged runtime files, and a reviewed FFmpeg/libmpv compliance
-manifest. It runs frontend and Rust checks, creates the local
+release notes, and pinned media archive metadata. It does not require locally
+staged media binaries. It runs frontend and Rust checks, creates the local
 `release: vX.Y.Z` version commit, then builds the Windows ASIO NSIS installer
 and Tauri updater artifact. Tauri updater artifacts are the NSIS executable and
-its `.exe.sig`; NDI Runtime is not included. The script prepares local assets
-and metadata only. It does not tag, push, or publish to GitHub. See
-[Windows release preparation](RELEASING.md) for prerequisites, compliance
-checks, and publication steps.
+its `.exe.sig`; the media runtime and NDI Runtime are not included. The script
+prepares local assets and metadata only. It does not tag, push, or publish to
+GitHub. See [Windows release preparation](RELEASING.md) for prerequisites and
+publication steps.
 
 The updater plugin is registered in the Rust app and configured with Qlisa's
 public key and GitHub Releases `latest.json` endpoint. It checks for updates at
 startup and through the Help/About UI. It downloads the signed update, then
 blocks installation while cues run or the workspace has unsaved changes.
-The implementation has not passed an end-to-end test against a published
-signed release. The complete FFmpeg corresponding-source package and libmpv
-corresponding-source archive are also still required before binary
-distribution. Release artifacts are not checked into
-Git; do not reuse Inkue updater metadata.
+The 1.5.4 local updater E2E check passed. The 1.5.5 per-machine installation,
+bootstrap, and updater checks remain pending. Runtime source and license
+evidence has open items; downloading media assets from upstream does not
+establish legal compliance. Source materials and notices remain separate from
+the Qlisa binary release. Release artifacts are not checked into Git; do not
+reuse Inkue updater metadata.
 
 `scripts/release.mjs` performs the version update, local release commit, and
 build used by the release pipeline. Its `--dry-run` checks version consistency
 and the requested version, then prints the release plan without editing,
 committing, or building. The full `publish.ps1 -DryRun` also checks release
-prerequisites and the compliance manifest, but does not run tests or build
+prerequisites and pinned media metadata, but does not run tests or build
 artifacts. Before the version
 commit, failures restore only version files changed by that run. After the
 commit, failures preserve it for inspection. The recorded commit and artifact
@@ -548,9 +549,9 @@ video, and image files with FFmpeg. It supports queued batch conversion, job
 progress and cancellation, and applying an output to its cue with a restore
 path. Compatibility results are heuristics for the playback engine; they do
 not guarantee decode quality on every platform. Conversion and metadata probes
-run outside the audio callback and transport path. Windows packaging maps both
-`ffmpeg.exe` and `ffprobe.exe`; both come from one pinned BtbN archive. See
-[Windows network runtime packaging](windows-network-runtime.md).
+run outside the audio callback and transport path. Windows first launch
+downloads `ffmpeg.exe` and `ffprobe.exe` from one pinned BtbN archive directly
+from upstream. See [Windows network runtime packaging](windows-network-runtime.md).
 
 ### Diagnostics
 
@@ -604,12 +605,12 @@ state events report the actual lifecycle state.
 
 | Symptom | Check |
 |---|---|
-| App opens, but video/image output is unavailable | Confirm libmpv is present and loadable. On Windows check `src-tauri/vendor/mpv/libmpv-2.dll` for dev builds and the installer resource map in `tauri.windows.conf.json`; open the app log. |
+| App opens, but video/image output is unavailable | Check the runtime status in Qlisa and confirm `%LOCALAPPDATA%\Qlisa\runtime\libmpv-2.dll` is present and loadable; open the app log. |
 | Audio is silent or the selected device disappeared | Check Preferences → Audio, health alerts, and machine config. The device watchdog attempts fallback/recovery; verify Output Patches and channel mapping. |
 | Media cue appears stuck/loading or has no duration | Check path, codec/decode alert, file permissions, and Preflight/Relink. Inspect logs; metadata and decodes run off the UI path. |
 | NDI not available | Install the official NDI Runtime separately, then check Preferences → NDI/SRT Output status. A valid local runtime is required for NDI discovery/sender startup. Qlisa does not bundle the DLL. |
-| SRT reports unavailable | Check the bundled FFmpeg exists and supports SRT; confirm the pinned Windows payload described in [FFmpeg source and build provenance](THIRD_PARTY_SOURCE_OFFER.md) is staged. |
-| Installer builds without FFmpeg/SRT support | Confirm the pinned FFmpeg files and notices are staged under `src-tauri/vendor/ffmpeg/`, then inspect `src-tauri/target/release/bundle/` after build. |
+| SRT reports unavailable | Check `%LOCALAPPDATA%\Qlisa\runtime\ffmpeg.exe` and confirm the pinned Windows build described in [FFmpeg source and build provenance](THIRD_PARTY_SOURCE_OFFER.md) supports SRT. |
+| Runtime preparation fails | Check network access to the pinned upstream URLs in `scripts/runtime-manifest.json`, then choose Retry on the preparation screen. |
 | A new Tauri window fails to use filesystem/window APIs | Check the window's label and `src-tauri/capabilities/*.json`; permissions are scoped by window. |
 | Build output does not match a fresh source edit | Close Qlisa/tauri dev if files are locked, rebuild, inspect the executable/resources timestamp, then launch the intended output path. |
 
@@ -631,7 +632,7 @@ including private media paths, OSC passwords, or SRT passphrases in bug reports.
 | OSC/MIDI/timecode | matching `engine/*`, `cue/*`, `commands/*` modules | cue trigger routing, UI editor, machine config and integration tests |
 | Lighting/DMX | `engine/dmx_*`, `engine/fixture.rs`, `cue/light_cue.rs`, `commands/light_cmds.rs` | fixture/patch UI, network interface selection, workspace persistence |
 | UI-only cue table/inspector | `src/components/CueList/`, `src/components/Inspector/` | `src/lib/types.ts`, commands wrapper, selection/keyboard tests, translations |
-| Tauri window, permission, installer | `src-tauri/tauri*.conf.json`, `src-tauri/capabilities/`, `build.rs` | window component, asset scopes, vendor resource existence/license documents |
+| Tauri window, permission, installer | `src-tauri/tauri*.conf.json`, `src-tauri/capabilities/`, `build.rs` | window component, asset scopes, runtime manifest pins and provenance; media binaries download on first launch and are not vendor resources |
 
 ## First-pass workflow for a new coding session
 

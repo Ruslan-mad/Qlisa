@@ -1,5 +1,12 @@
 # FFmpeg source offer and build provenance
 
+Qlisa's Windows installer and updater package do not contain the media
+binaries listed here. The application downloads the pinned archives directly
+from the upstream release URLs and checks their SHA-256 values after install.
+This delivery design does not determine or remove legal obligations for the
+upstream binaries. The records below document pin provenance and known source
+gaps; they are not a compliance attestation.
+
 ## Selected FFmpeg build: BtbN FFmpeg 9.0
 
 | Field | Value |
@@ -52,4 +59,4 @@ Qlisa uses only the libmpv development asset from [shinchiro/mpv-winbuild-cmake 
 
 The extracted DLL passed playback, seek, and two simultaneous libmpv context checks. WASAPI was configured; physical audio output was not verified. These checks establish local runtime behavior, not a reproducible dependency source set.
 
-The build-system commit and mpv source revision are identified. Exact source revisions and patches for every linked dependency, the fully resolved build configuration, and a corresponding-source package remain unverified. Do not distribute the DLL until those sources and applicable notices have been assembled. This libmpv evidence is separate from the selected BtbN FFmpeg runtime.
+The build-system commit and mpv source revision are identified. Exact source revisions and patches for every linked dependency, the fully resolved build configuration, and a corresponding-source package remain unverified. Treat this provenance record as evidence only, and assess applicable obligations independently. This libmpv evidence is separate from the selected BtbN FFmpeg runtime.
