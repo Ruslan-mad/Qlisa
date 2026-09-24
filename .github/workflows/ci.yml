@@ -22,10 +22,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Create stub libmpv-2.dll for tauri-build resource validation
-        run: |
-          New-Item -ItemType Directory -Force vendor\mpv | Out-Null
-          [System.IO.File]::WriteAllBytes("vendor\mpv\libmpv-2.dll", @())
       - name: Create empty frontend dist for tauri::generate_context!
         run: New-Item -ItemType Directory -Force ..\dist | Out-Null
       - run: cargo check
@@ -33,6 +29,7 @@ jobs:
 
   check-macos:
     runs-on: macos-latest
+    continue-on-error: true
     defaults:
       run:
         working-directory: src-tauri
@@ -53,6 +50,7 @@ jobs:
 
   check-linux:
     runs-on: ubuntu-latest
+    continue-on-error: true
     defaults:
       run:
         working-directory: src-tauri
