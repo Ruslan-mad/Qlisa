@@ -4,6 +4,18 @@ Use a loopback feed to test the signed update from **1.5.5 to 1.5.6**. This is t
 
 The test uses a detached worktree and the `QlisaUpdaterTest` product identity. Both builds use the checked-in NSIS `perMachine` setting and the updater's `passive` setting. The updater artifact contains Qlisa only. FFmpeg, ffprobe, and libmpv are downloaded by the app into `%LOCALAPPDATA%\Qlisa\runtime`; do not copy vendor binaries into the worktree or installer.
 
+## Verified local smoke checks (1.5.5)
+
+These checks used an isolated profile. They do not replace the pending signed per-machine updater test below.
+
+- A clean launch downloaded FFmpeg, ffprobe, and libmpv and verified their pinned SHA256 hashes. A second launch reused the files without downloading them again.
+- After ffprobe was removed, the app restored it and kept the already loaded libmpv DLL unchanged.
+- Qlisa's media conversion reached 100% and created the converted output file.
+- A 32-second video cue ran on the Main output. Dragging the Time slider from about 24.8 seconds to about 4.7 seconds changed playback position, confirming seek.
+- The BtbN FFmpeg pair passed a CLI SRT loopback check: the receiver decoded 149 frames. SRT playback through Qlisa remains untested.
+- Physical audio output and multiple Qlisa outputs remain untested.
+- A clean per-machine installer run, uninstall, and signed updater end-to-end run remain pending.
+
 ## Build the signed baseline and update
 
 Run these blocks in one PowerShell session from a clean checkout at version 1.5.5. Keep the signing key and password in the current session only.
