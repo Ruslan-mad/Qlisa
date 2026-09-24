@@ -19,8 +19,8 @@ downloads. The Tauri updater is configured for signed GitHub Releases. The
 1.5.4 local updater E2E check passed. The 1.5.5 per-machine install and the
 signed 1.5.5-to-1.5.6 updater E2E check passed. Runtime bootstrap, offline
 retry, workspace preservation, and audio checks are recorded in
-[local updater testing](UPDATER_TESTING_LOCAL.md). Retest Settings runtime
-reinstallation on the installed 1.5.6 build. Runtime source and license
+[local updater testing](UPDATER_TESTING_LOCAL.md). The Settings runtime
+reinstallation test passed on the installed 1.5.6 build. Runtime source and license
 evidence is tracked separately; fetching media files from upstream does not
 establish legal compliance. See [Windows release preparation](RELEASING.md).
 
@@ -420,8 +420,8 @@ startup and through the Help/About UI. It downloads the signed update, then
 blocks installation while cues run or the workspace has unsaved changes.
 The 1.5.4 local updater E2E check passed. The 1.5.5 per-machine install and
 the signed 1.5.5-to-1.5.6 updater E2E check passed. The updater preserved the
-saved workspace, preferences, and runtime. Retest Settings runtime
-reinstallation on the installed 1.5.6 build. Runtime source and license
+saved workspace, preferences, and runtime. Settings runtime reinstallation on
+the installed 1.5.6 build passed. Runtime source and license
 evidence has open items; downloading media assets from upstream does not
 establish legal compliance. Source materials and notices remain separate from
 the Qlisa binary release. Release artifacts are not checked into Git; do not
