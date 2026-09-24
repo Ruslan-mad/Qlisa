@@ -19,8 +19,8 @@ and verified.
   a masked PowerShell prompt. It never prints or creates the private key.
 - FFmpeg, ffprobe, and libmpv runtime files matching the SHA-256 pins in
   `scripts/runtime-manifest.json`. FFmpeg must also include its pinned license
-  and Gyan build notice. If FFmpeg is absent, the script stages the pinned
-  archive through `scripts/prepare-runtime.ps1`.
+  and `README-BtbN-build.txt` notice. If FFmpeg is absent, the script stages
+  the pinned archive through `scripts/prepare-runtime.ps1`.
 
 The script checks that these runtime files and notices are configured in
 `src-tauri/tauri.windows.conf.json`. It scans the source tree for NDI Runtime
@@ -68,10 +68,11 @@ different `.nsis.zip` updater artifact and is not used here.
 
 A successful local build does not establish that redistribution is ready.
 Before publishing, provide and review the exact corresponding sources, build
-inputs, and notices required for the FFmpeg 9.0.1 Gyan essentials build
-(including libsrt) and the selected libmpv DLL. Current evidence and remaining
-gaps are recorded in `scripts/runtime-manifest.json`,
-`docs/THIRD_PARTY_SOURCE_OFFER.md`, and `docs/dependency-license-audit.md`.
+inputs, and notices required for the pinned BtbN FFmpeg 9.0 GPL static build
+(including its statically linked components) and the selected libmpv DLL.
+Current evidence and remaining gaps are recorded in
+`scripts/runtime-manifest.json`, `docs/THIRD_PARTY_SOURCE_OFFER.md`, and
+`docs/dependency-license-audit.md`.
 Do not publish until the required source and notices are assembled and
 verified. Upload the installer, matching `.sig`, `latest.json`, and required
 source and notice assets to the same release.

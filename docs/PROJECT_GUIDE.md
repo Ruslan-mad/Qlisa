@@ -345,8 +345,9 @@ stored at the same scope; inspect the struct before deciding.
 - Windows Qlisa app builds always use `vendor/asiosdk/` via
   `src-tauri/.cargo/config.toml` and enable `asio-support`.
 - Windows release builds require locally staged FFmpeg/ffprobe files under
-  `src-tauri/vendor/ffmpeg/`. `scripts/sync-network-runtime.ps1` fetches the
-  pinned Gyan archive and verifies its checksum before staging it. NDI Runtime
+  `src-tauri/vendor/ffmpeg/`. The selected runtime pair comes from one pinned
+  BtbN FFmpeg 9.0 GPL static archive. See
+  [FFmpeg source and build provenance](THIRD_PARTY_SOURCE_OFFER.md). NDI Runtime
   is installed separately by the user and is not a build or installer input.
   The Windows libmpv DLL under `src-tauri/vendor/mpv/` remains a local
   prerequisite and is not tracked. A checkout alone is not a complete Windows
@@ -411,8 +412,9 @@ public key and GitHub Releases `latest.json` endpoint. It checks for updates at
 startup and through the Help/About UI. It downloads the signed update, then
 blocks installation while cues run or the workspace has unsaved changes.
 The implementation has not passed an end-to-end test against a published
-signed release. FFmpeg and libmpv corresponding-source archives are also still
-required before binary distribution. Release artifacts are not checked into
+signed release. The complete FFmpeg corresponding-source package and libmpv
+corresponding-source archive are also still required before binary
+distribution. Release artifacts are not checked into
 Git; do not reuse Inkue updater metadata.
 
 `scripts/release.mjs` performs the version update, local release commit, and
@@ -547,8 +549,7 @@ progress and cancellation, and applying an output to its cue with a restore
 path. Compatibility results are heuristics for the playback engine; they do
 not guarantee decode quality on every platform. Conversion and metadata probes
 run outside the audio callback and transport path. Windows packaging maps both
-`ffmpeg.exe` and `ffprobe.exe`; `scripts/sync-network-runtime.ps1` refreshes
-both executables from the pinned FFmpeg archive. See
+`ffmpeg.exe` and `ffprobe.exe`; both come from one pinned BtbN archive. See
 [Windows network runtime packaging](windows-network-runtime.md).
 
 ### Diagnostics
@@ -607,7 +608,7 @@ state events report the actual lifecycle state.
 | Audio is silent or the selected device disappeared | Check Preferences → Audio, health alerts, and machine config. The device watchdog attempts fallback/recovery; verify Output Patches and channel mapping. |
 | Media cue appears stuck/loading or has no duration | Check path, codec/decode alert, file permissions, and Preflight/Relink. Inspect logs; metadata and decodes run off the UI path. |
 | NDI not available | Install the official NDI Runtime separately, then check Preferences → NDI/SRT Output status. A valid local runtime is required for NDI discovery/sender startup. Qlisa does not bundle the DLL. |
-| SRT reports unavailable | Check the bundled FFmpeg exists and supports SRT; use `scripts/sync-network-runtime.ps1` for the pinned Windows payload. |
+| SRT reports unavailable | Check the bundled FFmpeg exists and supports SRT; confirm the pinned Windows payload described in [FFmpeg source and build provenance](THIRD_PARTY_SOURCE_OFFER.md) is staged. |
 | Installer builds without FFmpeg/SRT support | Confirm the pinned FFmpeg files and notices are staged under `src-tauri/vendor/ffmpeg/`, then inspect `src-tauri/target/release/bundle/` after build. |
 | A new Tauri window fails to use filesystem/window APIs | Check the window's label and `src-tauri/capabilities/*.json`; permissions are scoped by window. |
 | Build output does not match a fresh source edit | Close Qlisa/tauri dev if files are locked, rebuild, inspect the executable/resources timestamp, then launch the intended output path. |

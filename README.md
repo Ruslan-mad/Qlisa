@@ -32,7 +32,7 @@ NDI is optional. Install the official [NDI Runtime](https://ndi.video/) separate
 
 The Windows development and packaging path uses Windows 10/11, Rust stable, Node.js, pnpm, Tauri 2 prerequisites, Visual Studio C++ Build Tools, and the Windows SDK. Install frontend dependencies with `pnpm install`.
 
-Windows Qlisa builds use the ASIO-enabled Cargo feature and the ASIO 2.3 interfaces in `vendor/asiosdk/`. The Windows visual output engine loads `src-tauri/vendor/mpv/libmpv-2.dll` at runtime; this DLL is a local prerequisite and is not in Git. Development that uses NDI needs the separately installed NDI Runtime. NDI DLL files are not build or installer inputs. FFmpeg/ffprobe are needed to exercise media conversion and SRT and are staged locally for Windows installer creation; they are not stored in Git.
+Windows Qlisa builds use the ASIO-enabled Cargo feature and the ASIO 2.3 interfaces in `vendor/asiosdk/`. The Windows visual output engine loads `src-tauri/vendor/mpv/libmpv-2.dll` at runtime; this DLL is a local prerequisite and is not in Git. Development that uses NDI needs the separately installed NDI Runtime. NDI DLL files are not build or installer inputs. FFmpeg/ffprobe are needed to exercise media conversion and SRT and are staged from one pinned BtbN archive for Windows installer creation; the runtime executables are not stored in Git. See the [FFmpeg source and build record](docs/THIRD_PARTY_SOURCE_OFFER.md).
 
 Useful commands from the repository root:
 

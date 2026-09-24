@@ -9,19 +9,30 @@ Qlisa's Windows network code uses two separately supplied runtimes:
 
 NDI is optional. Install the official [NDI Runtime](https://ndi.video/) to use NDI sources or destinations. Qlisa does not download, bundle, or install it. NDI® is a registered trademark of Vizrt NDI AB.
 
-## FFmpeg build currently documented
+## Pinned FFmpeg build
 
-The known build is Gyan FFmpeg 9.0.1 essentials for Windows x64:
+The selected build is BtbN FFmpeg 9.0 GPL static for Windows x86_64:
 
-- Archive: `https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip` (GyanD release archive; build provider: [Gyan](https://www.gyan.dev/ffmpeg/builds/))
-- SHA-256: `fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9`
-- License: GPLv3
-- libsrt: `1.5.6-2-gfcae571`, as reported by the build notice
-- Upstream FFmpeg commit and build configuration: see the Gyan build notice shipped with that archive.
+- Release tag: [`autobuild-2026-09-23-14-55`](https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-09-23-14-55)
+- Archive: [`ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip`](https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-23-14-55/ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip)
+- Archive SHA-256: `fdea132b8059ba9dfd6c1ce05bd831a85e665705f03e50162ae2fe599223b5ae`
+- FFmpeg version: `n9.0.2-3-ga5923073bf-20260923`, from FFmpeg commit [`a5923073bfd8f25b7300d93af3f8e690174ebd30`](https://github.com/FFmpeg/FFmpeg/commit/a5923073bfd8f25b7300d93af3f8e690174ebd30)
+- Build scripts/configuration: BtbN/FFmpeg-Builds commit [`ccbffa4f85d0e8de5c135c69ebb10e4c14911fa9`](https://github.com/BtbN/FFmpeg-Builds/tree/ccbffa4f85d0e8de5c135c69ebb10e4c14911fa9)
+- Executables: `ffmpeg.exe` and `ffprobe.exe` from this one archive; their hashes are listed in the [build provenance notice](../src-tauri/vendor/ffmpeg/README-BtbN-build.txt).
+- License: GPLv3 (`--enable-gpl --enable-version3`); archive `LICENSE.txt` matches the staged `LICENSE` file.
+- SRT: enabled in the build configuration.
 
-Use the versioned archive URL and verify its checksum before staging. The provider's floating `latest` URL is not a release pin. The binaries and notices are kept outside Git; a local release setup may stage them in `src-tauri/vendor/ffmpeg/` for the existing Tauri bundle mapping. Keep `ffmpeg.exe`, `ffprobe.exe`, `LICENSE`, and `README-Gyan-build.txt` from the same archive together. Do not replace one file independently.
+Use this versioned asset URL and verify its checksum before staging. The
+provider's floating `latest` URL is not a release pin. Runtime executables are
+kept outside Git; a local release setup may stage them in
+`src-tauri/vendor/ffmpeg/` for the Tauri bundle. Keep both executables from the
+same archive, the matching `LICENSE`, and `README-BtbN-build.txt` together.
 
-The FFmpeg and libsrt source obligations apply when redistributing the installer. Include the exact corresponding source/build configuration or a compliant written offer with each binary release. Update [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) when the staged version changes.
+The BtbN build scripts and FFmpeg source are public, but the exact corresponding
+source set for statically linked components and applicable notices still needs
+review. Binary redistribution remains blocked until the exact sources and
+notices are assembled. See [source-offer status](THIRD_PARTY_SOURCE_OFFER.md)
+and [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
 ## Build behavior
 

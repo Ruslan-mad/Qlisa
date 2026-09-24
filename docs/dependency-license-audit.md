@@ -31,9 +31,9 @@ The review is based on lockfile versions and registry metadata, not the package 
 
 ### FFmpeg and libsrt
 
-The documented payload is Gyan FFmpeg **9.0.1 essentials**, archive [`ffmpeg-9.0.1-essentials_build.zip`](https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip), SHA-256 `fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9`. The locally inspected executable hashes were `ffmpeg.exe` `72a489eccd008c2ec2c0a5856c5c75bc3d8bbfa90166c4566865c246445e6aa3` and `ffprobe.exe` `19202b23c0043f15ad1b7bce2344f406fd52bd6efd8f995ce02e7392a1cec52f`; match these against the runtime files recorded in a release compliance manifest. The included Gyan build notice says GPL v3 and identifies upstream FFmpeg commit [`bf1b838f2a`](https://github.com/FFmpeg/FFmpeg/commit/bf1b838f2a). The same notice lists external libraries and exact-looking revision strings, including libsrt **1.5.6-2-gfcae571**, under MPL-2.0.
+The selected payload is BtbN FFmpeg **9.0 GPL static**, archive [`ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip`](https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-23-14-55/ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip), SHA-256 `fdea132b8059ba9dfd6c1ce05bd831a85e665705f03e50162ae2fe599223b5ae`. The archive contains both executables; their hashes are recorded in [`README-BtbN-build.txt`](../src-tauri/vendor/ffmpeg/README-BtbN-build.txt). The archive's `LICENSE.txt` is GPL version 3 and matches the staged `src-tauri/vendor/ffmpeg/LICENSE`. Its build configuration enables `libsrt`; the exact SRT source revision and associated license for this artifact have not been established.
 
-This is a static FFmpeg build with many external libraries. The FFmpeg source commit by itself is not the corresponding source for the complete binary. Before redistributing `ffmpeg.exe` or `ffprobe.exe`, collect and retain the precise Gyan source/build inputs for this archive, all covered sources and modifications for bundled libraries (including the identified libsrt revision), configuration/build information, and all applicable GPL/MPL/license notices. The exact corresponding source set has not yet been verified or assembled. **Binary release blocker.**
+The FFmpeg source and pinned BtbN build scripts are public, but the exact corresponding source set for every statically linked component has not been verified or assembled. Before redistributing `ffmpeg.exe` or `ffprobe.exe`, collect and retain the applicable dependency sources and modifications, build inputs/configuration, and license notices. **Binary release blocker.** See [FFmpeg source offer](THIRD_PARTY_SOURCE_OFFER.md).
 
 ### libmpv
 
@@ -42,5 +42,5 @@ The locally staged `libmpv-2.dll` is from the generic x86_64, non-LGPL asset in 
 ## Decision
 
 - **Source repository:** no dependency-license blocker found. Locked MPL crates and development tooling have public source; the repository does not include compiled third-party binaries as part of this license audit.
-- **Binary release:** not ready until corresponding source and notices for the exact FFmpeg/libsrt and libmpv payloads are gathered and matched to the final binaries.
+- **Binary release:** not ready until corresponding source and notices for the exact BtbN FFmpeg build and libmpv payloads are gathered and matched to the final binaries.
 - **Updater:** this audit does not determine updater signing-key readiness.

@@ -64,7 +64,7 @@ local build does not need source archives:
 
 ```powershell
 $manifest = Get-Content -Raw (Join-Path $testRoot 'scripts/runtime-manifest.json') | ConvertFrom-Json
-$ffmpeg = @($manifest.components | Where-Object id -eq 'ffmpeg-gyan-essentials')
+$ffmpeg = @($manifest.components | Where-Object id -eq 'ffmpeg-btbn-gpl-n9.0')
 $mpv = @($manifest.components | Where-Object id -eq 'libmpv')
 if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { throw 'Expected one FFmpeg and one libmpv runtime record.' }
 $runtimeFiles = @($ffmpeg[0].runtimeFiles) + @($ffmpeg[0].notices) + @($mpv[0])
