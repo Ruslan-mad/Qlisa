@@ -13,7 +13,7 @@ command keeps the application version synchronized in `package.json`,
 `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.lock`.
 `.inkue` workspaces and several internal `inkue` names are retained for
 compatibility. This is not an official upstream Inkue release checkout. The
-current version in this checkout is 1.5.4. The source repository is public at
+current version in this checkout is 1.5.5. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
 downloads. The Tauri updater is configured for signed GitHub Releases. The
 1.5.4 local updater E2E check passed. The 1.5.5 per-machine installation and
