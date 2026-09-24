@@ -21,6 +21,8 @@ and verified.
   `scripts/runtime-manifest.json`. FFmpeg must also include its pinned license
   and `README-BtbN-build.txt` notice. If FFmpeg is absent, the script stages
   the pinned archive through `scripts/prepare-runtime.ps1`.
+- The libmpv pin is the generic x86_64 `mpv-dev` asset from shinchiro release
+  `20260923`; its exact DLL and archive hashes are in the runtime manifest.
 
 The script checks that these runtime files and notices are configured in
 `src-tauri/tauri.windows.conf.json`. It scans the source tree for NDI Runtime

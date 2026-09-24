@@ -74,59 +74,52 @@
     {
       "id": "libmpv",
       "kind": "runtime-dll",
-      "version": "v0.41.0-1065-gf9850ee72",
+      "version": "v0.41.0-1055-g6fd80b200",
       "path": "src-tauri/vendor/mpv/libmpv-2.dll",
-      "sha256": "861ac44349277bdb17f2a2d229111edaa4438e0a3eca88fb49b7b684c66828e5",
+      "sha256": "751131f81b5ce485d046ff08d1a44a93c5455be5135d53c0ab19c56780925ff0",
       "binaryEvidence": {
-        "sha256": "861ac44349277bdb17f2a2d229111edaa4438e0a3eca88fb49b7b684c66828e5",
+        "sha256": "751131f81b5ce485d046ff08d1a44a93c5455be5135d53c0ab19c56780925ff0",
         "architecture": "windows-x86_64",
-        "peTimestampUtc": "2026-09-23T13:07:40Z",
-        "versionText": "v0.41.0-1065-gf9850ee72"
+        "peTimestampUtc": "2026-09-23T00:40:14Z",
+        "versionText": "v0.41.0-1055-g6fd80b200"
       },
       "build": {
-        "provider": "zhongfly/mpv-winbuild",
-        "releaseTag": "2026-09-23-f9850ee727",
-        "archive": "mpv-dev-x86_64-20260923-git-f9850ee727.7z",
-        "archiveUrl": "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-09-23-f9850ee727/mpv-dev-x86_64-20260923-git-f9850ee727.7z",
-        "archiveSizeBytes": 32124134,
-        "archiveSha256": "fc099b9700730266a10dc6544f0c3670cbbc9d7dc81bda7421b802f9eb45876a",
-        "buildRun": "https://github.com/zhongfly/mpv-winbuild/actions/runs/35864255638",
-        "buildRepositoryCommit": "88bdc4db67bb476a7606921eb2d68b273440d59b",
-        "workflowAtBuildCommit": "https://github.com/zhongfly/mpv-winbuild/blob/88bdc4db67bb476a7606921eb2d68b273440d59b/.github/workflows/mpv.yml",
+        "provider": "shinchiro/mpv-winbuild-cmake",
+        "releaseTag": "20260923",
+        "archive": "mpv-dev-x86_64-20260923-git-6fd80b2003.7z",
+        "archiveUrl": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260923/mpv-dev-x86_64-20260923-git-6fd80b2003.7z",
+        "archiveSizeBytes": 31476420,
+        "archiveSha256": "372f29c292d0c8b4ce916225739e5872e35b8e11f3f4590c285baed8ba551100",
+        "buildRun": "https://github.com/shinchiro/mpv-winbuild-cmake/actions/runs/35800030374",
+        "buildRepositoryCommit": "05a60b3cfd04e3e3b89918f4a27f3dde2935dff2",
+        "workflowAtBuildCommit": "https://github.com/shinchiro/mpv-winbuild-cmake/blob/05a60b3cfd04e3e3b89918f4a27f3dde2935dff2/.github/workflows/mpv_clang.yml",
         "compiler": "clang",
-        "target": "generic x86_64 (non-v3)",
-        "lgplVariant": false,
+        "target": "generic x86_64 (not x86_64-v3)",
         "workflowRunSucceeded": true
       },
       "source": {
-        "url": "https://github.com/mpv-player/mpv/commit/f9850ee727ed54a4feb042a5c0802768f141810b",
-        "revision": "f9850ee727ed54a4feb042a5c0802768f141810b",
+        "url": "https://github.com/mpv-player/mpv/commit/6fd80b2003873ef2bed09e78374549687a143236",
+        "revision": "6fd80b2003873ef2bed09e78374549687a143236",
         "binaryBuildOriginVerified": true,
         "dependencyRevisionsVerified": false,
         "buildConfigurationVerified": false,
         "sourceArchive": null,
-        "sourceNotes": "Release notes report the exact mpv source commit. The pinned workflow/run identifies clang and the generic non-v3, non-LGPL x86_64 variant. Full configure flags and per-package source revisions are not confirmed because the CI source-revision summary artifact requires GitHub authentication. The release asset contains the DLL and headers, not the dependency source package."
-      },
-      "abi": {
-        "architecture": "PE32+ x86-64",
-        "exportedSymbolCount": 206,
-        "applicationRequiredSymbols": 24,
-        "missingApplicationRequiredSymbols": []
+        "sourceNotes": "The release identifies the mpv source commit and build-system release. The pinned workflow uses clang and the generic x86_64 variant, but its container image and caches are mutable. Exact dependency source revisions, patches, and the complete resolved configuration are not verified; the workflow run source summary is unavailable from the public release asset. The downloaded development archive contains the DLL and headers, not corresponding dependency sources."
       },
       "smokeTest": {
         "date": "2026-09-24",
-        "audio": "passed via WASAPI with a generated 4-second WAV",
-        "video": "passed via GPU output with a generated 4-second H.264 MP4",
-        "seek": "passed; absolute seek to about 2 seconds advanced time-pos to 2.23 seconds",
-        "multipleOutputs": "passed; two simultaneous GPU video contexts advanced independently",
-        "applicationStartup": "passed; Qlisa debug app created five libmpv render contexts"
+        "evidence": "Isolated smoke test of the shinchiro 20260923 candidate; see docs/THIRD_PARTY_SOURCE_OFFER.md.",
+        "audio": "passed; ao=wasapi was configured, physical audio output was not verified",
+        "video": "passed",
+        "seek": "passed",
+        "multipleOutputs": "passed; two concurrent libmpv contexts"
       },
       "license": {
-        "identifier": "GPL-enabled; exact combined license pending dependency review",
-        "evidence": "The selected non-LGPL mpv-dev build is GPL-enabled. The exact combined license and notices for its statically linked components are not established until corresponding source revisions are reviewed."
+        "identifier": "Combined license not established; source review pending",
+        "evidence": "The exact license obligations for statically linked dependencies have not been established from the available build records and source revisions."
       },
       "releaseCompliance": "not-ready",
-      "releaseBlocker": "The exact dependency source revisions and corresponding source package for this GPL-enabled DLL are not available in the downloaded asset; CI's source-revision summary artifact requires GitHub authentication."
+      "releaseBlocker": "The exact dependency source revisions, patches, complete build configuration, and corresponding source package for this DLL are not available or verified."
     },
     {
       "id": "ndi-runtime",

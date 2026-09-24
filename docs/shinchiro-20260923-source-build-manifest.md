@@ -6,8 +6,8 @@ Status: **provenance incomplete; this document is not a release-readiness or com
 
 | Component | Selected artifact | Confirmed source commit | Evidence |
 | --- | --- | --- | --- |
-| FFmpeg runtime | `ffmpeg-x86_64-git-7d14defcc.7z` | `7d14defcc1b56a53f35dc78072844daaf50d58ea` | [20260923 release assets](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260923); [FFmpeg commit](https://github.com/FFmpeg/FFmpeg/commit/7d14defcc1b56a53f35dc78072844daaf50d58ea) |
-| libmpv development package | `mpv-dev-x86_64-20260923-git-6fd80b2003.7z` | `6fd80b2003873ef2bed09e78374549687a143236` | [20260923 release assets](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260923); [mpv commit](https://github.com/mpv-player/mpv/commit/6fd80b2003873ef2bed09e78374549687a143236) |
+| Historical FFmpeg runtime (not selected) | `ffmpeg-x86_64-git-7d14defcc.7z` | `7d14defcc1b56a53f35dc78072844daaf50d58ea` | [20260923 release assets](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260923); [FFmpeg commit](https://github.com/FFmpeg/FFmpeg/commit/7d14defcc1b56a53f35dc78072844daaf50d58ea) |
+| Selected libmpv development package | `mpv-dev-x86_64-20260923-git-6fd80b2003.7z`; SHA-256 `372f29c292d0c8b4ce916225739e5872e35b8e11f3f4590c285baed8ba551100` | `6fd80b2003873ef2bed09e78374549687a143236` | [20260923 release assets](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260923); [mpv commit](https://github.com/mpv-player/mpv/commit/6fd80b2003873ef2bed09e78374549687a143236) |
 | Build system | `shinchiro/mpv-winbuild-cmake` at `05a60b3cfd04e3e3b89918f4a27f3dde2935dff2` | `05a60b3cfd04e3e3b89918f4a27f3dde2935dff2` | [release workflow run #1355](https://github.com/shinchiro/mpv-winbuild-cmake/actions/runs/35800030374); [build-system commit](https://github.com/shinchiro/mpv-winbuild-cmake/commit/05a60b3cfd04e3e3b89918f4a27f3dde2935dff2) |
 
 The selected package is the generic `x86_64` variant. It is not the separate `x86_64-v3` artifact.
@@ -41,8 +41,10 @@ The build stopped at step 321/750 while fetching the `opus-dnn` model from [Xiph
 
 ## Unresolved libmpv dependency provenance
 
+The staged DLL is `v0.41.0-1055-g6fd80b200`, SHA-256 `751131f81b5ce485d046ff08d1a44a93c5455be5135d53c0ab19c56780925ff0`. Its archive has SHA-256 `372f29c292d0c8b4ce916225739e5872e35b8e11f3f4590c285baed8ba551100`. Isolated playback, seek, and two concurrent libmpv context checks passed; WASAPI was configured, but physical audio output was not verified. These binary and smoke records are also in `scripts/runtime-manifest.json`.
+
 The public release establishes the mpv source commit and the build-system commit. It does **not** establish exact source commits for every statically linked libmpv dependency, the exact dependency patches applied to that build, or the full resolved build configuration.
 
 The release's [workflow run #1355](https://github.com/shinchiro/mpv-winbuild-cmake/actions/runs/35800030374) identifies the build and source refs but its short-retention log artifacts are expired. The workflow source shows package source caches and `ninja update`; package recipes can select mutable upstream refs. A different public gist revision was verified to belong to the following day's run, so its dependency hashes are intentionally excluded here. In particular, the local libSRT pin above must not be presented as the historical libSRT revision in the published libmpv build.
 
-To complete compliance provenance, preserve a source/build bundle for the exact local outputs: immutable source commits for every linked dependency, the exact build-system commit and applied patches, configure/build commands, toolchain/container image digest, and output hashes. Until that bundle and the local binary/test evidence exist, status remains **not ready**.
+To complete compliance provenance, preserve a source/build bundle for the exact DLL: immutable source commits for every linked dependency, the exact build-system commit and applied patches, configure/build commands, toolchain/container image digest, and output hash. The DLL hash and local smoke evidence are now recorded, but the corresponding source bundle is still missing; status remains **not ready**.
