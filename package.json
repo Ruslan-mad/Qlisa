@@ -1,6 +1,6 @@
 {
   "name": "qlisa",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "private": true,
   "license": "GPL-3.0-or-later",
   "description": "Qlisa — cross-platform show control, derived from Inkue",
