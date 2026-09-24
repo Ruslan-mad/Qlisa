@@ -1,20 +1,31 @@
 # Local per-machine updater test
 
-Use a loopback feed to test the signed update from **1.5.5 to 1.5.6**. This is the preferred end-to-end test. It creates no GitHub Release and does not change the production endpoint. The old local 1.5.3 → 1.5.4 test passed; this 1.5.5 → 1.5.6 test is pending.
+This document records the local signed update from **1.5.5 to 1.5.6** and the procedure to repeat it. It creates no GitHub Release and does not change the production endpoint. The old local 1.5.3 → 1.5.4 test also passed.
 
 The test uses a detached worktree and the `QlisaUpdaterTest` product identity. Both builds use the checked-in NSIS `perMachine` setting and the updater's `passive` setting. The updater artifact contains Qlisa only. FFmpeg, ffprobe, and libmpv are downloaded by the app into `%LOCALAPPDATA%\Qlisa\runtime`; do not copy vendor binaries into the worktree or installer.
 
 ## Verified local smoke checks (1.5.5)
 
-These checks used an isolated profile. They do not replace the pending signed per-machine updater test below.
+These earlier checks used an isolated profile. Per-machine results are recorded below.
 
 - A clean launch downloaded FFmpeg, ffprobe, and libmpv and verified their pinned SHA256 hashes. A second launch reused the files without downloading them again.
 - After ffprobe was removed, the app restored it and kept the already loaded libmpv DLL unchanged.
 - Qlisa's media conversion reached 100% and created the converted output file.
 - A 32-second video cue ran on the Main output. Dragging the Time slider from about 24.8 seconds to about 4.7 seconds changed playback position, confirming seek.
-- An Audio cue loaded `tone.wav`, started, and completed in Qlisa. Physical sound was not independently heard.
+- An Audio cue loaded `tone.wav`, started, and completed in Qlisa. Physical sound was confirmed during the per-machine verification below.
 - A video cue was assigned to Main and the isolated Local SRT Smoke output at `127.0.0.1:19077`. The loopback receiver received MPEG-TS with H.264/AAC and decoded sampled frames from the actual color-bar cue; the receiver exited successfully. This also exercised simultaneous Main and SRT destinations.
-- A clean per-machine installer run, uninstall, and signed updater end-to-end run remain pending.
+- A clean per-machine installation, offline runtime retry, and signed updater update are verified below.
+
+## Verified per-machine install and updater (1.5.5 to 1.5.6)
+
+- The signed 1.5.5 installer completed a clean per-machine install under `C:\Program Files\Qlisa`, including UAC and first launch.
+- An offline bootstrap check blocked the pinned runtime download with a temporary outbound firewall rule. Qlisa displayed the download error and Retry action. After removing the rule, Retry installed FFmpeg, ffprobe, and libmpv with their pinned hashes, then opened the main window.
+- The signed 1.5.6 update completed under the `QlisaUpdaterTest` identity. About, the registry, and the executable reported 1.5.6. A saved Memo workspace reopened with its SHA-256 unchanged. The light theme and runtime remained available.
+- The `QlisaUpdaterTest` installation was removed after the check. The production installation remained intact.
+- The user heard the physical Audio Cue during the audio check.
+- Settings runtime reinstallation failed on 1.5.5 because the standalone Preferences window lacked the restart permission. Commit `7e68180` adds that permission. Recheck Settings runtime reinstallation on an installed 1.5.6 build.
+
+The production installer candidate is `src-tauri/target/release/bundle/nsis/Qlisa_1.5.6_x64-setup.exe` (SHA-256 `929b56a162af2d85adaf390e1fc12bf9b2cf5e42d924350206ca935c3afe6add`). Its updater signature is `src-tauri/target/release/bundle/nsis/Qlisa_1.5.6_x64-setup.exe.sig` (SHA-256 `862136e5395130c539602f786be8dd6f70cf9dd0027ef75bd16fccef06cfb267`). Local feed metadata is `src-tauri/target/release/prepared/v1.5.6/latest.json` (SHA-256 `259db74935cc772143b2d7f2c9668caaba672c4b8be598410ab6c6fc4b305a04`). These are local artifacts; they have not been published.
 
 ## Build the signed baseline and update
 

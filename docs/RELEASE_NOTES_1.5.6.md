@@ -2,5 +2,4 @@
 
 ## Windows runtime setup
 
-- Qlisa can now restart after reinstalling its media runtime. This lets runtime
-  repair finish and return directly to the application.
+- Fixed restart permission in Settings after reinstalling the media runtime.
