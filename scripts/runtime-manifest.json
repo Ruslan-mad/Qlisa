@@ -52,17 +52,22 @@
         {
           "source": "tracked repository provenance notice",
           "path": "src-tauri/vendor/ffmpeg/README-BtbN-build.txt",
-          "sha256": "9511d8b9cb2abbf01b22426dc8b9ca9a5e22f7f9a17fd2891f36c4db630af449"
+          "sha256": "bf59391fe6d8be64dd6fac6aa3f50779a0fe1c3de97943d681d82c8ca121977b"
         }
       ],
       "srt": {
         "enabled": true,
-        "evidence": "ffmpeg.exe -hide_banner -protocols from the pinned archive listed srt."
+        "evidence": "ffmpeg.exe -hide_banner -protocols from the pinned archive listed srt.",
+        "sourceRepository": "https://github.com/Haivision/srt",
+        "sourceCommit": "ff8ab25c57aece5b7351defe36dacc94fc28527f",
+        "sourceCommitUrl": "https://github.com/Haivision/srt/commit/ff8ab25c57aece5b7351defe36dacc94fc28527f",
+        "recipePinUrl": "https://github.com/BtbN/FFmpeg-Builds/blob/ccbffa4f85d0e8de5c135c69ebb10e4c14911fa9/scripts.d/50-srt.sh",
+        "pinScope": "BtbN build recipe source pin; not independent attestation of the source embedded in this binary."
       },
       "sourceOffer": {
         "status": "not-ready",
         "blockers": [
-          "The pinned BtbN build-system source commit is public and recorded, but the exact corresponding source set for every statically linked dependency has not been independently verified or assembled."
+          "The pinned BtbN build recipe downloads the libvpl PR 198 patch from a mutable pull/198.patch URL; the exact patch content applied when this artifact was built is not confirmed, so the exact corresponding source set is not established."
         ]
       }
     },

@@ -16,6 +16,7 @@
 | `ffmpeg.exe` SHA-256 | `288ef71027b17e4d83d5d95777f14495fc59cc53e7b4c35637d0d68269c6d151` |
 | `ffprobe.exe` SHA-256 | `8603cd025c0fa317091ea5e3f6b3a4181bf21c71a2dc30ac049789459265db7a` |
 | License evidence | Release is labeled GPL, static; build configuration reports `--enable-gpl --enable-version3`. The archive's `LICENSE.txt` is GPL version 3. |
+| libsrt recipe pin | [Pinned BtbN `scripts.d/50-srt.sh`](https://github.com/BtbN/FFmpeg-Builds/blob/ccbffa4f85d0e8de5c135c69ebb10e4c14911fa9/scripts.d/50-srt.sh) sets [Haivision SRT commit `ff8ab25c57aece5b7351defe36dacc94fc28527f`](https://github.com/Haivision/srt/commit/ff8ab25c57aece5b7351defe36dacc94fc28527f). This is a recipe pin, not independent binary attestation. |
 
 Both executables are in this one archive. Its build configuration also enables
 libsrt. The archive has no separate README or build notice; the project
@@ -24,14 +25,15 @@ provenance record is [`README-BtbN-build.txt`](../src-tauri/vendor/ffmpeg/README
 ### Corresponding-source status: blocked
 
 The pinned BtbN source commit provides public build scripts and variant
-configuration. The FFmpeg source commit is also public. These links identify
-the build recipe and FFmpeg revision, but they do not by themselves provide a
-reviewed, complete corresponding-source package for every statically linked
-component in the archive. The exact dependency source revisions, any patches,
-applicable license texts/notices, and complete source bundle still need to be
-collected and reviewed. Do not describe binary redistribution as ready until
-that source and notice review is complete. Keep the release compliance field
-`correspondingSource: false` until then.
+configuration. Its libsrt recipe pins the source commit listed above. This is
+evidence of the recipe input, not independent proof of the source used in the
+binary. One confirmed source gap remains: `scripts.d/50-onevpl.sh` downloads
+the libvpl PR 198 patch from the mutable URL
+[`https://github.com/intel/libvpl/pull/198.patch`](https://github.com/intel/libvpl/pull/198.patch)
+and applies it. The exact patch content used for this artifact build has not
+been confirmed. Do not describe binary redistribution as ready until that
+patch is identified and included with the corresponding source material. Keep
+the release compliance field `correspondingSource: false` until then.
 
 ## Superseded Gyan FFmpeg 9.0.1 build
 

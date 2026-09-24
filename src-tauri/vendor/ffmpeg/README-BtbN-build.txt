@@ -25,10 +25,17 @@ The archive's LICENSE.txt is GPL version 3 and is byte-identical to the
 LICENSE file staged beside this notice (SHA-256:
 8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903).
 
+The pinned BtbN recipe at `scripts.d/50-srt.sh` sets libsrt source commit
+`ff8ab25c57aece5b7351defe36dacc94fc28527f`:
+https://github.com/BtbN/FFmpeg-Builds/blob/ccbffa4f85d0e8de5c135c69ebb10e4c14911fa9/scripts.d/50-srt.sh
+The corresponding upstream commit is:
+https://github.com/Haivision/srt/commit/ff8ab25c57aece5b7351defe36dacc94fc28527f
+This is a build-recipe pin. It does not independently attest that this exact
+source was used in the released binary.
+
 This file records artifact identity and public build-source links. It is not a
-corresponding-source package. Before binary distribution, review and assemble
-the exact corresponding sources, modifications, build inputs, and applicable
-third-party notices for the statically linked components. Public access to the
-FFmpeg source and BtbN build scripts alone does not establish that this set is
-complete. Keep the release compliance status blocked until that review is
-complete.
+corresponding-source package. The recipe downloads the libvpl PR 198 patch from
+the mutable URL https://github.com/intel/libvpl/pull/198.patch. The exact patch
+content applied during this artifact build is not confirmed. Keep release
+compliance blocked until that exact patch is identified and included with the
+corresponding source material.
