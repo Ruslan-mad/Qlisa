@@ -227,11 +227,10 @@ Invoke-Checked 'Create updater latest.json' $node.Source @((Join-Path $script:Ro
 $parsed = Get-Content -Raw -LiteralPath $latestPath | ConvertFrom-Json
 $expectedUrl = "$script:RepoUrl/releases/latest/download/$($installer.Name)"
 $expectedNotes = (Get-Content -Raw -LiteralPath $releaseNotes).Trim()
-$pubDate = [datetimeoffset]::MinValue
+$pubDate = [datetimeoffset]$parsed.pub_date
 if ($parsed.version -cne $Version -or [string]$parsed.platforms.'windows-x86_64'.signature -cne $signature -or
     [string]$parsed.platforms.'windows-x86_64'.url -cne $expectedUrl -or
     [string]$parsed.notes -cne $expectedNotes -or
-    -not [datetimeoffset]::TryParse([string]$parsed.pub_date, [ref]$pubDate) -or
     $pubDate.Offset -ne [timespan]::Zero -or
     @($parsed.platforms.PSObject.Properties.Name) -notcontains 'windows-x86_64') {
     Fail 'Generated latest.json failed version, Windows platform, exact URL, exact signature text, UTC publication date, or release-notes checks.'
