@@ -21,7 +21,7 @@
         "evidence": "Gyan archive README.txt states GPL v3 and --enable-gpl --enable-version3."
       },
       "buildReference": {
-        "sourceCommit": "https://github.com/FFmpeg/FFmpeg/commit/bf1b838f2a",
+        "sourceCommit": "https://github.com/FFmpeg/FFmpeg/commit/bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
         "buildNoticeArchivePath": "README.txt",
         "configurationRecordedInNotice": true,
         "fullBuildInputsVerified": false
@@ -58,7 +58,8 @@
         "reportedLicense": "MPL-2.0",
         "licenseEvidenceUrl": "https://github.com/Haivision/srt/blob/fcae57145c000a9e7b72aa777adb8f85c2463242/LICENSE",
         "sourceUrl": "https://github.com/Haivision/srt/commit/fcae57145c000a9e7b72aa777adb8f85c2463242",
-        "sourceRevisionVerifiedAgainstArchive": true
+        "sourceRevisionResolvedFromBuildNotice": true,
+        "sourceRevisionVerifiedAgainstBinary": false
       },
       "reportedExternalLibraryVersions": {
         "evidence": "Version strings in the archive README.txt section 'release-essentials external libraries'",
@@ -112,9 +113,7 @@
         "status": "not-ready",
         "correspondingSourceArchive": null,
         "blockers": [
-          "The exact Gyan build scripts and patch set for this release have not been obtained.",
-          "The archive reports external-library versions, but the corresponding source checkouts, patches, and individual license obligations have not been independently verified.",
-          "The notice reports libsrt 1.5.6-2-gfcae571 and that short revision resolves to the recorded full SRT commit; the exact linked source/build inputs and any Gyan changes have not been independently verified."
+          "Gyan does not publish the complete corresponding source for this archive: its exact build scripts/patches and source inputs for statically linked external libraries are unavailable."
         ]
       }
     },
