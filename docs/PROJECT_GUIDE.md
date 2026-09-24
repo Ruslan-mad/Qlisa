@@ -20,9 +20,10 @@ downloads. The Tauri updater is configured for signed GitHub Releases. The
 signed 1.5.5-to-1.5.6 updater E2E check passed. Runtime bootstrap, offline
 retry, workspace preservation, and audio checks are recorded in
 [local updater testing](UPDATER_TESTING_LOCAL.md). The Settings runtime
-reinstallation test passed on the installed 1.5.6 build. Runtime source and license
-evidence is tracked separately; fetching media files from upstream does not
-establish legal compliance. See [Windows release preparation](RELEASING.md).
+reinstallation test passed on the installed 1.5.6 build. Runtime source and
+license evidence is tracked separately; fetching media files from upstream
+does not establish legal compliance. See
+[Windows release preparation](RELEASING.md).
 
 The app has a React/TypeScript Tauri front end and a Rust backend. The backend
 owns cue state, playback, native audio/video/output windows, networking,
