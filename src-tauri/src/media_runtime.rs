@@ -224,6 +224,10 @@ fn verify_hash(path: &Path, wanted: &str, what: &str) -> Result<(), String> {
     }
     Ok(())
 }
+fn files_to_replace(valid: [bool; 3], force: bool, reinstall_pending: bool) -> [bool; 3] {
+    let replace_all = force || reinstall_pending;
+    valid.map(|is_valid| replace_all || !is_valid)
+}
 fn prepare_sync(app: &AppHandle, force: bool) -> Result<MediaRuntimeStatus, String> {
     let _guard = PREPARE_LOCK
         .lock()
@@ -232,6 +236,13 @@ fn prepare_sync(app: &AppHandle, force: bool) -> Result<MediaRuntimeStatus, Stri
     if current.ready && !force {
         return Ok(current);
     }
+    // A valid DLL may already be loaded by OutputEngine during normal startup.
+    // Keep it in place when repairing only a missing/corrupt sibling file.
+    let replace = files_to_replace(
+        [current.ffmpeg, current.ffprobe, current.libmpv],
+        force,
+        reinstall_pending(),
+    );
     let ff = component("ffmpeg-btbn-gpl-n9.0")?;
     let mpv = component("libmpv")?;
     let base = runtime_dir();
@@ -278,11 +289,13 @@ fn prepare_sync(app: &AppHandle, force: bool) -> Result<MediaRuntimeStatus, Stri
             "libmpv-2.dll",
         )?;
         // Promote only verified files. Same-volume rename is atomic for each file.
-        for (src, name) in temp_ff
+        for (index, (src, name)) in temp_ff
             .iter()
             .zip(["ffmpeg.exe", "ffprobe.exe"])
             .chain(std::iter::once((&temp_mpv, "libmpv-2.dll")))
+            .enumerate()
         {
+            if !replace[index] { continue; }
             let staged = base.join(format!("{name}.new"));
             fs::copy(src, &staged).map_err(|e| e.to_string())?;
             #[cfg(windows)]
@@ -368,6 +381,12 @@ mod tests {
         assert_eq!(ffmpeg_member("pinned-root", "ffmpeg.exe").unwrap(), "pinned-root/bin/ffmpeg.exe");
         assert!(ffmpeg_member("../escape", "ffmpeg.exe").is_err());
         assert!(ffmpeg_member("pinned-root", "../escape").is_err());
+    }
+    #[test]
+    fn repair_replaces_only_the_missing_file() {
+        assert_eq!(files_to_replace([true, false, true], false, false), [false, true, false]);
+        assert_eq!(files_to_replace([true, false, true], true, false), [true; 3]);
+        assert_eq!(files_to_replace([true, false, true], false, true), [true; 3]);
     }
     #[test]
     fn status_requires_all_three_valid_files() {
