@@ -145,11 +145,28 @@ Copy-Item $update[0].FullName, ($update[0].FullName + '.sig') $feedDir
 $assetUrl = 'http://127.0.0.1:8765/' + [uri]::EscapeDataString($update[0].Name)
 $signaturePath = Join-Path $feedDir ($update[0].Name + '.sig')
 $latestPath = Join-Path $feedDir 'latest.json'
-node scripts/release.mjs --write-updater-metadata 1.5.3 docs/RELEASE_NOTES_1.5.3.md $assetUrl $signaturePath $latestPath
-if ($LASTEXITCODE -ne 0) { throw 'Could not create local updater metadata.' }
+$signature = [IO.File]::ReadAllText($signaturePath)
+if ([string]::IsNullOrWhiteSpace($signature) -or $signature -cne $signature.Trim()) { throw 'Updater signature must be non-empty and have no surrounding whitespace.' }
+$feedUri = [uri]$assetUrl
+if ($feedUri.Scheme -cne 'http' -or $feedUri.Host -cne '127.0.0.1' -or $feedUri.Port -ne 8765) { throw 'Test updater asset URL must use only the local loopback feed.' }
+$notes = (Get-Content -Raw 'docs/RELEASE_NOTES_1.5.3.md').Trim()
+if ([string]::IsNullOrWhiteSpace($notes)) { throw 'Release notes are empty.' }
+$latest = [ordered]@{
+  version = '1.5.3'
+  notes = $notes
+  pub_date = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
+  platforms = [ordered]@{
+    'windows-x86_64' = [ordered]@{
+      url = $assetUrl
+      signature = $signature
+    }
+  }
+}
+[IO.File]::WriteAllText($latestPath, ($latest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
 $feed = Get-Content -Raw $latestPath | ConvertFrom-Json
 if ($feed.version -cne '1.5.3' -or $feed.platforms.'windows-x86_64'.url -cne $assetUrl -or
-    $feed.platforms.'windows-x86_64'.signature -cne [IO.File]::ReadAllText($signaturePath)) { throw 'Local latest.json does not match the installer and signature.' }
+    $feed.platforms.'windows-x86_64'.signature -cne $signature -or
+    $feed.pub_date -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$') { throw 'Local latest.json does not match the installer, exact signature text, or UTC publication date.' }
 Get-FileHash $update[0].FullName, $signaturePath, $latestPath -Algorithm SHA256
 ```
 
@@ -164,10 +181,9 @@ $feedServer = Start-Process -FilePath $python.Source -ArgumentList $serverArgs -
 Start-Sleep -Milliseconds 800
 try {
   $servedFeed = Invoke-RestMethod -Uri $feedUrl -TimeoutSec 3
-  $expectedSignature = [IO.File]::ReadAllText($signaturePath)
   if ($servedFeed.version -cne '1.5.3' -or
       $servedFeed.platforms.'windows-x86_64'.url -cne $assetUrl -or
-      $servedFeed.platforms.'windows-x86_64'.signature -cne $expectedSignature) {
+      $servedFeed.platforms.'windows-x86_64'.signature -cne $signature) {
     throw 'Port 8765 serves a feed other than this local signed 1.5.3 build.'
   }
 }
