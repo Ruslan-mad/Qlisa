@@ -1,44 +1,38 @@
-# Local updater end-to-end test
+# Local per-machine updater test
 
-This test uses two signed builds and a loopback HTTP feed. It creates no GitHub
-Release, tag, or production configuration change. Installers use the isolated
-`QlisaUpdaterTest` identity. Do not distribute them.
+Use a loopback feed to test the signed update from **1.5.5 to 1.5.6**. This is the preferred end-to-end test. It creates no GitHub Release and does not change the production endpoint. The old local 1.5.3 → 1.5.4 test passed; this 1.5.5 → 1.5.6 test is pending.
 
-Run this test after the private signed production 1.5.4 installer is built.
-Before running `scripts/publish.ps1 -Version 1.5.4`, record the current commit SHA as
-`$baselineCommit`; it must be the clean source commit whose four version fields
-are 1.5.3. Enter that exact SHA below after the production build. The updater
-test uses a detached worktree from that commit and does not change the
-production checkout. FFmpeg and libmpv runtime files and their pinned hashes
-must be ready. Keep the worktree, feed directory, and test app until checks
-finish.
+The test uses a detached worktree and the `QlisaUpdaterTest` product identity. Both builds use the checked-in NSIS `perMachine` setting and the updater's `passive` setting. The updater artifact contains Qlisa only. FFmpeg, ffprobe, and libmpv are downloaded by the app into `%LOCALAPPDATA%\Qlisa\runtime`; do not copy vendor binaries into the worktree or installer.
 
-## Prepare an isolated worktree and config overlay
+## Build the signed baseline and update
+
+Run these blocks in one PowerShell session from a clean checkout at version 1.5.5. Keep the signing key and password in the current session only.
 
 ```powershell
 $sourceRoot = (git rev-parse --show-toplevel).Trim()
-$baselineCommit = 'PASTE_SAVED_PRE_BUMP_COMMIT_SHA_HERE'
-if ($baselineCommit -notmatch '^[0-9a-fA-F]{40}$' -or $baselineCommit -match '^0+$') { throw 'Set baselineCommit to the exact 40-character SHA recorded before publish.ps1.' }
-$resolvedBaseline = (git -C $sourceRoot rev-parse "$baselineCommit^{commit}").Trim()
-if ($LASTEXITCODE -ne 0 -or $resolvedBaseline -ine $baselineCommit) { throw 'Saved baselineCommit does not resolve to a commit.' }
-$tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
-$runId = [guid]::NewGuid().ToString('N')
-$testRoot = Join-Path $tempRoot ('Qlisa-updater-local-' + $runId)
-$baselineDir = Join-Path $tempRoot ('qlisa-updater-local-baseline-' + $runId)
-$feedDir = Join-Path $tempRoot ('qlisa-updater-local-feed-' + $runId)
-$testConfig = Join-Path $tempRoot ('qlisa-updater-local-' + $runId + '.tauri.conf.json')
-$feedServer = $null
-git -C $sourceRoot worktree add --detach $testRoot $baselineCommit
-if ($LASTEXITCODE -ne 0) { throw 'Could not create the disposable worktree.' }
-Push-Location $testRoot
-$packageVersion = [string](Get-Content -Raw package.json | ConvertFrom-Json).version
-$tauriVersion = [string](Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version
-$cargoVersion = [regex]::Match((Get-Content -Raw src-tauri/Cargo.toml), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
-$lockVersion = [regex]::Match((Get-Content -Raw src-tauri/Cargo.lock), '(?ms)^\[\[package\]\]\s*\r?\nname\s*=\s*"qlisa"\s*\r?\nversion\s*=\s*"([^"]+)"').Groups[1].Value
-$versions = @($packageVersion, $tauriVersion, $cargoVersion, $lockVersion)
-if (@($versions | Where-Object { $_ -cne '1.5.3' }).Count -ne 0) { throw 'Local updater test requires HEAD version 1.5.3 in package.json, tauri.conf.json, Cargo.toml, and Cargo.lock.' }
-Pop-Location
+if (@(git -C $sourceRoot status --porcelain).Count -ne 0) { throw 'Start from a clean checkout.' }
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('Qlisa-updater-' + [guid]::NewGuid().ToString('N'))
+$testConfig = Join-Path ([IO.Path]::GetTempPath()) ('qlisa-updater-' + [guid]::NewGuid().ToString('N') + '.json')
+$feedDir = Join-Path ([IO.Path]::GetTempPath()) ('qlisa-feed-' + [guid]::NewGuid().ToString('N'))
+$testProfile = Join-Path ([IO.Path]::GetTempPath()) ('qlisa-updater-profile-' + [guid]::NewGuid().ToString('N'))
 $feedUrl = 'http://127.0.0.1:8765/latest.json'
+if (@(Get-NetTCPConnection -State Listen -LocalPort 8765 -ErrorAction SilentlyContinue).Count -ne 0) { throw 'Port 8765 is already in use; free it before continuing.' }
+$baseCommit = (git -C $sourceRoot rev-parse HEAD).Trim()
+git -C $sourceRoot worktree add --detach $testRoot $baseCommit
+if ($LASTEXITCODE -ne 0) { throw 'Could not create the test worktree.' }
+Push-Location $testRoot
+$versions = @(
+  [string](Get-Content -Raw package.json | ConvertFrom-Json).version,
+  [string](Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json).version,
+  [regex]::Match((Get-Content -Raw src-tauri/Cargo.toml), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value,
+  [regex]::Match((Get-Content -Raw src-tauri/Cargo.lock), '(?ms)^\[\[package\]\]\s*\r?\nname\s*=\s*"qlisa"\s*\r?\nversion\s*=\s*"([^"]+)"').Groups[1].Value
+)
+if (@($versions | Where-Object { $_ -cne '1.5.5' }).Count -ne 0) { throw 'All four version fields must be 1.5.5.' }
+$windowsConfig = Get-Content -Raw src-tauri/tauri.windows.conf.json | ConvertFrom-Json
+if ($windowsConfig.bundle.windows.nsis.installMode -cne 'perMachine') { throw 'NSIS must use perMachine.' }
+$defaultConfig = Get-Content -Raw src-tauri/tauri.conf.json | ConvertFrom-Json
+if ($defaultConfig.plugins.updater.windows.installMode -cne 'passive') { throw 'Updater installMode must remain passive.' }
+Pop-Location
 @{
   productName = 'QlisaUpdaterTest'
   identifier = 'com.qlisa.updater.test'
@@ -46,76 +40,26 @@ $feedUrl = 'http://127.0.0.1:8765/latest.json'
     endpoints = @($feedUrl)
     dangerousInsecureTransportProtocol = $true
   } }
-} | ConvertTo-Json -Depth 8 | ForEach-Object {
-  [IO.File]::WriteAllText($testConfig, $_, [Text.UTF8Encoding]::new($false))
-}
-$trackedConfig = Get-Content -Raw (Join-Path $sourceRoot 'src-tauri/tauri.conf.json') | ConvertFrom-Json
-if ($trackedConfig.productName -eq 'QlisaUpdaterTest' -or
-    $trackedConfig.identifier -eq 'com.qlisa.updater.test' -or
-    @($trackedConfig.plugins.updater.endpoints | Where-Object { $_ -like 'http:*' }).Count -gt 0) {
-  throw 'Production Tauri config contains test identity or HTTP endpoint.'
-}
-```
-
-The insecure HTTP option exists only in this temporary overlay. Keep the
-production updater public key unchanged; both builds must verify against it.
-Copy runtime files and notices listed by `scripts/runtime-manifest.json`. This
-local build does not need source archives:
-
-```powershell
-$manifest = Get-Content -Raw (Join-Path $testRoot 'scripts/runtime-manifest.json') | ConvertFrom-Json
-$ffmpeg = @($manifest.components | Where-Object id -eq 'ffmpeg-btbn-gpl-n9.0')
-$mpv = @($manifest.components | Where-Object id -eq 'libmpv')
-if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { throw 'Expected one FFmpeg and one libmpv runtime record.' }
-$runtimeFiles = @($ffmpeg[0].runtimeFiles) + @($ffmpeg[0].notices) + @($mpv[0])
-foreach ($record in $runtimeFiles) {
-  $relative = ([string]$record.path).Replace('/', '\')
-  $source = [IO.Path]::GetFullPath((Join-Path $sourceRoot $relative))
-  $sourcePrefix = $sourceRoot.TrimEnd('\') + '\'
-  if (-not $source.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Runtime path escapes source checkout: $relative" }
-  if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ine [string]$record.sha256) { throw "Runtime hash differs from manifest: $relative" }
-  $destination = Join-Path $testRoot $relative
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
-  Copy-Item -LiteralPath $source -Destination $destination
-  if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -ine [string]$record.sha256) { throw "Copied runtime hash differs from manifest: $relative" }
-}
+} | ConvertTo-Json -Depth 8 | ForEach-Object { [IO.File]::WriteAllText($testConfig, $_, [Text.UTF8Encoding]::new($false)) }
 Push-Location $testRoot
 pnpm install --frozen-lockfile
 if ($LASTEXITCODE -ne 0) { throw 'Dependency install failed.' }
-Pop-Location
-```
-
-## Build the two signed versions
-
-Set the signing key path and prompt for its password in the current PowerShell
-session. Do not save or print the password:
-
-```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = Join-Path $env:USERPROFILE '.tauri\qlisa.key'
 $securePassword = Read-Host 'Tauri signing key password' -AsSecureString
 $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
 try { $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer) }
-finally {
-  [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
-  $securePassword.Dispose()
-}
-```
-
-Build version 1.5.3 as the installed baseline:
-
-```powershell
-Push-Location $testRoot
+finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer); $securePassword.Dispose() }
 pnpm exec tauri build --config $testConfig --bundles nsis -- --features asio-support
-if ($LASTEXITCODE -ne 0) { throw 'Signed 1.5.3 baseline build failed.' }
-$baseline = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis' -File -Filter '*1.5.3*.exe')
-if ($baseline.Count -ne 1 -or -not (Test-Path ($baseline[0].FullName + '.sig'))) { throw 'Expected one signed 1.5.3 NSIS installer.' }
+if ($LASTEXITCODE -ne 0) { throw 'Signed 1.5.5 baseline build failed.' }
+$baselineExe = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*1.5.5*.exe' | Where-Object Name -notlike '*.sig')
+if ($baselineExe.Count -ne 1 -or -not (Test-Path -LiteralPath ($baselineExe[0].FullName + '.sig'))) { throw 'Expected one signed 1.5.5 NSIS installer.' }
+$baselineDir = Join-Path $feedDir 'baseline'
 New-Item -ItemType Directory -Force -Path $baselineDir | Out-Null
-Copy-Item $baseline[0].FullName, ($baseline[0].FullName + '.sig') $baselineDir
+Copy-Item -LiteralPath $baselineExe[0].FullName -Destination $baselineDir
+Copy-Item -LiteralPath ($baselineExe[0].FullName + '.sig') -Destination $baselineDir
 ```
 
-Use the checked-in release helpers to change the four synchronized version
-fields from 1.5.3 to 1.5.4. Keep the product identity and temporary updater
-overlay unchanged. Run this from `$testRoot`:
+Change only the four synchronized version fields in the disposable worktree, using the checked-in helper. This does not commit either version:
 
 ```powershell
 @'
@@ -123,175 +67,115 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const h = await import(pathToFileURL(resolve('scripts/release-helpers.mjs')).href);
-const read = (p) => readFileSync(p, 'utf8');
+const read = p => readFileSync(p, 'utf8');
 const write = (p, value) => writeFileSync(p, value, 'utf8');
-write('package.json', h.replaceJsonVersion(read('package.json'), '1.5.3', '1.5.4'));
-write('src-tauri/tauri.conf.json', h.replaceJsonVersion(read('src-tauri/tauri.conf.json'), '1.5.3', '1.5.4'));
-write('src-tauri/Cargo.toml', h.replaceCargoTomlVersion(read('src-tauri/Cargo.toml'), '1.5.3', '1.5.4'));
-write('src-tauri/Cargo.lock', h.replaceCargoLockVersion(read('src-tauri/Cargo.lock'), '1.5.3', '1.5.4'));
+write('package.json', h.replaceJsonVersion(read('package.json'), '1.5.5', '1.5.6'));
+write('src-tauri/tauri.conf.json', h.replaceJsonVersion(read('src-tauri/tauri.conf.json'), '1.5.5', '1.5.6'));
+write('src-tauri/Cargo.toml', h.replaceCargoTomlVersion(read('src-tauri/Cargo.toml'), '1.5.5', '1.5.6'));
+write('src-tauri/Cargo.lock', h.replaceCargoLockVersion(read('src-tauri/Cargo.lock'), '1.5.5', '1.5.6'));
 '@ | node --input-type=module -
-if ($LASTEXITCODE -ne 0) { throw 'Version replacement failed.' }
-```
-
-Then build the update:
-
-```powershell
+if ($LASTEXITCODE -ne 0) { throw 'Version update failed.' }
 pnpm exec tauri build --config $testConfig --bundles nsis -- --features asio-support
-if ($LASTEXITCODE -ne 0) { throw 'Signed 1.5.4 update build failed.' }
-$update = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis' -File -Filter '*1.5.4*.exe')
-if ($update.Count -ne 1 -or -not (Test-Path ($update[0].FullName + '.sig'))) { throw 'Expected one signed 1.5.4 NSIS installer.' }
+if ($LASTEXITCODE -ne 0) { throw 'Signed 1.5.6 update build failed.' }
+$updateExe = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*1.5.6*.exe')
+if ($updateExe.Count -ne 1 -or -not (Test-Path -LiteralPath ($updateExe[0].FullName + '.sig'))) { throw 'Expected one signed 1.5.6 NSIS updater installer.' }
 New-Item -ItemType Directory -Force -Path $feedDir | Out-Null
-Copy-Item $update[0].FullName, ($update[0].FullName + '.sig') $feedDir
-$assetUrl = 'http://127.0.0.1:8765/' + [uri]::EscapeDataString($update[0].Name)
-$signaturePath = Join-Path $feedDir ($update[0].Name + '.sig')
-$latestPath = Join-Path $feedDir 'latest.json'
-$signature = [IO.File]::ReadAllText($signaturePath)
-if ([string]::IsNullOrWhiteSpace($signature) -or $signature -cne $signature.Trim()) { throw 'Updater signature must be non-empty and have no surrounding whitespace.' }
-$feedUri = [uri]$assetUrl
-if ($feedUri.Scheme -cne 'http' -or $feedUri.Host -cne '127.0.0.1' -or $feedUri.Port -ne 8765) { throw 'Test updater asset URL must use only the local loopback feed.' }
-$notes = (Get-Content -Raw 'docs/RELEASE_NOTES_1.5.4.md').Trim()
-if ([string]::IsNullOrWhiteSpace($notes)) { throw 'Release notes are empty.' }
+Copy-Item -LiteralPath $updateExe[0].FullName -Destination $feedDir
+Copy-Item -LiteralPath ($updateExe[0].FullName + '.sig') -Destination $feedDir
+$assetUrl = 'http://127.0.0.1:8765/' + [uri]::EscapeDataString($updateExe[0].Name)
+$signature = [IO.File]::ReadAllText($updateExe[0].FullName + '.sig')
+if ([string]::IsNullOrWhiteSpace($signature) -or $signature -cne $signature.Trim()) { throw 'Updater signature is empty or has extra whitespace.' }
 $latest = [ordered]@{
-  version = '1.5.4'
-  notes = $notes
-  pub_date = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
-  platforms = [ordered]@{
-    'windows-x86_64' = [ordered]@{
-      url = $assetUrl
-      signature = $signature
-    }
-  }
+  version = '1.5.6'
+  notes = 'Local updater test 1.5.5 to 1.5.6.'
+  pub_date = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+  platforms = @{ 'windows-x86_64' = @{ url = $assetUrl; signature = $signature } }
 }
+$latestPath = Join-Path $feedDir 'latest.json'
 [IO.File]::WriteAllText($latestPath, ($latest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
-$feed = Get-Content -Raw $latestPath | ConvertFrom-Json
-if ($feed.version -cne '1.5.4' -or $feed.platforms.'windows-x86_64'.url -cne $assetUrl -or
-    $feed.platforms.'windows-x86_64'.signature -cne $signature -or
-    $feed.pub_date -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$') { throw 'Local latest.json does not match the installer, exact signature text, or UTC publication date.' }
-Get-FileHash $update[0].FullName, $signaturePath, $latestPath -Algorithm SHA256
+$validLatest = [IO.File]::ReadAllText($latestPath)
+Get-FileHash $baselineExe[0].FullName, $updateExe[0].FullName, ($updateExe[0].FullName + '.sig'), (Join-Path $feedDir 'latest.json') -Algorithm SHA256
 ```
 
-Start the loopback feed server from the current PowerShell session. The
-process is hidden, uses the exact feed directory, and its PID is retained for
-cleanup:
+Start a loopback-only server and verify the feed before launching the baseline:
 
 ```powershell
-$python = Get-Command python.exe -ErrorAction Stop
+if (@(Get-NetTCPConnection -State Listen -LocalPort 8765 -ErrorAction SilentlyContinue).Count -ne 0) { throw 'Port 8765 is already in use; stop the process and restart the procedure.' }
+$python = (Get-Command python.exe -ErrorAction Stop).Source
 $serverArgs = '-m http.server 8765 --bind 127.0.0.1 --directory "' + $feedDir + '"'
-$feedServer = Start-Process -FilePath $python.Source -ArgumentList $serverArgs -WindowStyle Hidden -PassThru
-Start-Sleep -Milliseconds 800
-try {
-  $servedFeed = Invoke-RestMethod -Uri $feedUrl -TimeoutSec 3
-  if ($servedFeed.version -cne '1.5.4' -or
-      $servedFeed.platforms.'windows-x86_64'.url -cne $assetUrl -or
-      $servedFeed.platforms.'windows-x86_64'.signature -cne $signature) {
-    throw 'Port 8765 serves a feed other than this local signed 1.5.4 build.'
-  }
+$feedServer = Start-Process -FilePath $python -ArgumentList $serverArgs -WindowStyle Hidden -PassThru
+$served = $null
+for ($attempt = 0; $attempt -lt 20; $attempt++) {
+  if ($feedServer.HasExited) { throw 'Loopback feed server exited during startup.' }
+  try { $served = Invoke-RestMethod -Uri $feedUrl -TimeoutSec 2; break }
+  catch { Start-Sleep -Milliseconds 250 }
 }
-catch {
-  Stop-Process -Id $feedServer.Id -Force -ErrorAction SilentlyContinue
-  throw 'Local feed server failed readiness or feed-content verification.'
-}
+if ($null -eq $served) { throw 'Loopback feed server did not become ready.' }
+if ($served.version -cne '1.5.6' -or $served.platforms.'windows-x86_64'.url -cne $assetUrl -or $served.platforms.'windows-x86_64'.signature -cne $signature) { throw 'Loopback feed does not match the signed 1.5.6 artifact.' }
 ```
 
-Check the feed and installer URLs return HTTP 200 before installing. The server
-must remain running throughout the test.
+## Install and verify
 
-## Run the test
+1. Create an isolated profile before installing or launching the test app. These environment variables apply to child processes started from this PowerShell session. The updater restart should inherit them:
 
-1. Install the 1.5.3 installer from `$baselineDir`. Launch it and confirm About
-   reports 1.5.3. Confirm its install path and settings are separate from Qlisa.
-   Wait five seconds: the startup update check must show no modal error and
-   must not block normal use.
-2. Save the valid `latest.json` text, replace its signature with invalid text,
-   then manually check and download. The updater must reject the signature and
-   leave the app at 1.5.3. Restore the exact saved JSON, restart the test app,
-   then confirm a manual check finds 1.5.4 and its release notes. Download and
-   confirm progress advances.
-3. With the update ready, try Install while an audio cue runs and while it is
-   paused. Repeat for a video cue. Run audio/video on multiple outputs and
-   confirm installation stays blocked while any cue is active or paused.
-4. Modify the workspace without saving. Confirm installation is blocked.
-   Save it and confirm the guard clears.
-5. Install with no active cues and a saved workspace. Confirm the app closes,
-   NSIS applies 1.5.4, and QlisaUpdaterTest restarts. About must report 1.5.4;
-   confirm workspace and test preferences remain intact.
-6. Check for updates again; it must report no newer version. Production Qlisa
-   and its settings must remain unchanged.
+   ```powershell
+   $testRoaming = Join-Path $testProfile 'Roaming'
+   $testLocal = Join-Path $testProfile 'Local'
+   New-Item -ItemType Directory -Force -Path $testRoaming, $testLocal | Out-Null
+   $originalAppData = $env:APPDATA
+   $originalLocalAppData = $env:LOCALAPPDATA
+   $env:APPDATA = $testRoaming
+   $env:LOCALAPPDATA = $testLocal
+   if (Test-Path -LiteralPath (Join-Path $testLocal 'Qlisa\runtime')) { throw 'Expected an empty isolated runtime directory before first launch.' }
+   ```
 
-Use this feed mutation for step 2, then restore the saved bytes before
-restarting the app:
+   Install the baseline from `$baselineDir`. Accept the Windows UAC prompt. Check that it installs under `C:\Program Files\QlisaUpdaterTest`, not the per-user Programs directory. On the final installer page, clear **Run QlisaUpdaterTest** so it cannot start outside the controlled launch below. Keep the feed server running.
 
-```powershell
-$validLatestBackup = Join-Path $feedDir 'latest.valid.json'
-Copy-Item -LiteralPath $latestPath -Destination $validLatestBackup
-$invalid = Get-Content -Raw $latestPath | ConvertFrom-Json
-$invalid.platforms.'windows-x86_64'.signature = 'invalid test signature'
-[IO.File]::WriteAllText($latestPath, ($invalid | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
-# In QlisaUpdaterTest: manually check and download; expect signature rejection and version 1.5.3.
-Copy-Item -LiteralPath $validLatestBackup -Destination $latestPath -Force
-```
+2. Launch the installed executable from this same PowerShell session:
 
-The signed `latest.json` tests the Tauri updater signature. If it fails, record
-the exact updater error and compare the configured public key with the key that
-signed the `.sig`; do not bypass signature verification.
+   ```powershell
+   $testExe = 'C:\Program Files\QlisaUpdaterTest\qlisa.exe'
+   Start-Process -FilePath $testExe
+   ```
 
-## Recorded result — 2026-09-24
+   Let automatic Media Runtime preparation finish. Check that FFmpeg, ffprobe, and libmpv are under `$testLocal\Qlisa\runtime`, and that none are under `C:\Program Files\QlisaUpdaterTest`. Confirm About reports 1.5.5. Set a recognizable test preference and save a test workspace.
+3. Test signature rejection while still on 1.5.5. In the same PowerShell session, replace the feed signature, request an update check, then attempt to download and install the offered 1.5.6 update:
 
-The isolated signed NSIS update from 1.5.2 to 1.5.3 passed through the local
-loopback feed at `http://127.0.0.1:8765`. Both installers used the same Tauri
-signing key. With an invalid signature, the downloaded update was rejected and
-the app remained at 1.5.2. With the valid signature, an unsaved workspace
-blocked installation after download. After saving, the signed NSIS installer
-applied the update and restarted the app. The executable FileVersion and About
-both reported 1.5.3, and the next update check reported that the app was
-current. A workspace test file remained present and opened with Wait 1:00.
+   ```powershell
+   $metadata = Get-Content -LiteralPath $latestPath -Raw | ConvertFrom-Json
+   $metadata.platforms.'windows-x86_64'.signature = 'invalid test signature'
+   [IO.File]::WriteAllText($latestPath, ($metadata | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+   ```
 
-The audio/video cue installation guards were not tested in the UI. A separate
-libmpv smoke test was performed earlier; it does not verify those guards. This
-was a local test only: no GitHub Release, tag, or push was created. It does not
-resolve the FFmpeg or libmpv source and compliance blockers for public binary
-distribution.
+   The updater must reject the signature during download or installation, must not run the installer, and must keep 1.5.5. Then restore the valid feed:
 
-## Recorded result — 1.5.3 → 1.5.4 — 2026-09-24
+   ```powershell
+   [IO.File]::WriteAllText($latestPath, $validLatest, [Text.UTF8Encoding]::new($false))
+   ```
 
-The production Qlisa 1.5.4 NSIS installer was 135,788,052 bytes
-(SHA-256 `dfc748ea86d71196af9d37ef157fc6378b5ff68576a6e23277d04a4021192bc8`).
-Its `.sig` and `latest.json` were created; the feed contains the installer
-signature. A `QlisaUpdaterTest` 1.5.4
-build used a temporary local overlay at `http://127.0.0.1:8765` and the
-`QlisaUpdaterTest` 1.5.3 installer as its baseline. The local feed and NSIS
-asset both returned HTTP 200. The UI offered 1.5.4; after Install/restart, the
-app restarted at 1.5.4. About and FileVersion reported 1.5.4, and a repeat
-update check reported that the app was current.
+   Confirm that the valid JSON is restored before continuing.
+4. Check for update again. Confirm it offers 1.5.6 and the local notes. Download and install. Accept UAC if Windows asks. Confirm the app restarts, About reports 1.5.6, the install remains under Program Files, the preference and workspace remain, and the runtime stays under `$testLocal\Qlisa\runtime` without a second download.
+5. Close QlisaUpdaterTest, then uninstall it from Windows Settings and accept UAC if requested. Confirm its Program Files directory is removed. Confirm production Qlisa and its settings remain intact. Record the result; remove temporary files only after reviewing evidence.
 
-Installed `ffmpeg.exe`, `ffprobe.exe`, `ffmpeg\LICENSE`,
-`ffmpeg\README-BtbN-build.txt`, and `libmpv-2.dll` hashes matched
-`scripts/runtime-manifest.json`. The test install retained the previous
-installer's `README-Gyan-build.txt`; the runtime binaries were replaced. This
-run did not test the invalid-signature, active-cue, or unsaved-workspace guards.
-Public release remains blocked by source-compliance requirements.
+The test uses `$testProfile` for `%APPDATA%` and `%LOCALAPPDATA%`. Never point these variables at production data. Restore their original values before continuing to use the shell.
 
 ## Cleanup
 
-Close QlisaUpdaterTest and uninstall only the app with the `QlisaUpdaterTest`
-identity. Stop the feed server and remove only paths whose resolved absolute
-paths are direct children of the system temp directory:
-
 ```powershell
-if ($null -ne $feedServer) { Stop-Process -Id $feedServer.Id -Force -ErrorAction SilentlyContinue }
+Stop-Process -Id $feedServer.Id -Force -ErrorAction SilentlyContinue
+Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY, Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+$env:APPDATA = $originalAppData
+$env:LOCALAPPDATA = $originalLocalAppData
 Pop-Location
-$tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
-foreach ($path in @($testRoot, $baselineDir, $feedDir, $testConfig)) {
-  $full = [IO.Path]::GetFullPath($path)
-  if (-not $full.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-      [IO.Path]::GetDirectoryName($full).TrimEnd('\') -ine $tempRoot) { throw "Refusing cleanup outside direct temp children: $full" }
+$tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+foreach ($tempPath in @($testRoot, $testProfile, $feedDir, $testConfig)) {
+  $fullPath = [IO.Path]::GetFullPath($tempPath)
+  if ([IO.Path]::GetDirectoryName($fullPath).TrimEnd('\') -ine $tempRoot) { throw "Refusing cleanup outside the temp directory: $fullPath" }
 }
 git -C $sourceRoot worktree remove --force $testRoot
-if ($LASTEXITCODE -ne 0) { throw 'Could not remove the disposable worktree.' }
-Remove-Item -LiteralPath $baselineDir, $feedDir -Recurse -Force
-Remove-Item -LiteralPath $testConfig -Force
-Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY, Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $feedDir -Recurse -Force
+Remove-Item -LiteralPath $testConfig -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $testProfile -Recurse -Force
 ```
 
-Verify the production config still contains only the HTTPS production updater
-endpoint. This procedure does not create or publish a GitHub Release.
+Keep the installer and test evidence until the result is reviewed. Never push test tags or publish a GitHub Release for this procedure.
