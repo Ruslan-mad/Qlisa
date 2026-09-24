@@ -112,6 +112,45 @@ function Read-ComplianceManifest([string]$ManifestPath) {
         ManifestPath = $path
     }
 }
+function Assert-RuntimeManifest([object]$Compliance) {
+    $manifestPath = Join-Path $script:Root 'scripts/runtime-manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Fail "Tracked runtime manifest is missing: $manifestPath" }
+    $runtime = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    if ($runtime.schemaVersion -ne 1 -or $runtime.components -isnot [array]) { Fail 'scripts/runtime-manifest.json must have schemaVersion=1 and a components array.' }
+    $ffmpeg = @($runtime.components | Where-Object { $_.id -eq 'ffmpeg-gyan-essentials' })
+    $mpv = @($runtime.components | Where-Object { $_.id -eq 'libmpv' })
+    if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { Fail 'Runtime manifest must contain exactly one pinned FFmpeg and one libmpv record.' }
+    if ($ffmpeg[0].sourceOffer.status -cne 'ready') { Fail "FFmpeg corresponding source is not ready according to scripts/runtime-manifest.json. See docs/THIRD_PARTY_SOURCE_OFFER.md." }
+    if ($mpv[0].releaseCompliance -cne 'ready' -or $mpv[0].source.binaryBuildOriginVerified -ne $true -or
+        $mpv[0].source.dependencyRevisionsVerified -ne $true -or $mpv[0].source.buildConfigurationVerified -ne $true -or
+        $null -eq $mpv[0].source.sourceArchive) { Fail 'libmpv release compliance and exact source/build provenance are not ready in scripts/runtime-manifest.json.' }
+    if ($null -eq $Compliance) { return }
+
+    $pins = @(
+        $ffmpeg[0].runtimeFiles | ForEach-Object { [pscustomobject]@{ component = 'ffmpeg'; path = [string]$_.path; sha256 = [string]$_.sha256 } }
+        [pscustomobject]@{ component = 'libmpv'; path = [string]$mpv[0].path; sha256 = [string]$mpv[0].sha256 }
+    )
+    foreach ($pin in $pins) {
+        if ([string]$pin.sha256 -notmatch '^[a-fA-F0-9]{64}$') { Fail "Runtime manifest has no valid SHA-256 for '$($pin.path)'." }
+        $matches = @($Compliance.Manifest.components | ForEach-Object {
+            $component = $_
+            if ([string]$component.name -cne [string]$pin.component) { return }
+            @($component.runtimeFiles | Where-Object {
+                ([System.IO.Path]::GetFileName([string]$_.path) -eq [System.IO.Path]::GetFileName([string]$pin.path)) -and
+                ([string]$_.sha256).ToLowerInvariant() -eq ([string]$pin.sha256).ToLowerInvariant()
+            } | ForEach-Object { [pscustomobject]@{ component = [string]$component.name; path = [string]$_.path } })
+        })
+        if ($matches.Count -ne 1) { Fail "Local release compliance must contain exactly one runtime record matching pinned SHA-256 for '$($pin.path)'." }
+        $pinnedPath = ([string]$pin.path).Replace('/', '\')
+        $recordPath = ([string]$matches[0].path).Replace('/', '\')
+        if (-not [string]::Equals($pinnedPath, $recordPath, [System.StringComparison]::OrdinalIgnoreCase)) { Fail "Runtime manifest path '$pinnedPath' does not match compliance path '$recordPath'." }
+    }
+}
+function Require-Command([string]$Name, [string]$InstallHint) {
+    $command = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($null -eq $command) { Fail "$Name was not found in PATH. $InstallHint" }
+    return $command
+}
 function Assert-NoNdiInTree {
     $skip = @('.git', 'node_modules', '.pnpm-store', 'target', 'dist', 'coverage', 'build')
     $stack = [System.Collections.Generic.Stack[string]]::new(); $stack.Push($script:Root)
@@ -133,14 +172,21 @@ function Assert-ArchiveHasNoNdi([string]$Archive, [string]$SevenZip) {
 
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { Fail "Version must be strict three-part SemVer, for example 1.5.3; got '$Version'." }
 if ($env:OS -ne 'Windows_NT') { Fail 'Windows release preparation must run on Windows.' }
-$git = Get-Command git -ErrorAction SilentlyContinue
-if ($null -eq $git) { Fail 'Git was not found in PATH.' }
+$git = Require-Command 'git' 'Install Git for Windows with: winget install --id Git.Git -e. Then reopen PowerShell.'
 $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
 if ($null -eq $pnpm) { $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue }
-if ($null -eq $pnpm) { Fail 'pnpm was not found in PATH. Install Node.js and pnpm, then open a new PowerShell session.' }
+if ($null -eq $pnpm) { Fail 'pnpm was not found in PATH. Install Node.js LTS, then run `npm install --global pnpm`; reopen PowerShell.' }
 $node = Get-Command node.exe -ErrorAction SilentlyContinue
 if ($null -eq $node) { $node = Get-Command node -ErrorAction SilentlyContinue }
-if ($null -eq $node) { Fail 'Node.js was not found in PATH. Install the project-supported Node.js version and reopen PowerShell.' }
+if ($null -eq $node) { Fail 'Node.js was not found in PATH. Install it with `winget install --id OpenJS.NodeJS.LTS -e`, then reopen PowerShell.' }
+$cargo = Require-Command 'cargo' 'Install Rust with `winget install --id Rustlang.Rustup -e`, then run `rustup default stable-x86_64-pc-windows-msvc` and reopen PowerShell.'
+$rustc = Require-Command 'rustc' 'Install Rust with `winget install --id Rustlang.Rustup -e`, then run `rustup default stable-x86_64-pc-windows-msvc` and reopen PowerShell.'
+$sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
+if ($null -eq $sevenZip) { $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue }
+if ($null -eq $sevenZip) { Fail '7-Zip CLI was not found in PATH. Install it with `winget install --id 7zip.7zip -e`, then reopen PowerShell.' }
+$signer = Get-Command minisign.exe -ErrorAction SilentlyContinue
+if ($null -eq $signer) { $signer = Get-Command minisign -ErrorAction SilentlyContinue }
+if ($null -eq $signer) { Fail 'Minisign was not found in PATH. Install it with `winget install --id jedisct1.minisign -e`, then reopen PowerShell.' }
 
 $branch = (& $git.Source -C $script:Root branch --show-current).Trim()
 if ($LASTEXITCODE -ne 0 -or $branch -ne 'main') { Fail "Release preparation requires branch 'main'; current branch is '$branch'." }
@@ -161,15 +207,14 @@ if (@($updater.endpoints | Where-Object { [string]$_ -eq $script:UpdaterEndpoint
 $privateKey = Resolve-RepoPath $SigningKeyPath
 $repoPrefix = $script:Root.TrimEnd('\') + '\'
 if ($privateKey.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase)) { Fail 'Signing key must be outside the repository.' }
-if (-not $DryRun -and -not (Test-Path -LiteralPath $privateKey -PathType Leaf)) { Fail "Tauri signing key is missing: $privateKey. The script will not create or print a key." }
+if (-not (Test-Path -LiteralPath $privateKey -PathType Leaf)) { Fail "Tauri signing key is missing: $privateKey. The script will not create or print a key." }
 $complianceManifestFullPath = Resolve-RepoPath $ComplianceManifestPath
 if (-not (Test-Path -LiteralPath $complianceManifestFullPath -PathType Leaf)) { Fail "Release compliance manifest is missing: $complianceManifestFullPath. No runtime will be downloaded or staged." }
-$sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
-if ($null -eq $sevenZip) { $sevenZip = Get-Command 7z -ErrorAction SilentlyContinue }
-if ($null -eq $sevenZip) { Fail '7-Zip is required to inspect the installer and updater bundle for NDI DLLs. Install 7-Zip and ensure 7z.exe is in PATH.' }
-$signer = Get-Command minisign.exe -ErrorAction SilentlyContinue
-if ($null -eq $signer) { $signer = Get-Command minisign -ErrorAction SilentlyContinue }
-if ($null -eq $signer) { Fail 'Minisign is required to verify the generated Tauri updater signature. Install minisign and ensure it is in PATH.' }
+$null = Assert-RuntimeManifest $null
+if (-not (Test-Path -LiteralPath (Join-Path $script:Root 'node_modules/.bin/tauri.cmd') -PathType Leaf)) {
+    Fail 'Project-local Tauri CLI is missing. Run `pnpm install --frozen-lockfile` from the repository root, then reopen PowerShell.'
+}
+Invoke-Checked 'Check Tauri CLI' $pnpm.Source @('exec', 'tauri', '--version')
 Assert-NoNdiInTree
 
 Write-Host "Repository: $script:Root"
@@ -178,10 +223,11 @@ Write-Host "Source commit: $((& $git.Source -C $script:Root rev-parse HEAD).Trim
 Write-Host "Version: $currentVersion -> $Version"
 Write-Host "Tag to use after review: $tag"
 Write-Host "Release notes: $releaseNotes"
-Write-Host 'Prerequisites: clean main branch, updater configuration, signing key path, FFmpeg/libmpv compliance manifest, 7-Zip, and minisign are valid.'
+Write-Host 'Prerequisites: node, pnpm, cargo, rustc, local Tauri CLI, Git, 7-Zip, Minisign, signing key path, and compliance manifest are valid.'
 if ($DryRun) {
-    $null = Read-ComplianceManifest $ComplianceManifestPath
-    Write-Host 'DRY RUN: no version files changed; no tests, build, installer, tag, or publication performed.'
+    $checkedCompliance = Read-ComplianceManifest $ComplianceManifestPath
+    Assert-RuntimeManifest $checkedCompliance
+    Write-Host 'PREFLIGHT ONLY: no version files changed and no installer was built. Omit -DryRun to prepare real local artifacts; that command still does not tag, push, or publish.'
     exit 0
 }
 
@@ -193,6 +239,7 @@ if (-not (Test-Path -LiteralPath $ffmpegExe -PathType Leaf)) {
 $mpv = Join-Path $script:Root 'src-tauri/vendor/mpv/libmpv-2.dll'
 if (-not (Test-Path -LiteralPath $mpv -PathType Leaf)) { Fail 'libmpv runtime is missing: src-tauri/vendor/mpv/libmpv-2.dll.' }
 $compliance = Read-ComplianceManifest $ComplianceManifestPath
+Assert-RuntimeManifest $compliance
 
 Invoke-Checked 'Frontend tests' $pnpm.Source @('test')
 Invoke-Checked 'Frontend production build' $pnpm.Source @('build')
@@ -270,7 +317,7 @@ try {
 $outDirectory = Join-Path $script:Root "src-tauri/target/release/prepared/$tag"
 New-Item -ItemType Directory -Path $outDirectory -Force | Out-Null
 $latestPath = Join-Path $outDirectory 'latest.json'
-$assetUrl = "$script:RepoUrl/releases/download/$tag/$($installer.Name)"
+$assetUrl = "$script:RepoUrl/releases/latest/download/$($installer.Name)"
 Invoke-Checked 'Create updater latest.json' $node.Source @((Join-Path $script:Root 'scripts/release.mjs'), '--write-updater-metadata', $Version, $releaseNotes, $assetUrl, $signaturePath, $latestPath)
 $releaseCompliance = [ordered]@{
     schemaVersion = 1
@@ -294,9 +341,16 @@ $releaseCompliance = [ordered]@{
 $releaseCompliancePath = Join-Path $outDirectory 'release-compliance.json'
 [System.IO.File]::WriteAllText($releaseCompliancePath, (($releaseCompliance | ConvertTo-Json -Depth 8) + "`n"), [System.Text.UTF8Encoding]::new($false))
 $parsed = Get-Content -Raw -LiteralPath $latestPath | ConvertFrom-Json
-if ($parsed.version -ne $Version -or [string]$parsed.platforms.'windows-x86_64'.signature -cne $signature -or
-    [string]$parsed.platforms.'windows-x86_64'.url -ne "$script:RepoUrl/releases/download/$tag/$($installer.Name)") {
-    Fail 'Generated latest.json failed the version, signature-content, or exact asset URL check.'
+$expectedUrl = "$script:RepoUrl/releases/latest/download/$($installer.Name)"
+$expectedNotes = (Get-Content -Raw -LiteralPath $releaseNotes).Trim()
+$pubDate = [datetimeoffset]::MinValue
+if ($parsed.version -cne $Version -or [string]$parsed.platforms.'windows-x86_64'.signature -cne $signature -or
+    [string]$parsed.platforms.'windows-x86_64'.url -cne $expectedUrl -or
+    [string]$parsed.notes -cne $expectedNotes -or
+    -not [datetimeoffset]::TryParse([string]$parsed.pub_date, [ref]$pubDate) -or
+    $pubDate.Offset -ne [timespan]::Zero -or
+    @($parsed.platforms.PSObject.Properties.Name) -notcontains 'windows-x86_64') {
+    Fail 'Generated latest.json failed version, Windows platform, exact URL, exact signature text, UTC publication date, or release-notes checks.'
 }
 
 $assets = @($installer.FullName, $signaturePath, $latestPath, $releaseCompliancePath) + $compliance.SourceFiles + $compliance.NoticeFiles

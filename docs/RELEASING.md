@@ -9,11 +9,33 @@ release completes an end-to-end update test.
 
 ## Prerequisites
 
-- Windows, Git, Rust/Cargo, Node.js, and pnpm.
-- `pnpm.cmd` or `pnpm` and `node.exe` available in the current PowerShell
-  `PATH`. If PowerShell reports that either command is missing, install the
-  supported Node.js and pnpm versions, reopen PowerShell, and check with
-  `Get-Command node,pnpm`.
+- Windows, Node.js LTS, pnpm, Rust stable with the MSVC target, Git for
+  Windows, 7-Zip CLI, and Minisign. The project-local Tauri CLI must be
+  installed by `pnpm install`.
+- Check tools before preparing a release:
+
+  ```powershell
+  Get-Command node,pnpm,cargo,rustc,git,7z,minisign
+  pnpm exec tauri --version
+  ```
+
+  Install missing tools with these commands, then reopen PowerShell:
+
+  ```powershell
+  winget install --id OpenJS.NodeJS.LTS -e
+  npm install --global pnpm
+  winget install --id Rustlang.Rustup -e
+  rustup default stable-x86_64-pc-windows-msvc
+  winget install --id Git.Git -e
+  winget install --id 7zip.7zip -e
+  winget install --id jedisct1.minisign -e
+  ```
+
+  In the repository, run `pnpm install` if `pnpm exec tauri --version`
+  reports that the local CLI is missing. The release script checks every
+  required command before it changes version files or starts a build. GitHub
+  CLI (`gh`) is not needed for local preparation; use it only if a separate
+  publication workflow requires it.
 - A clean `main` branch with all four project version fields in sync.
 - A Qlisa updater public key in `src-tauri/tauri.conf.json`, updater artifacts
   enabled, and the HTTPS GitHub Releases endpoint configured.
@@ -27,10 +49,10 @@ release completes an end-to-end update test.
   runtime, and the reviewed compliance manifest described below. The pinned
   acquisition data and known provenance gaps are in
   `scripts/runtime-manifest.json`.
-- 7-Zip (`7z.exe`) to inspect the generated NSIS installer/updater `.exe` for
-  NDI Runtime files, and Minisign to cryptographically verify its Tauri
-  updater signature.
-  Both commands must be available in `PATH`.
+- Minisign independently verifies the generated updater signature against the
+  configured public key. Tauri CLI 2 generates signatures but has no matching
+  local verification command, so this release check uses Minisign.
+- 7-Zip (`7z.exe`) inspects the generated NSIS installer for NDI Runtime files.
 - `docs/RELEASE_NOTES_X.Y.Z.md` for the requested version.
 
 Do not generate or replace the signing key as part of release preparation.
@@ -155,9 +177,18 @@ entry point.
 Clippy warnings do not fail this check; the current source has existing
 dead-code warnings. A non-zero Clippy exit still blocks preparation.
 
-`-DryRun` checks the repository and configured release prerequisites without
-running tests, changing versions, or building. It does not waive the
-compliance-manifest requirement.
+`-DryRun` is a preflight only. It checks the repository, tools, runtime pins,
+and compliance inputs, then exits without tests, version changes, or artifacts.
+To create real local installer, signature, `latest.json`, and compliance
+assets, omit `-DryRun`:
+
+```powershell
+.\scripts\publish.ps1 -Version 1.5.3
+```
+
+That command runs checks, updates and commits the local version, then builds
+the artifacts. It does not create a tag, push, or publish a GitHub Release.
+Both modes require a ready source offer and release-compliance manifest.
 
 With Tauri 2 `createUpdaterArtifacts: true`, the NSIS installer is also the
 updater artifact and has a matching `.exe.sig`. Qlisa's `latest.json` points to
