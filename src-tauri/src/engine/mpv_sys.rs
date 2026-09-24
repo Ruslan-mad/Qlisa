@@ -295,21 +295,23 @@ impl MpvLib {
         let candidates: Vec<std::path::PathBuf> = {
             let mut v = Vec::new();
             if let Ok(exe) = std::env::current_exe() {
-                if let Some(dir) = exe.parent() {
+                if let Some(_dir) = exe.parent() {
                     #[cfg(target_os = "windows")]
                     {
-                        v.push(dir.join("libmpv-2.dll"));
-                        // Tauri installers may place declared resources in a
-                        // sibling `resources` directory, depending on the
-                        // bundle target and installer configuration.
-                        v.push(dir.join("resources").join("libmpv-2.dll"));
-                        v.push(dir.join("vendor").join("mpv").join("libmpv-2.dll"));
+                        let runtime = crate::media_runtime::runtime_dir().join("libmpv-2.dll");
+                        if crate::media_runtime::verified_file(&runtime, "libmpv", "libmpv-2.dll") { v.push(runtime); }
+                        #[cfg(debug_assertions)] {
+                            let source = std::path::PathBuf::from(option_env!("CARGO_MANIFEST_DIR").unwrap_or("."))
+                                .join("vendor").join("mpv").join("libmpv-2.dll");
+                            if crate::media_runtime::verified_file(&source, "libmpv", "libmpv-2.dll") { v.push(source); }
+                        }
                     }
                     #[cfg(target_os = "macos")]
                     {
                         // Inside a .app bundle: exe is Contents/MacOS/<binary>.
                         // Tauri bundles resources to Contents/Resources/.
                         // Frameworks live at Contents/Frameworks/ (optional placement).
+                        let dir = _dir;
                         if let Some(contents) = dir.parent() {
                             v.push(contents.join("Resources").join("libmpv.dylib"));
                             v.push(contents.join("Frameworks").join("libmpv.dylib"));
@@ -318,6 +320,7 @@ impl MpvLib {
                     }
                     #[cfg(target_os = "linux")]
                     {
+                        let dir = _dir;
                         // Ubuntu 24.04+ ships libmpv.so.2; Ubuntu 22.04 ships libmpv.so.1
                         v.push(dir.join("libmpv.so.2"));
                         v.push(dir.join("libmpv.so.1"));
@@ -325,8 +328,6 @@ impl MpvLib {
                     }
                 }
             }
-            #[cfg(target_os = "windows")]
-            v.push(std::path::PathBuf::from("libmpv-2.dll"));
             #[cfg(target_os = "macos")]
             {
                 v.push(std::path::PathBuf::from("libmpv.dylib"));

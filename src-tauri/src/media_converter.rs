@@ -1174,29 +1174,27 @@ fn emit_job(app: &tauri::AppHandle, record: &JobRecord) {
     let _ = app.emit(MEDIA_CONVERSION_EVENT, record.snapshot());
 }
 
+#[cfg(windows)]
 fn ffprobe_path() -> Option<PathBuf> {
     let name = if cfg!(target_os = "windows") {
         "ffprobe.exe"
     } else {
         "ffprobe"
     };
+    let mut candidates = vec![crate::media_runtime::runtime_dir().join(name)];
+    if cfg!(debug_assertions) {
+        if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") { candidates.push(PathBuf::from(manifest).join("vendor").join("ffmpeg").join(name)); }
+    }
+    candidates.into_iter().find(|p| crate::media_runtime::verified_file(p, "ffmpeg-btbn-gpl-n9.0", name))
+}
+
+#[cfg(not(windows))]
+fn ffprobe_path() -> Option<PathBuf> {
+    let name = "ffprobe";
     let mut candidates = Vec::new();
-    if let Some(ffmpeg) = find_ffmpeg_runtime() {
-        if let Some(parent) = ffmpeg.parent() {
-            candidates.push(parent.join(name));
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("resources").join("ffmpeg").join(name));
-            candidates.push(dir.join(name));
-        }
-    }
-    if let Ok(override_path) = std::env::var("QLISA_FFMPEG_PATH") {
-        if let Some(parent) = Path::new(&override_path).parent() {
-            candidates.push(parent.join(name));
-        }
-    }
+    if let Some(ffmpeg) = find_ffmpeg_runtime() { if let Some(parent) = ffmpeg.parent() { candidates.push(parent.join(name)); } }
+    if let Ok(exe) = std::env::current_exe() { if let Some(dir) = exe.parent() { candidates.push(dir.join("resources").join("ffmpeg").join(name)); candidates.push(dir.join(name)); } }
+    if let Ok(path) = std::env::var("QLISA_FFMPEG_PATH") { if let Some(parent) = Path::new(&path).parent() { candidates.push(parent.join(name)); } }
     candidates.into_iter().find(|p| p.is_file())
 }
 

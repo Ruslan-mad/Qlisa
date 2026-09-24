@@ -2894,12 +2894,21 @@ impl Drop for SrtInputWorker {
 /// Locate the self-contained SRT-capable FFmpeg binary before accepting a
 /// system override. This mirrors the NDI lookup and makes another PC's
 /// installer independent of PATH.
+#[cfg(windows)]
 pub fn find_ffmpeg_runtime() -> Option<PathBuf> {
-    let executable = if cfg!(target_os = "windows") {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
+    let executable = "ffmpeg.exe";
+    let mut candidates = vec![crate::media_runtime::runtime_dir().join(executable)];
+    if cfg!(debug_assertions) {
+        if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
+            candidates.push(PathBuf::from(manifest).join("vendor").join("ffmpeg").join(executable));
+        }
+    }
+    candidates.into_iter().find(|path| crate::media_runtime::verified_file(path, "ffmpeg-btbn-gpl-n9.0", executable))
+}
+
+#[cfg(not(windows))]
+pub fn find_ffmpeg_runtime() -> Option<PathBuf> {
+    let executable = "ffmpeg";
     let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -2907,20 +2916,9 @@ pub fn find_ffmpeg_runtime() -> Option<PathBuf> {
             candidates.push(dir.join(executable));
         }
     }
-    if let Ok(override_path) = std::env::var("QLISA_FFMPEG_PATH") {
-        candidates.push(PathBuf::from(override_path));
-    }
-    // Makes `cargo test`/development use the checked-in runtime without
-    // changing the packaged application's bundle-first resolution.
+    if let Ok(path) = std::env::var("QLISA_FFMPEG_PATH") { candidates.push(PathBuf::from(path)); }
     if cfg!(debug_assertions) {
-        if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
-            candidates.push(
-                PathBuf::from(manifest)
-                    .join("vendor")
-                    .join("ffmpeg")
-                    .join(executable),
-            );
-        }
+        if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") { candidates.push(PathBuf::from(manifest).join("vendor").join("ffmpeg").join(executable)); }
     }
     candidates.into_iter().find(|path| path.is_file())
 }

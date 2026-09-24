@@ -8,6 +8,7 @@ pub mod health;
 pub mod logger;
 pub mod machine_config;
 pub mod media_converter;
+pub mod media_runtime;
 pub mod preferences;
 pub mod qlab_import;
 pub mod recovery;
@@ -94,6 +95,7 @@ use media_converter::{
     analyze_media_compatibility, cancel_media_conversion, list_media_conversions,
     open_media_output_folder, probe_cue_media, replace_cue_media_path, restore_cue_media_path, start_media_conversion,
 };
+use media_runtime::{get_media_runtime_status, prepare_media_runtime, schedule_media_runtime_reinstall};
 use state::AppState;
 use tauri::Manager;
 
@@ -565,6 +567,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_media_runtime_status,
+            prepare_media_runtime,
+            schedule_media_runtime_reinstall,
             // Transport
             go,
             go_cue,
