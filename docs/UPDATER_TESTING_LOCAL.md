@@ -252,6 +252,25 @@ was a local test only: no GitHub Release, tag, or push was created. It does not
 resolve the FFmpeg or libmpv source and compliance blockers for public binary
 distribution.
 
+## Recorded result — 1.5.3 → 1.5.4 — 2026-09-24
+
+The production Qlisa 1.5.4 NSIS installer was 135,788,052 bytes
+(SHA-256 `dfc748ea86d71196af9d37ef157fc6378b5ff68576a6e23277d04a4021192bc8`).
+Its `.sig` and `latest.json` were created; the feed contains the installer
+signature. A `QlisaUpdaterTest` 1.5.4
+build used a temporary local overlay at `http://127.0.0.1:8765` and the
+`QlisaUpdaterTest` 1.5.3 installer as its baseline. The local feed and NSIS
+asset both returned HTTP 200. The UI offered 1.5.4; after Install/restart, the
+app restarted at 1.5.4. About and FileVersion reported 1.5.4, and a repeat
+update check reported that the app was current.
+
+Installed `ffmpeg.exe`, `ffprobe.exe`, `ffmpeg\LICENSE`,
+`ffmpeg\README-BtbN-build.txt`, and `libmpv-2.dll` hashes matched
+`scripts/runtime-manifest.json`. The test install retained the previous
+installer's `README-Gyan-build.txt`; the runtime binaries were replaced. This
+run did not test the invalid-signature, active-cue, or unsaved-workspace guards.
+Public release remains blocked by source-compliance requirements.
+
 ## Cleanup
 
 Close QlisaUpdaterTest and uninstall only the app with the `QlisaUpdaterTest`
