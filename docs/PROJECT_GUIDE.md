@@ -273,9 +273,12 @@ runtime discovery, NDI dynamic loading, NDI sender/receiver workers, SRT FFmpeg
 sender/input workers, queues, and live status. `output_engine/mod.rs` connects
 composited frames and program-audio taps to those workers.
 
-- Windows release packaging stages a pinned FFmpeg runtime from an external
-  archive and includes its executable and notices in the installer. FFmpeg is
-  not stored in Git. NDI is dynamically loaded from the user's separately
+- Windows builds do not stage or bundle FFmpeg, ffprobe, or libmpv. On first
+  launch, a preparation window downloads the pinned FFmpeg pair and libmpv
+  directly from their upstream URLs, checks their SHA256 hashes, and installs
+  them under `%LOCALAPPDATA%\Qlisa\runtime\` before opening the main window.
+  Missing or damaged files are repaired automatically; preparation errors offer
+  Retry or Close. NDI is dynamically loaded from the user's separately
   installed NDI Runtime; the NDI DLL is never bundled by Qlisa.
 - The SRT sender carries program audio and video on Windows. On macOS/Linux,
   current SRT output is video-only; NDI carries program audio on all supported
@@ -342,16 +345,17 @@ stored at the same scope; inspect the struct before deciding.
 - Rust stable toolchain, Node.js, pnpm, and Tauri 2 platform prerequisites.
 - `pnpm install` at repository root.
 - libmpv for visual playback. Windows first launch downloads the pinned DLL
-  from upstream into `%LOCALAPPDATA%\Qlisa\runtime\`; macOS/Linux use
-  platform libmpv.
+  from upstream, verifies its SHA256 hash, and installs it into
+  `%LOCALAPPDATA%\Qlisa\runtime\`; macOS/Linux use platform libmpv.
 - Windows Qlisa app builds always use `vendor/asiosdk/` via
   `src-tauri/.cargo/config.toml` and enable `asio-support`.
 - Windows Qlisa downloads FFmpeg/ffprobe from the pinned BtbN FFmpeg 9.0 GPL
   static archive on first launch and installs them under
   `%LOCALAPPDATA%\Qlisa\runtime\`. See [runtime pins and source provenance](THIRD_PARTY_SOURCE_OFFER.md).
-  NSIS installs Qlisa per-machine under Program Files; the media binaries are
-  not inputs to the installer or updater package. NDI Runtime is installed
-  separately by the user.
+  NSIS installs Qlisa per-machine under `C:\Program Files\Qlisa`. The runtime
+  manifest pins upstream URLs and SHA256 hashes. The media binaries are not
+  inputs to the installer or updater package; the updater updates Qlisa only.
+  NDI Runtime is installed separately by the user.
 
 ### Commands
 
