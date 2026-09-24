@@ -4,17 +4,23 @@ This test uses two signed builds and a loopback HTTP feed. It creates no GitHub
 Release, tag, or production configuration change. Installers use the isolated
 `QlisaUpdaterTest` identity. Do not distribute them.
 
-Run the commands in one PowerShell session from a clean source checkout whose
-four version fields are still 1.5.2. Complete this local test before running
-`scripts/publish.ps1`, which bumps production to 1.5.3. The FFmpeg and libmpv
-runtime files and their pinned hashes must already be ready. Keep the worktree,
-feed directory, and test app until the checks finish.
+Run this test after the private signed production 1.5.3 installer is built.
+Before running `scripts/publish.ps1`, record the current commit SHA as
+`$baselineCommit`; it must be the clean source commit whose four version fields
+are 1.5.2. Enter that exact SHA below after the production build. The updater
+test uses a detached worktree from that commit and does not change the
+production checkout. FFmpeg and libmpv runtime files and their pinned hashes
+must be ready. Keep the worktree, feed directory, and test app until checks
+finish.
 
 ## Prepare an isolated worktree and config overlay
 
 ```powershell
 $sourceRoot = (git rev-parse --show-toplevel).Trim()
-if (@(git -C $sourceRoot status --porcelain --untracked-files=all).Count -ne 0) { throw 'Source checkout must be clean.' }
+$baselineCommit = 'PASTE_SAVED_PRE_BUMP_COMMIT_SHA_HERE'
+if ($baselineCommit -notmatch '^[0-9a-fA-F]{40}$' -or $baselineCommit -match '^0+$') { throw 'Set baselineCommit to the exact 40-character SHA recorded before publish.ps1.' }
+$resolvedBaseline = (git -C $sourceRoot rev-parse "$baselineCommit^{commit}").Trim()
+if ($LASTEXITCODE -ne 0 -or $resolvedBaseline -ine $baselineCommit) { throw 'Saved baselineCommit does not resolve to a commit.' }
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
 $runId = [guid]::NewGuid().ToString('N')
 $testRoot = Join-Path $tempRoot ('Qlisa-updater-local-' + $runId)
@@ -22,7 +28,7 @@ $baselineDir = Join-Path $tempRoot ('qlisa-updater-local-baseline-' + $runId)
 $feedDir = Join-Path $tempRoot ('qlisa-updater-local-feed-' + $runId)
 $testConfig = Join-Path $tempRoot ('qlisa-updater-local-' + $runId + '.tauri.conf.json')
 $feedServer = $null
-git -C $sourceRoot worktree add --detach $testRoot (git -C $sourceRoot rev-parse HEAD)
+git -C $sourceRoot worktree add --detach $testRoot $baselineCommit
 if ($LASTEXITCODE -ne 0) { throw 'Could not create the disposable worktree.' }
 Push-Location $testRoot
 $packageVersion = [string](Get-Content -Raw package.json | ConvertFrom-Json).version
@@ -57,7 +63,7 @@ Copy runtime files and notices listed by `scripts/runtime-manifest.json`. This
 local build does not need source archives:
 
 ```powershell
-$manifest = Get-Content -Raw (Join-Path $sourceRoot 'scripts/runtime-manifest.json') | ConvertFrom-Json
+$manifest = Get-Content -Raw (Join-Path $testRoot 'scripts/runtime-manifest.json') | ConvertFrom-Json
 $ffmpeg = @($manifest.components | Where-Object id -eq 'ffmpeg-gyan-essentials')
 $mpv = @($manifest.components | Where-Object id -eq 'libmpv')
 if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { throw 'Expected one FFmpeg and one libmpv runtime record.' }
