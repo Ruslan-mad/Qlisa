@@ -13,12 +13,12 @@ command keeps the application version synchronized in `package.json`,
 `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.lock`.
 `.inkue` workspaces and several internal `inkue` names are retained for
 compatibility. This is not an official upstream Inkue release checkout. The
-current version in this checkout is 1.5.5. The source repository is public at
+current release baseline is 1.5.5. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
 downloads. The Tauri updater is configured for signed GitHub Releases. The
 1.5.4 local updater E2E check passed. Isolated 1.5.5 runtime bootstrap,
 repeat launch, and missing-file repair checks passed. A clean per-machine
-installation and the 1.5.5 updater E2E check remain pending. Runtime source and
+installation and the 1.5.5-to-1.5.6 updater E2E checks remain pending. Runtime source and
 license evidence is tracked separately; fetching the media files from upstream
 does not establish
 legal compliance. See [Windows release preparation](RELEASING.md).
@@ -419,7 +419,8 @@ startup and through the Help/About UI. It downloads the signed update, then
 blocks installation while cues run or the workspace has unsaved changes.
 The 1.5.4 local updater E2E check passed. Isolated 1.5.5 runtime bootstrap,
 repeat launch, and missing-file repair checks passed. The 1.5.5 per-machine
-installation and updater E2E checks remain pending. Runtime source and license
+installation and 1.5.5-to-1.5.6 updater E2E checks remain pending. Runtime
+source and license
 evidence has open items; downloading media assets from upstream does not
 establish legal compliance. Source materials and notices remain separate from
 the Qlisa binary release. Release artifacts are not checked into Git; do not

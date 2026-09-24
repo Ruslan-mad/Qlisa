@@ -4,6 +4,8 @@
 
 - [Project guide](PROJECT_GUIDE.md) — architecture, cue lifecycle, data flow,
   build and test commands, platform prerequisites, and compatibility rules.
+- [Release notes for 1.5.6](RELEASE_NOTES_1.5.6.md) — changes recorded for that
+  version.
 - [Release notes for 1.5.2](RELEASE_NOTES_1.5.2.md) — changes recorded for that
   version.
 - [Release notes template](RELEASE_NOTES_TEMPLATE.md) — format for future
