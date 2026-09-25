@@ -88,6 +88,27 @@ export function isSelectedCueStopShortcut(
 ): boolean {
   return getKeyboardShortcutKey(e) === "s" && !e.ctrlKey && !e.metaKey && !e.altKey;
 }
+
+/** Ctrl+N / Cmd+N creates a project, matching the File menu. */
+export function isNewWorkspaceShortcut(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "shiftKey" | "altKey"> & Partial<Pick<KeyboardEvent, "code">>,
+): boolean {
+  return getKeyboardShortcutKey(e) === "n" && (isMac ? e.metaKey : e.ctrlKey) && !e.shiftKey && !e.altKey;
+}
+
+/** Ctrl+Shift+S / Cmd+Shift+S opens Save As. */
+export function isSaveAsShortcut(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "shiftKey" | "altKey"> & Partial<Pick<KeyboardEvent, "code">>,
+): boolean {
+  return getKeyboardShortcutKey(e) === "s" && e.shiftKey && !e.altKey && (isMac ? e.metaKey : e.ctrlKey);
+}
+
+/** Ctrl+S / Cmd+S saves without adding extra modifiers. */
+export function isSaveShortcut(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "shiftKey" | "altKey"> & Partial<Pick<KeyboardEvent, "code">>,
+): boolean {
+  return getKeyboardShortcutKey(e) === "s" && !e.shiftKey && !e.altKey && (isMac ? e.metaKey : e.ctrlKey);
+}
 import {
   go,
   hardStopAll,
@@ -95,7 +116,6 @@ import {
   stopCue,
   pauseCue,
   resumeCue,
-  addCue,
   setPlayhead,
 } from "../lib/commands";
 // Edit operations are shared with the Edit / Action menus so a shortcut and
@@ -122,6 +142,8 @@ export function useKeyboardShortcuts(
   onToggleOutputWindow?: () => void,
   onToggleShowMode?: () => void,
   onToggleSearch?: () => void,
+  onNewWorkspace?: () => void,
+  onSaveAs?: () => void,
 ) {
   const lastEscapeRef = useRef<number>(0);
   const lastGoRef = useRef<number>(0);
@@ -176,7 +198,10 @@ export function useKeyboardShortcuts(
         }
         case "s":
         {
-          if (cmdOrCtrl(e)) {
+          if (isSaveAsShortcut(e)) {
+            e.preventDefault();
+            onSaveAs?.();
+          } else if (isSaveShortcut(e)) {
             e.preventDefault();
             onSave?.();
           } else if (isSelectedCueStopShortcut(e) && selectedCueId) {
@@ -271,10 +296,9 @@ export function useKeyboardShortcuts(
         }
         case "n":
         {
-          if (cmdOrCtrl(e)) {
+          if (isNewWorkspaceShortcut(e)) {
             e.preventDefault();
-            await addCue("audio").catch(console.error);
-            onRefresh();
+            onNewWorkspace?.();
           }
           break;
         }
@@ -347,5 +371,5 @@ export function useKeyboardShortcuts(
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [selectedCueId, generalPrefs, onRefresh, onOpenPreferences, onSave, onOpen, onToggleInspector, onGoto, onToggleOutputWindow, onToggleShowMode, onToggleSearch]);
+  }, [selectedCueId, generalPrefs, onRefresh, onOpenPreferences, onSave, onOpen, onToggleInspector, onGoto, onToggleOutputWindow, onToggleShowMode, onToggleSearch, onNewWorkspace, onSaveAs]);
 }

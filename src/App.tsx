@@ -1350,6 +1350,8 @@ export default function App() {
     () => void handleToggleSurface(),
     () => setShowMode((v) => !v),
     () => handleToggleSearch(),
+    () => void handleNew(),
+    () => void handleSaveAs(),
   );
 
   const selectedCue = findCueRecursive(cues, selectedCueId) ?? null;
