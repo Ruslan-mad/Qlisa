@@ -6,7 +6,7 @@ Qlisa's Windows network code uses these runtimes:
 | --- | --- | --- |
 | NDI Runtime | Dynamically loaded for NDI discovery, receive, and send | Installed separately by the user. Qlisa source and installer must not contain NDI DLLs. |
 | FFmpeg and ffprobe | SRT input/output, conversion, and media probing | On first launch Qlisa downloads the pinned BtbN archive directly from upstream, verifies SHA-256, and installs the executables under `%LOCALAPPDATA%\Qlisa\runtime\`. They are not included in the Qlisa installer or updater package. |
-| libmpv | Windows video playback | On first launch Qlisa downloads the pinned shinchiro development archive directly from upstream, verifies SHA-256, extracts `libmpv-2.dll`, and stores it under `%LOCALAPPDATA%\Qlisa\runtime\`. It is not included in the Qlisa installer or updater package. |
+| libmpv | Windows video playback | On first launch Qlisa downloads the pinned shinchiro development archive directly from upstream, verifies SHA-256, extracts `libmpv-2.dll` with the in-process LZMA-capable 7z decoder, and stores it under `%LOCALAPPDATA%\Qlisa\runtime\`. It is not included in the Qlisa installer or updater package. |
 
 NDI is optional. Install the official [NDI Runtime](https://ndi.video/) to use NDI sources or destinations. Qlisa does not download, bundle, or install it. NDI® is a registered trademark of Vizrt NDI AB.
 
