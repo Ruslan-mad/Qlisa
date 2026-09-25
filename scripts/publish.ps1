@@ -221,10 +221,10 @@ if ([string]::IsNullOrWhiteSpace($signature) -or $signature -cne $signature.Trim
 $outDirectory = Join-Path $script:Root "src-tauri/target/release/prepared/$tag"
 New-Item -ItemType Directory -Path $outDirectory -Force | Out-Null
 $latestPath = Join-Path $outDirectory 'latest.json'
-$assetUrl = "$script:RepoUrl/releases/latest/download/$($installer.Name)"
+$assetUrl = "$script:RepoUrl/releases/download/$tag/$($installer.Name)"
 Invoke-Checked 'Create updater latest.json' $node.Source @((Join-Path $script:Root 'scripts/release.mjs'), '--write-updater-metadata', $Version, $releaseNotes, $assetUrl, $signaturePath, $latestPath)
 $parsed = Get-Content -Raw -LiteralPath $latestPath | ConvertFrom-Json
-$expectedUrl = "$script:RepoUrl/releases/latest/download/$($installer.Name)"
+$expectedUrl = "$script:RepoUrl/releases/download/$tag/$($installer.Name)"
 $expectedNotes = (Get-Content -Raw -LiteralPath $releaseNotes).Trim()
 $pubDate = [datetimeoffset]$parsed.pub_date
 if ($parsed.version -cne $Version -or [string]$parsed.platforms.'windows-x86_64'.signature -cne $signature -or

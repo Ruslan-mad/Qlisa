@@ -72,24 +72,24 @@ test("release preparation requires NSIS before any version mutation or commit", 
 
 test("builds and validates Tauri metadata with signature content and exact HTTPS asset URL", () => {
   const metadata = createUpdaterMetadata({
-    version: "1.5.3",
+    version: "1.5.6",
     notes: "  Fixes and improvements  ",
     pubDate: "2026-09-24T10:00:00Z",
-    url: "https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.3/Qlisa_1.5.3_x64-setup.exe",
+    url: "https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.6/Qlisa_1.5.6_x64-setup.exe",
     signature: "signed-content",
   });
-  assert.equal(metadata.version, "1.5.3");
+  assert.equal(metadata.version, "1.5.6");
   assert.equal(metadata.notes, "Fixes and improvements");
   assert.equal(metadata.platforms["windows-x86_64"].signature, "signed-content");
   assert.equal(validateUpdaterMetadata(metadata, {
-    version: "1.5.3",
-    url: "https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.3/Qlisa_1.5.3_x64-setup.exe",
+    version: "1.5.6",
+    url: "https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.6/Qlisa_1.5.6_x64-setup.exe",
     signature: "signed-content",
   }), true);
   assert.throws(() => createUpdaterMetadata({ version: "1.5.3", notes: "notes", pubDate: "2026-09-24", url: "http://example.com/a", signature: "sig" }));
   assert.throws(() => createUpdaterMetadata({ version: "1.5.3", notes: "notes", pubDate: "2026-09-24", url: "https://example.com/a", signature: "https://example.com/a.sig" }));
   assert.throws(() => createUpdaterMetadata({ version: "1.5.3", notes: "notes", pubDate: "2026-09-24", url: "https://example.com/a", signature: "signed-content\n" }));
-  assert.throws(() => validateUpdaterMetadata(metadata, { version: "1.5.3", url: "https://example.com/wrong", signature: "signed-content" }));
+  assert.throws(() => validateUpdaterMetadata(metadata, { version: "1.5.6", url: "https://example.com/wrong", signature: "signed-content" }));
 });
 
 test("build commands forward asio-support through Cargo args and bundle only one target", () => {
