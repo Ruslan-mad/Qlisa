@@ -115,6 +115,13 @@
     "createUpdaterArtifacts": true,
     "license": "GPL-3.0-or-later",
     "licenseFile": "../LICENSE",
+    "fileAssociations": [
+      {
+        "ext": ["qlisa"],
+        "name": "Qlisa Project",
+        "description": "Qlisa Project"
+      }
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

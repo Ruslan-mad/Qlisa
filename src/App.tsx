@@ -20,7 +20,7 @@ import { FullscreenControl } from "./components/Transport/FullscreenControl";
 import { useTauriEvents } from "./hooks/useTauriEvents";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useWorkspaceStore } from "./stores/workspaceStore";
-import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, getCueLists, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences } from "./lib/commands";
+import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, getCueLists, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences } from "./lib/commands";
 import { AboutDialog } from "./components/About/AboutDialog";
 import { UpdateDialog } from "./components/Update/UpdateDialog";
 import { useUpdateStore } from "./stores/updateStore";
@@ -38,6 +38,7 @@ import { normalizeNumberCueData } from "./components/Inspector/numberModel";
 import { resolveMonitorPreviewSelection } from "./components/Inspector/numberPreviewSelection";
 import { useNumberPreviewStore } from "./stores/numberPreviewStore";
 import { CueToolbar } from "./components/CueToolbar/CueToolbar";
+import { isProjectFilePath, resolveWorkspaceGuard, withDefaultProjectExtension } from "./lib/projectFile";
 
 // ---------------------------------------------------------------------------
 // Recent files
@@ -113,10 +114,14 @@ function WindowControls() {
 // ---------------------------------------------------------------------------
 
 function CloseConfirmDialog({
+  titleKey = "dialogs.unsavedChanges",
+  messageKey = "dialogs.closeMessage",
   onSave,
   onDiscard,
   onCancel,
 }: {
+  titleKey?: "dialogs.unsavedChanges" | "dialogs.workspaceChangeTitle";
+  messageKey?: "dialogs.closeMessage" | "dialogs.workspaceChangeMessage";
   onSave: () => void;
   onDiscard: () => void;
   onCancel: () => void;
@@ -138,10 +143,10 @@ function CloseConfirmDialog({
         }}
       >
         <div style={{ fontSize: 15, fontWeight: 600, color: "var(--wc-text-bright)", marginBottom: 8 }}>
-          {t("dialogs.unsavedChanges")}
+          {t(titleKey)}
         </div>
         <div style={{ fontSize: 13, color: "var(--wc-text-secondary)", marginBottom: 24 }}>
-          {t("dialogs.closeMessage")}
+          {t(messageKey)}
         </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <DialogBtn label={t("common.cancel")} onClick={onCancel} />
@@ -844,6 +849,8 @@ export default function App() {
   const [outputSurfaceVisible, setOutputSurfaceVisible] = useState(false);
   const [outputMonitorVisible, setOutputMonitorVisible] = useState(false);
   const [loadError, setLoadError]                 = useState<string | null>(null);
+  const [workspaceGuardOpen, setWorkspaceGuardOpen] = useState(false);
+  const [workspaceError, setWorkspaceError]         = useState<string | null>(null);
   const [collectReport, setCollectReport]         = useState<CollectReport | null>(null);
   const [importReport, setImportReport]           = useState<ImportReport | null>(null);
   const [recentFiles, setRecentFiles]             = useState<string[]>(loadRecentFiles);
@@ -855,6 +862,9 @@ export default function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const closeDialogOpenRef = useRef(false);
   const activePlaybackCloseOpenRef = useRef(false);
+  const pendingWorkspaceActionRef = useRef<(() => Promise<void>) | null>(null);
+  const pendingProjectOpensRef = useRef<string[]>([]);
+  const processingProjectOpensRef = useRef(false);
 
   // Persist panel visibility + inspector width across launches.
   useEffect(() => {
@@ -994,38 +1004,129 @@ export default function App() {
    *  Returns true if the save completed, false if the user cancelled. */
   const handleSaveAs = useCallback(async (): Promise<boolean> => {
     const path = await saveDialog({
-      filters: [{ name: "Qlisa Workspace", extensions: ["inkue"] }],
-      defaultPath: (workspaceInfo?.name ?? t("app.untitled")) + ".inkue",
+      filters: [{ name: "Qlisa Project", extensions: ["qlisa", "inkue"] }],
+      defaultPath: (workspaceInfo?.name ?? t("app.untitled")) + ".qlisa",
     });
     if (typeof path !== "string") return false;
-    const filePath = path.endsWith(".inkue") ? path : path + ".inkue";
-    await saveWorkspace(filePath).catch(console.error);
-    await refreshWorkspaceInfo();
-    setRecentFiles(pushRecentFile(filePath));
-    return true;
+    const filePath = withDefaultProjectExtension(path);
+    try {
+      await saveWorkspace(filePath);
+      await refreshWorkspaceInfo();
+      setRecentFiles(pushRecentFile(filePath));
+      return true;
+    } catch (error) {
+      console.error("Failed to save Qlisa project", error);
+      setWorkspaceError(String(error));
+      return false;
+    }
   }, [workspaceInfo, refreshWorkspaceInfo]);
 
   const handleSave = useCallback(async (): Promise<boolean> => {
     const path = workspaceInfo?.file_path;
     if (path) {
-      await saveWorkspace(path).catch(console.error);
-      await refreshWorkspaceInfo();
-      setRecentFiles(pushRecentFile(path));
-      return true;
+      try {
+        await saveWorkspace(path);
+        await refreshWorkspaceInfo();
+        setRecentFiles(pushRecentFile(path));
+        return true;
+      } catch (error) {
+        console.error("Failed to save Qlisa project", error);
+        setWorkspaceError(String(error));
+        return false;
+      }
     }
     return handleSaveAs();
   }, [workspaceInfo, refreshWorkspaceInfo, handleSaveAs]);
 
-  const openWorkspacePath = useCallback(async (path: string) => {
-    await loadWorkspace(path).catch(console.error);
-    setRecentFiles(pushRecentFile(path));
-    setSearchQuery("");
+  const performOpenWorkspacePath = useCallback(async (path: string): Promise<boolean> => {
+    try {
+      await loadWorkspace(path);
+      setRecentFiles(pushRecentFile(path));
+      setSearchQuery("");
+      return true;
+    } catch (error) {
+      console.error("Failed to open Qlisa project", error);
+      setWorkspaceError(String(error));
+      return false;
+    }
   }, []);
+
+  const runWorkspaceAction = useCallback((action: () => Promise<void>) => {
+    if (pendingWorkspaceActionRef.current) return;
+    const modified = !!useWorkspaceStore.getState().workspaceInfo?.is_modified;
+    if (resolveWorkspaceGuard(modified, null) === "prompt") {
+      pendingWorkspaceActionRef.current = action;
+      setWorkspaceGuardOpen(true);
+      return;
+    }
+    void action().catch((error) => {
+      console.error("Workspace action failed", error);
+      setWorkspaceError(String(error));
+    });
+  }, []);
+
+  const openWorkspacePath = useCallback((path: string) => {
+    runWorkspaceAction(async () => { await performOpenWorkspacePath(path); });
+  }, [runWorkspaceAction, performOpenWorkspacePath]);
+
+  const drainProjectOpenQueue = useCallback(async () => {
+    if (processingProjectOpensRef.current || pendingWorkspaceActionRef.current) return;
+    processingProjectOpensRef.current = true;
+    try {
+      while (pendingProjectOpensRef.current.length > 0) {
+        const path = pendingProjectOpensRef.current.shift()!;
+        const action = async () => {
+          await performOpenWorkspacePath(path);
+          void drainProjectOpenQueue();
+        };
+        if (resolveWorkspaceGuard(!!useWorkspaceStore.getState().workspaceInfo?.is_modified, null) === "prompt") {
+          pendingWorkspaceActionRef.current = action;
+          processingProjectOpensRef.current = false;
+          setWorkspaceGuardOpen(true);
+          return;
+        }
+        await performOpenWorkspacePath(path);
+      }
+    } finally {
+      processingProjectOpensRef.current = false;
+    }
+  }, [performOpenWorkspacePath]);
+
+  const enqueueProjectOpens = useCallback((paths: string[]) => {
+    pendingProjectOpensRef.current.push(...paths.filter(isProjectFilePath));
+    void drainProjectOpenQueue();
+  }, [drainProjectOpenQueue]);
+
+  const resolveWorkspaceGuardAction = useCallback(async (choice: "save" | "discard" | "cancel") => {
+    const action = pendingWorkspaceActionRef.current;
+    if (!action) return;
+    const saved = choice === "save" ? await handleSave() : false;
+    // This dialog is only opened for a dirty workspace. Keep that original
+    // condition authoritative: a cancelled/failed Save must never allow replace.
+    const resolution = resolveWorkspaceGuard(true, choice, saved);
+    if (resolution !== "execute") {
+      if (choice === "cancel") {
+        pendingWorkspaceActionRef.current = null;
+        pendingProjectOpensRef.current = [];
+        setWorkspaceGuardOpen(false);
+      }
+      return;
+    }
+    pendingWorkspaceActionRef.current = null;
+    setWorkspaceGuardOpen(false);
+    try {
+      await action();
+    } catch (error) {
+      console.error("Workspace action failed", error);
+      setWorkspaceError(String(error));
+    }
+    void drainProjectOpenQueue();
+  }, [handleSave, drainProjectOpenQueue]);
 
   const handleOpen = useCallback(async () => {
     const path = await openDialog({
       multiple: false,
-      filters: [{ name: "Qlisa Workspace", extensions: ["inkue", "wincue"] }],
+      filters: [{ name: "Qlisa Project", extensions: ["qlisa", "inkue", "wincue"] }],
     });
     if (typeof path === "string") {
       await openWorkspacePath(path);
@@ -1033,9 +1134,11 @@ export default function App() {
   }, [openWorkspacePath]);
 
   const handleNew = useCallback(async () => {
-    await newWorkspace().catch(console.error);
-    // cue-lists-changed and workspace-modified are emitted by the backend.
-  }, []);
+    runWorkspaceAction(async () => {
+      try { await newWorkspace(); }
+      catch (error) { console.error("Failed to create Qlisa project", error); setWorkspaceError(String(error)); }
+    });
+  }, [runWorkspaceAction]);
 
   const handleImportQlab = useCallback(async () => {
     const path = await openDialog({
@@ -1043,16 +1146,18 @@ export default function App() {
       filters: [{ name: "QLab Workspace", extensions: ["qlab5", "qlab4"] }],
     });
     if (typeof path !== "string") return;
-    try {
-      // The import replaces the current show and is deliberately left unsaved:
-      // media resolves against the QLab bundle folder, so nothing is written
-      // into the user's QLab project. Save As is the operator's next step.
-      setImportReport(await importQlabWorkspace(path));
-      setSearchQuery("");
-    } catch (err) {
-      setLoadError(String(err));
-    }
-  }, []);
+    runWorkspaceAction(async () => {
+      try {
+        // The import replaces the current show and is deliberately left unsaved:
+        // media resolves against the QLab bundle folder, so nothing is written
+        // into the user's QLab project. Save As is the operator's next step.
+        setImportReport(await importQlabWorkspace(path));
+        setSearchQuery("");
+      } catch (err) {
+        setWorkspaceError(String(err));
+      }
+    });
+  }, [runWorkspaceAction]);
 
   const handleCollectAndSave = useCallback(async () => {
     const dir = await openDialog({ directory: true });
@@ -1064,6 +1169,38 @@ export default function App() {
       setLoadError(String(err));
     }
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const drain = () => {
+      void drainPendingProjectOpens()
+        .then(enqueueProjectOpens)
+        .catch((error) => console.error("Failed to receive project-open request", error));
+    };
+    // Register first. The queue then covers both startup arguments and later
+    // single-instance/open-with requests without a startup race.
+    void listen("project-open-requested", drain).then((stop) => {
+      if (disposed) stop();
+      else {
+        unlisten = stop;
+        drain();
+      }
+    }).catch((error) => console.error("Failed to listen for project-open requests", error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [enqueueProjectOpens]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow().onDragDropEvent((event) => {
+      if (event.payload.type === "drop") enqueueProjectOpens(event.payload.paths);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((error) => console.error("Failed to listen for project file drops", error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [enqueueProjectOpens]);
 
   // -------------------------------------------------------------------------
   // Close-request interception
@@ -1404,6 +1541,13 @@ export default function App() {
         </div>
       )}
 
+      {workspaceError && (
+        <div role="alert" style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", zIndex: 100000, background: "#7f1d1d", border: "1px solid #ef4444", borderRadius: 8, padding: "10px 16px", maxWidth: 620, display: "flex", alignItems: "flex-start", gap: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.8)" }}>
+          <span style={{ color: "#fecaca", fontSize: 13, flex: 1, overflowWrap: "anywhere" }}>{workspaceError}</span>
+          <button onClick={() => setWorkspaceError(null)} style={{ background: "transparent", border: "none", color: "#fca5a5", cursor: "pointer", fontSize: 16, padding: 0, lineHeight: 1, flexShrink: 0 }}>✕</button>
+        </div>
+      )}
+
       {/* Goto cue dialog */}
       {gotoOpen && (
         <GotoDialog onClose={() => setGotoOpen(false)} onRefresh={handleRefresh} />
@@ -1415,6 +1559,15 @@ export default function App() {
           onSave={confirmSaveAndClose}
           onDiscard={confirmDiscardAndClose}
           onCancel={cancelClose}
+        />
+      )}
+      {workspaceGuardOpen && !closeDialogOpen && !activePlaybackCloseOpen && (
+        <CloseConfirmDialog
+          titleKey="dialogs.workspaceChangeTitle"
+          messageKey="dialogs.workspaceChangeMessage"
+          onSave={() => void resolveWorkspaceGuardAction("save")}
+          onDiscard={() => void resolveWorkspaceGuardAction("discard")}
+          onCancel={() => void resolveWorkspaceGuardAction("cancel")}
         />
       )}
       {activePlaybackCloseOpen && (

@@ -345,6 +345,8 @@ export const saveWorkspace = (path: string) =>
   invoke<void>("save_workspace", { path });
 export const loadWorkspace = (path: string) =>
   invoke<void>("load_workspace", { path });
+export const drainPendingProjectOpens = () =>
+  invoke<string[]>("drain_pending_project_opens");
 export const importQlabWorkspace = (path: string) =>
   invoke<ImportReport>("import_qlab_workspace", { path });
 export const getWorkspaceInfo = () => invoke<WorkspaceInfo>("get_workspace_info");
