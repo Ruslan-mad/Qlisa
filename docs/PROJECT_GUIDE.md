@@ -14,8 +14,8 @@ command keeps the application version synchronized in `package.json`,
 The primary project extension in this source checkout is `.qlisa`. Legacy
 `.inkue` projects remain openable; ordinary Save keeps the opened file path.
 Save As offers `.qlisa` by default and preserves an explicitly chosen `.inkue`
-or `.wincue` suffix. Collect and Save writes `.qlisa`. Windows file association
-is for `.qlisa` only. Both extensions use the existing JSON workspace schema;
+suffix. Collect and Save writes `.qlisa`. Windows file association is for
+`.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes are unreleased and are not included in the 1.5.6 installer.
 This is not an official upstream Inkue release checkout. The current version

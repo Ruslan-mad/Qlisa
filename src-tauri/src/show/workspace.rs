@@ -449,7 +449,7 @@ impl Workspace {
     /// Differs from [`to_json`](Self::to_json) in two ways: media `file_path`s are
     /// kept **absolute** (the recovery file lives in the per-user config dir, not
     /// beside the show's media, so relative paths would not resolve), and the
-    /// original `.inkue` path is embedded under `recovery_original_path` so a
+    /// original project path is embedded under `recovery_original_path` so a
     /// restore can target the same file.  Compact (not pretty) since it is
     /// rewritten every few seconds.
     pub fn to_recovery_json(&self) -> Result<String> {
