@@ -5221,6 +5221,14 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn srt_input_stop_reaps_child_and_waiting_pipe_readers() {
+        // This cleanup integration test needs the pinned SRT-capable FFmpeg
+        // runtime. Clean CI checkouts intentionally do not contain runtime
+        // binaries, so keep the test conditional on the normal runtime resolver.
+        let Some(_ffmpeg) = find_ffmpeg_runtime() else {
+            eprintln!("skipping SRT input cleanup integration test: no verified FFmpeg runtime available");
+            return;
+        };
+
         let (producer, _consumer) = ringbuf::HeapRb::<f32>::new(1024).split();
         let worker = SrtInputWorker::start(
             &listener_settings(unused_loopback_port()),
