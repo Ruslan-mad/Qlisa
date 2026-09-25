@@ -4028,7 +4028,7 @@ dependencies = [
 
 [[package]]
 name = "qlisa"
-version = "1.5.7"
+version = "1.5.8"
 dependencies = [
  "anyhow",
  "arc-swap",
