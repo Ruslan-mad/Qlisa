@@ -425,6 +425,14 @@ pub struct Voice {
     /// Current read position in frames (atomic).
     pub frame_pos: AtomicU64,
 
+    /// Number of callback blocks that encountered stream starvation in this
+    /// voice's current run. Incremented only on the audio thread.
+    pub underrun_events: AtomicU64,
+    /// Number of diagnostic events that could not enter the bounded status ring.
+    pub dropped_underrun_reports: AtomicU64,
+    /// True after a loop boundary has occurred in this voice's current run.
+    pub has_looped: AtomicBool,
+
     /// [`VoiceState`] encoded as u8.
     pub state: AtomicU8,
 
@@ -476,6 +484,9 @@ impl Voice {
             channels,
             sample_rate,
             frame_pos: AtomicU64::new(0),
+            underrun_events: AtomicU64::new(0),
+            dropped_underrun_reports: AtomicU64::new(0),
+            has_looped: AtomicBool::new(false),
             state: AtomicU8::new(VoiceState::Idle as u8),
             inner: Arc::new(VoiceInner {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
@@ -513,6 +524,9 @@ impl Voice {
             channels: stream.channels,
             sample_rate: stream.sample_rate,
             frame_pos: AtomicU64::new(0),
+            underrun_events: AtomicU64::new(0),
+            dropped_underrun_reports: AtomicU64::new(0),
+            has_looped: AtomicBool::new(false),
             state: AtomicU8::new(VoiceState::Idle as u8),
             inner: Arc::new(VoiceInner {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
@@ -549,6 +563,9 @@ impl Voice {
             channels: 2,
             sample_rate,
             frame_pos: AtomicU64::new(0),
+            underrun_events: AtomicU64::new(0),
+            dropped_underrun_reports: AtomicU64::new(0),
+            has_looped: AtomicBool::new(false),
             state: AtomicU8::new(VoiceState::Idle as u8),
             inner: Arc::new(VoiceInner {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),

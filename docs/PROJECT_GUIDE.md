@@ -208,6 +208,27 @@ rings; status goes back through rings/atomics. Avoid logging, heap growth, file
 access, Tauri events, or workspace locking from the callback. The audio callback
 also serves live input feeds and optional post-master network audio taps.
 
+Streaming starvation is counted per callback block and reported outside the
+real-time thread. The diagnostic log includes voice/cue identity, silent output
+frame count and duration, source and output rates, ring fill/capacity,
+loop-boundary proximity, and the cue's underrun-event count. The UI keeps one
+stable alert. An ordinary Voice loop rewind uses a 100 ms refill watermark.
+Slice transitions, control seeks, and initial playback keep the 750 ms
+watermark.
+Run the ignored 30-minute callback/decoder loop stress test with
+`cd src-tauri && cargo test streaming_audio_loop_wall_clock_30m -- --ignored --nocapture`.
+Set `QLISA_AUDIO_STRESS_SECONDS` to a smaller number for a smoke run. The test
+reports loop count, underruns, silent frames, ring fill, decoder time, and
+refill scheduling delay; collect process CPU and memory separately while it
+runs.
+
+The streaming EOF path now preserves looping Voices instead of stopping them
+at the decoder tail. A 30-minute wall-clock run completed 895 loop boundaries
+with the Voice still Playing and zero decode failures. It recorded 899
+underrun callbacks and 431,520 silent frames, about one 10 ms callback gap per
+loop boundary; peak observed RSS was 16.8 MB and process CPU time was 11.8 s
+after 27 minutes. The loop rewind still has a short silent gap.
+
 The Windows Qlisa application always uses the Cargo feature `asio-support`.
 Build or run the Windows app with an ASIO-enabled command; do not omit ASIO.
 Use the versioned release command for Windows release builds, since the

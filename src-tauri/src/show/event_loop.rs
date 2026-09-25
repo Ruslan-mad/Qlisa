@@ -638,26 +638,41 @@ fn tick(
                     has_patch_levels = true;
                 }
             }
-            AudioStatus::Underrun { voice_id, count } => {
+            AudioStatus::Underrun {
+                voice_id,
+                count,
+                silent_frames,
+                sample_rate,
+                output_sample_rate,
+                buffered_frames,
+                capacity_frames,
+                near_loop_boundary,
+                dropped_before,
+            } => {
                 let cue_info = workspace
-                    .try_lock()
+                    .lock()
                     .ok()
                     .and_then(|ws| find_audio_cue_info(&ws.cue_lists, voice_id, output_engine));
+                let cue_id = cue_info.as_ref().map(|(id, _, _)| id.to_string());
+                let duration_ms = silent_frames as f64 * 1000.0 / output_sample_rate.max(1) as f64;
                 let message = match cue_info {
-                    Some((_, number, name)) if !number.is_empty() => format!(
-                        "Streaming audio underrun: Cue #{number} \u{201c}{name}\u{201d} ({count} silent frames)"
-                    ),
-                    Some((_, _, name)) if !name.is_empty() => format!(
-                        "Streaming audio underrun: Cue \u{201c}{name}\u{201d} ({count} silent frames)"
-                    ),
-                    _ => format!(
-                        "Streaming audio underrun on voice {voice_id} ({count} silent frames)"
-                    ),
+                    Some((_, number, name)) if !number.is_empty() => {
+                        format!("Streaming audio underrun: Cue #{number} \u{201c}{name}\u{201d} ({silent_frames} output frames, {duration_ms:.1} ms, source {sample_rate} Hz / output {output_sample_rate} Hz, buffer {buffered_frames}/{capacity_frames} frames, near loop boundary: {near_loop_boundary}, cue underrun events: {count}, earlier diagnostic reports dropped: {dropped_before})")
+                    }
+                    Some((_, _, name)) if !name.is_empty() => {
+                        format!("Streaming audio underrun: Cue \u{201c}{name}\u{201d} ({silent_frames} output frames, {duration_ms:.1} ms, source {sample_rate} Hz / output {output_sample_rate} Hz, buffer {buffered_frames}/{capacity_frames} frames, near loop boundary: {near_loop_boundary}, cue underrun events: {count}, earlier diagnostic reports dropped: {dropped_before})")
+                    }
+                    _ => format!("Streaming audio underrun on voice {voice_id} ({silent_frames} output frames, {duration_ms:.1} ms, source {sample_rate} Hz / output {output_sample_rate} Hz, buffer {buffered_frames}/{capacity_frames} frames, near loop boundary: {near_loop_boundary}, cue underrun events: {count}, earlier diagnostic reports dropped: {dropped_before})"),
                 };
+                log::warn!(
+                    target: "audio::underrun",
+                    "{message}; voice_id={voice_id}; cue_id={}",
+                    cue_id.as_deref().unwrap_or("unknown")
+                );
                 crate::health::set(crate::health::HealthAlert::new(
                     "audio-stream-underrun",
                     crate::health::HealthLevel::Warning,
-                    message,
+                    "Audio streaming underrun detected. See diagnostic log for details.",
                 ));
             }
             _ => {}

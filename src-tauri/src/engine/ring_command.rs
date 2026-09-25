@@ -148,9 +148,21 @@ pub enum AudioCommand {
 pub enum AudioStatus {
     /// A voice has naturally reached the end of its audio data and stopped.
     Completed { voice_id: VoiceId },
-    /// A streaming source had no decoded frame ready. The callback rendered
-    /// bounded silence and reports the cumulative count for diagnostics.
-    Underrun { voice_id: VoiceId, count: u64 },
+    /// A streaming source had no decoded frame ready. Emitted once per callback
+    /// block with starvation, so the log keeps each event without flooding the UI.
+    Underrun {
+        voice_id: VoiceId,
+        count: u64,
+        silent_frames: u64,
+        /// Source rate used by the decoder.
+        sample_rate: u32,
+        /// Device rate used for duration conversion.
+        output_sample_rate: u32,
+        buffered_frames: usize,
+        capacity_frames: usize,
+        near_loop_boundary: bool,
+        dropped_before: u64,
+    },
     /// Current playback position of a voice in samples (for UI time display).
     Position {
         voice_id: VoiceId,

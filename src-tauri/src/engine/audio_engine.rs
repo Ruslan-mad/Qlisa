@@ -3006,8 +3006,9 @@ fn mix_stream(
             .frame_pos
             .store(source.requested_frame(), Ordering::Relaxed);
     }
-    // Do not start consuming until the decoder has built the 750 ms ready
-    // watermark. This makes GO deterministic without ever waiting in RT.
+    // Do not start consuming until the decoder has built its ready watermark:
+    // 750 ms for GO and 100 ms after a loop seek. This keeps GO deterministic
+    // while limiting the gap at a repeated boundary, without waiting in RT.
     // A short file may reach EOF before it can fill the normal watermark;
     // once EOF is known, drain whatever PCM remains instead of waiting for a
     // watermark that can never be reached.
@@ -3016,7 +3017,30 @@ fn mix_stream(
             complete_stream_at_eof(source, voice, status_prod);
             return;
         }
-        source.note_underrun_frames(output.len() / channels.max(1));
+        let silent_frames = output.len() / channels.max(1);
+        source.note_underrun_frames(silent_frames);
+        let count = voice.underrun_events.fetch_add(1, Ordering::Relaxed) + 1;
+        let frame_pos = voice.current_frame();
+        let end = unsafe { *voice.inner.end_frame.get() }.unwrap_or(u64::MAX);
+        let boundary_window = (source.sample_rate as u64 / 10).max(1);
+        let near_loop_boundary = source.is_loop_rebuffering()
+            || (voice.has_looped.load(Ordering::Relaxed) && frame_pos <= boundary_window)
+            || (voice.inner.loops_remaining.load(Ordering::Relaxed) != 0
+                && end.saturating_sub(frame_pos) <= boundary_window);
+        let dropped_before = voice.dropped_underrun_reports.swap(0, Ordering::Relaxed);
+        if status_prod.try_push(AudioStatus::Underrun {
+            voice_id: voice.id,
+            count,
+            silent_frames: silent_frames as u64,
+            sample_rate: source.sample_rate,
+            output_sample_rate,
+            buffered_frames: source.buffered_samples() / source.channels.max(1) as usize,
+            capacity_frames: source.capacity_frames(),
+            near_loop_boundary,
+            dropped_before,
+        }).is_err() {
+            voice.dropped_underrun_reports.fetch_add(dropped_before + 1, Ordering::Relaxed);
+        }
         return;
     }
     let frames = output.len() / channels;
@@ -3068,6 +3092,7 @@ fn mix_stream(
                 if program.remaining > 0 {
                     if program.remaining != u32::MAX { program.remaining -= 1; }
                     source.request_seek_rt(segment.start_frame);
+                    voice.has_looped.store(true, Ordering::Relaxed);
                     voice.reset_stream_cursor();
                     frame_pos = segment.start_frame;
                     continue;
@@ -3077,6 +3102,7 @@ fn mix_stream(
                     let next = program.segments[program.current];
                     program.remaining = if next.play_count == u32::MAX { u32::MAX } else { next.play_count.saturating_sub(1) };
                     source.request_seek_rt(next.start_frame);
+                    voice.has_looped.store(true, Ordering::Relaxed);
                     voice.reset_stream_cursor();
                     frame_pos = next.start_frame;
                     continue;
@@ -3093,7 +3119,8 @@ fn mix_stream(
             let loops = voice.inner.loops_remaining.load(Ordering::Relaxed);
             if loops > 0 {
                 if loops != u32::MAX { voice.inner.loops_remaining.fetch_sub(1, Ordering::Relaxed); }
-                source.request_seek_rt(0);
+                source.request_loop_seek_rt(0);
+                voice.has_looped.store(true, Ordering::Relaxed);
                 voice.reset_stream_cursor();
                 frame_pos = 0;
             } else {
@@ -3187,14 +3214,50 @@ fn mix_stream(
         // final held frame, so this is the first safe point to complete.  An
         // EOF with a non-empty ring never reaches this branch prematurely.
         if tail_consumed {
+            let slice_will_continue = unsafe {
+                (&*voice.inner.slices.get()).as_ref().is_some_and(|program| {
+                    program.remaining > 0 || program.current + 1 < program.segments.len()
+                })
+            };
+            let voice_will_loop = voice.inner.loops_remaining.load(Ordering::Relaxed) > 0;
+            if slice_will_continue || voice_will_loop {
+                // Let the next callback iteration run the same slice/loop
+                // boundary logic used before EOF. This preserves finite counts
+                // and segment transitions in one place.
+                continue;
+            }
             complete_stream_at_eof(source, voice, status_prod);
             break;
         }
     }
     voice.frame_pos.store(frame_pos, Ordering::Relaxed);
     let underruns_after = source.underruns();
-    if underruns_after > underruns_before && source.should_report_underrun(underruns_after) {
-        let _ = status_prod.try_push(AudioStatus::Underrun { voice_id: voice.id, count: underruns_after });
+    if underruns_after > underruns_before {
+        let count = voice.underrun_events.fetch_add(1, Ordering::Relaxed) + 1;
+        let boundary_window = (source.sample_rate as u64 / 10).max(1);
+        let near_loop_boundary = source.is_loop_rebuffering()
+            || (voice.has_looped.load(Ordering::Relaxed) && frame_pos <= boundary_window)
+            || (voice.inner.loops_remaining.load(Ordering::Relaxed) != 0
+                && end.saturating_sub(frame_pos) <= boundary_window);
+        let silent_frames = (((underruns_after - underruns_before) as f64
+            * output_sample_rate as f64
+            / source.sample_rate.max(1) as f64)
+            .round() as u64)
+            .max(1);
+        let dropped_before = voice.dropped_underrun_reports.swap(0, Ordering::Relaxed);
+        if status_prod.try_push(AudioStatus::Underrun {
+            voice_id: voice.id,
+            count,
+            silent_frames,
+            sample_rate: source.sample_rate,
+            output_sample_rate,
+            buffered_frames: source.buffered_samples() / source.channels.max(1) as usize,
+            capacity_frames: source.capacity_frames(),
+            near_loop_boundary,
+            dropped_before,
+        }).is_err() {
+            voice.dropped_underrun_reports.fetch_add(dropped_before + 1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -3583,6 +3646,134 @@ mod tests {
             &period,
         );
         voice.frame_pos.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn write_loop_stress_wav(path: &std::path::Path, seconds: usize) {
+        use std::io::Write;
+        let sample_rate = 48_000_u32;
+        let channels = 2_u16;
+        let frames = sample_rate as usize * seconds;
+        let data_bytes = (frames * channels as usize * 2) as u32;
+        let mut file = std::fs::File::create(path).expect("create loop stress WAV");
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&channels.to_le_bytes()).unwrap();
+        file.write_all(&sample_rate.to_le_bytes()).unwrap();
+        file.write_all(&(sample_rate * channels as u32 * 2).to_le_bytes()).unwrap();
+        file.write_all(&(channels * 2).to_le_bytes()).unwrap();
+        file.write_all(&16_u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_bytes.to_le_bytes()).unwrap();
+        for frame in 0..frames {
+            let sample = ((frame as f64 * 440.0 * std::f64::consts::TAU / sample_rate as f64).sin()
+                * i16::MAX as f64 * 0.5) as i16;
+            file.write_all(&sample.to_le_bytes()).unwrap();
+            file.write_all(&sample.to_le_bytes()).unwrap();
+        }
+    }
+
+    /// Manual 30-minute test through the same `fill_buffer` path used by cpal.
+    /// It uses a real decoder worker, an actual looping Voice, and drains the
+    /// callback status ring on every block. Run with
+    /// `cargo test streaming_audio_loop_wall_clock_30m -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual 30-minute wall-clock streaming loop test"]
+    fn streaming_audio_loop_wall_clock_30m() {
+        use ringbuf::traits::Consumer;
+        use std::time::{Duration, Instant};
+
+        const CALLBACK: Duration = Duration::from_millis(10);
+        const FRAMES: usize = 480;
+
+        let duration = Duration::from_secs(
+            std::env::var("QLISA_AUDIO_STRESS_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(30 * 60),
+        );
+
+        let path = std::env::temp_dir().join(format!("qlisa-loop-{}.wav", uuid::Uuid::new_v4()));
+        write_loop_stress_wav(&path, 2);
+        let info = crate::cue::media_decode::probe_audio_track(&path)
+            .expect("probe stress WAV")
+            .expect("stress WAV audio track");
+        let source = StreamingAudioSource::start(path.clone(), info).expect("start stream");
+        source.keep_worker_for_loop();
+        source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
+        let voice = Arc::new(Voice::new_stream(Arc::clone(&source), 1.0, 0.0));
+        voice.set_playing();
+        const LOOP_COUNT: u32 = 100_000;
+        voice.inner.loops_remaining.store(LOOP_COUNT, Ordering::Relaxed);
+        unsafe { *voice.inner.end_frame.get() = Some(source.total_frames()) };
+
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        let feeds: Arc<Mutex<Vec<InputFeed>>> = Arc::new(Mutex::new(Vec::new()));
+        let (_, mut cmd_cons) = HeapRb::<AudioCommand>::new(16).split();
+        let (mut status_prod, mut status_cons) = HeapRb::<AudioStatus>::new(2048).split();
+        let master = Arc::new(std::sync::atomic::AtomicU32::new(f32::to_bits(1.0)));
+        let period = Arc::new(std::sync::atomic::AtomicU32::new(FRAMES as u32));
+        let mut output = vec![0.0_f32; FRAMES * 2];
+        let mut program = vec![0.0_f32; FRAMES * 2];
+        let taps = empty_program_audio_taps();
+
+        while !source.is_ready() && !source.is_eof() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let started = Instant::now();
+        let mut next_callback = started;
+        let mut underrun_events = 0_u64;
+        let mut silent_frames = 0_u64;
+        let mut loop_boundaries = 0_u64;
+        let mut previous_loops = LOOP_COUNT;
+        let mut last_report = Duration::ZERO;
+
+        while started.elapsed() < duration {
+            fill_buffer(
+                &mut output,
+                &mut program,
+                2,
+                48_000,
+                &pool,
+                &feeds,
+                &taps,
+                &mut cmd_cons,
+                &mut status_prod,
+                &master,
+                &period,
+            );
+            while let Some(status) = status_cons.try_pop() {
+                if let AudioStatus::Underrun { silent_frames: count, .. } = status {
+                    underrun_events += 1;
+                    silent_frames += count;
+                }
+            }
+            let current_loops = voice.inner.loops_remaining.load(Ordering::Relaxed);
+            loop_boundaries += previous_loops.saturating_sub(current_loops) as u64;
+            previous_loops = current_loops;
+
+            next_callback += CALLBACK;
+            let now = Instant::now();
+            if next_callback > now {
+                std::thread::sleep(next_callback - now);
+            } else {
+                next_callback = now;
+            }
+            if started.elapsed().saturating_sub(last_report) >= Duration::from_secs(60) {
+                let diagnostics = source.diagnostics();
+                println!("elapsed_s={} loops={} underrun_events={} silent_frames={} buffer={}/{} max_decode_us={} max_refill_wait_us={}", started.elapsed().as_secs(), loop_boundaries, underrun_events, silent_frames, diagnostics.buffered_frames, diagnostics.capacity_frames, diagnostics.max_decode_us, diagnostics.max_refill_wait_us);
+                last_report = started.elapsed();
+            }
+        }
+
+        let diagnostics = source.diagnostics();
+        println!("duration_s={} loop_boundaries={} underrun_events={} silent_frames={} source_underruns={} frame_pos={} voice_state={:?} ready={} eof={} buffer_fill_frames={} buffer_capacity_frames={} decode_failures={} max_decode_us={} max_refill_wait_us={}", started.elapsed().as_secs(), loop_boundaries, underrun_events, silent_frames, diagnostics.underruns, voice.current_frame(), voice.voice_state(), diagnostics.ready, diagnostics.eof, diagnostics.buffered_frames, diagnostics.capacity_frames, diagnostics.decode_failures, diagnostics.max_decode_us, diagnostics.max_refill_wait_us);
+        assert_eq!(diagnostics.decode_failures, 0, "decoder errors during loop");
+        assert!(loop_boundaries > 0, "the Voice did not traverse a loop boundary");
+        source.cancel();
+        let _ = std::fs::remove_file(path);
     }
 
     // The SR ratio (e.g. 44100/48000) is not exactly representable in f64, so
@@ -4517,6 +4708,39 @@ mod tests {
             (frame[0] - frames[2][0] * left_gain).abs() < 1e-6
                 && (frame[1] - frames[2][1] * right_gain).abs() < 1e-6
         }), "the final PCM frame must reach the output");
+    }
+
+    #[test]
+    fn streaming_eof_tail_restarts_a_loop_instead_of_completing_voice() {
+        let frames = [[0.1, -0.1], [0.2, -0.2], [0.3, -0.3]];
+        let (voice, source) = make_stream_voice(&frames, true, true);
+        voice.inner.loops_remaining.store(1, Ordering::Relaxed);
+        unsafe { *voice.inner.end_frame.get() = Some(frames.len() as u64) };
+        let id = voice.id;
+
+        let statuses = run_block(&rt_pool(vec![Arc::clone(&voice)]), None);
+
+        assert_eq!(voice.voice_state(), VoiceState::Playing);
+        assert_eq!(voice.inner.loops_remaining.load(Ordering::Relaxed), 0);
+        assert!(voice.has_looped.load(Ordering::Relaxed));
+        assert!(source.is_loop_rebuffering());
+        assert_eq!(completed_count(&statuses, id), 0, "loop boundary is not EOF completion");
+        assert!(statuses.iter().any(|status| matches!(status, AudioStatus::Underrun { near_loop_boundary: true, .. })));
+    }
+
+    #[test]
+    fn streaming_eof_tail_defers_to_active_slice_loop_transition() {
+        let frames = [[0.1, -0.1], [0.2, -0.2], [0.3, -0.3]];
+        let (voice, source) = make_stream_voice(&frames, true, true);
+        set_slices(&voice, &[(0, frames.len() as u64, 2)]);
+        let id = voice.id;
+
+        let statuses = run_block(&rt_pool(vec![Arc::clone(&voice)]), None);
+
+        assert_eq!(voice.voice_state(), VoiceState::Playing);
+        assert!(voice.has_looped.load(Ordering::Relaxed));
+        assert!(!source.is_loop_rebuffering());
+        assert_eq!(completed_count(&statuses, id), 0, "slice loop transition is not EOF completion");
     }
 
     #[test]

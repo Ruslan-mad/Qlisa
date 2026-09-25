@@ -89,6 +89,8 @@ pub struct StreamingAudioSource {
     total_frames: AtomicU64,
     eof: AtomicBool,
     ready: AtomicBool,
+    /// Loop seeks resume from a smaller watermark than initial GO.
+    loop_rebuffer: AtomicBool,
     underruns: AtomicU64,
     decode_failures: AtomicU64,
     reusable: AtomicBool,
@@ -230,6 +232,7 @@ impl StreamingAudioSource {
             total_frames: AtomicU64::new(info.total_frames.unwrap_or(0)),
             eof: AtomicBool::new(false),
             ready: AtomicBool::new(false),
+            loop_rebuffer: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
             decode_failures: AtomicU64::new(0),
             reusable: AtomicBool::new(false),
@@ -289,6 +292,7 @@ impl StreamingAudioSource {
             total_frames: AtomicU64::new(frames.len() as u64),
             eof: AtomicBool::new(eof),
             ready: AtomicBool::new(ready),
+            loop_rebuffer: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
             decode_failures: AtomicU64::new(0),
             reusable: AtomicBool::new(false),
@@ -334,6 +338,9 @@ impl StreamingAudioSource {
 
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+    }
+    pub fn is_loop_rebuffering(&self) -> bool {
+        self.loop_rebuffer.load(Ordering::Acquire)
     }
     pub fn requested_frame(&self) -> u64 {
         self.requested_frame.load(Ordering::Acquire)
@@ -400,6 +407,7 @@ impl StreamingAudioSource {
     /// Publish a new source generation. This is safe from a control thread and
     /// does not touch the callback-owned ring consumer index.
     pub fn request_seek(self: &Arc<Self>, frame: u64) {
+        self.loop_rebuffer.store(false, Ordering::Release);
         self.requested_frame.store(frame, Ordering::Release);
         self.seek_generation.fetch_add(1, Ordering::AcqRel);
         self.eof.store(false, Ordering::Release);
@@ -423,6 +431,14 @@ impl StreamingAudioSource {
     /// Seek used by loop/slice boundaries that are already executing on RT.
     pub fn request_seek_rt(self: &Arc<Self>, frame: u64) {
         self.request_seek(frame);
+        self.apply_seek_rt();
+    }
+
+    /// Rewind used by the ordinary Voice loop. Its decoder can restart at the
+    /// beginning of the file, so it uses the shorter loop rebuffer watermark.
+    pub fn request_loop_seek_rt(self: &Arc<Self>, frame: u64) {
+        self.request_seek(frame);
+        self.loop_rebuffer.store(true, Ordering::Release);
         self.apply_seek_rt();
     }
 
@@ -481,7 +497,8 @@ impl StreamingAudioSource {
     }
 
     fn ready_threshold(&self) -> usize {
-        self.sample_rate as usize * self.channels.max(1) as usize * STREAM_READY_MILLIS / 1000
+        let ready_millis = if self.loop_rebuffer.load(Ordering::Acquire) { 100 } else { STREAM_READY_MILLIS };
+        self.sample_rate as usize * self.channels.max(1) as usize * ready_millis / 1000
     }
 
     fn target_threshold(&self) -> usize {
@@ -1404,8 +1421,10 @@ fn run_stream_job(job: StreamJob) {
                     source
                         .decoded_frames
                         .store(session.frame, Ordering::Release);
-                    if source.buffered_samples() >= source.ready_threshold() {
+                    let ready_threshold = source.ready_threshold();
+                    if source.buffered_samples() >= ready_threshold {
                         source.ready.store(true, Ordering::Release);
+                        source.loop_rebuffer.store(false, Ordering::Release);
                     }
                     if source.buffered_samples() >= target {
                         break;
@@ -1829,6 +1848,7 @@ mod streaming_tests {
             total_frames: AtomicU64::new(0),
             eof: AtomicBool::new(false),
             ready: AtomicBool::new(ready),
+            loop_rebuffer: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
             decode_failures: AtomicU64::new(0),
             reusable: AtomicBool::new(false),
@@ -1879,6 +1899,24 @@ mod streaming_tests {
         assert_eq!(STREAM_TARGET_SECONDS, 4);
         assert_eq!(STREAM_READY_MILLIS, 750);
         assert!(STREAM_MAX_SECONDS >= STREAM_TARGET_SECONDS);
+    }
+
+    #[test]
+    fn only_ordinary_loop_seek_uses_short_ready_watermark() {
+        let source = test_source(StreamPlaybackState::Playing, true, 48_000 * 2);
+        assert_eq!(source.ready_threshold(), 48_000 * 2 * 750 / 1000);
+
+        source.request_seek_rt(0);
+        assert!(!source.is_loop_rebuffering());
+        assert_eq!(source.ready_threshold(), 48_000 * 2 * 750 / 1000);
+
+        source.request_loop_seek_rt(0);
+        assert!(source.is_loop_rebuffering());
+        assert_eq!(source.ready_threshold(), 48_000 * 2 / 10);
+
+        source.request_seek(0);
+        assert!(!source.is_loop_rebuffering());
+        assert_eq!(source.ready_threshold(), 48_000 * 2 * 750 / 1000);
     }
 
     #[test]
