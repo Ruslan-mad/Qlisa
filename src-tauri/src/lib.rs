@@ -10,6 +10,7 @@ pub mod machine_config;
 pub mod media_converter;
 pub mod media_runtime;
 pub mod preferences;
+pub mod project_open;
 pub mod qlab_import;
 pub mod recovery;
 pub mod show;
@@ -96,6 +97,7 @@ use media_converter::{
     open_media_output_folder, probe_cue_media, replace_cue_media_path, restore_cue_media_path, start_media_conversion,
 };
 use media_runtime::{get_media_runtime_status, prepare_media_runtime, schedule_media_runtime_reinstall};
+use project_open::{PendingProjectOpens, drain_pending_project_opens};
 use state::AppState;
 use tauri::Manager;
 
@@ -106,10 +108,24 @@ pub fn run() {
     // buffer for the in-app log viewer.  RUST_LOG=debug/trace still bumps the level.
     crate::logger::init();
 
+    // Keep command-line project paths until the frontend has subscribed to the
+    // wake-up event and drains them. This avoids losing installer file-open
+    // requests while the webview is still starting.
+    let startup_cwd = std::env::current_dir().unwrap_or_default();
+    let pending_project_opens = Arc::new(PendingProjectOpens::from_startup_args(
+        std::env::args_os().skip(1),
+        &startup_cwd,
+    ));
+    let second_instance_queue = Arc::clone(&pending_project_opens);
+
     tauri::Builder::default()
+        .manage(pending_project_opens)
         // Acquire the app-wide lock before setup. A second launch forwards its
         // arguments here, restores the existing main window, then exits.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(move |app, argv, cwd| {
+            if second_instance_queue.enqueue_instance_args(&argv, &cwd) {
+                project_open::emit_project_open_requested(app);
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
@@ -567,6 +583,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            drain_pending_project_opens,
             get_media_runtime_status,
             prepare_media_runtime,
             schedule_media_runtime_reinstall,

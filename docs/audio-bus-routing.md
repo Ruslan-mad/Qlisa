@@ -26,7 +26,7 @@ never an implicit Main fallback.
 Remaining migration debt:
 
 - The compatibility field names `output_patch_id`, `output_patches`, and the
-  `get_output_patches` command remain in `.inkue` and IPC contracts. They are
+  `get_output_patches` command remain in project JSON and IPC contracts. They are
   intentionally not exposed as a second UI model.
 - `OutputPatch` still carries runtime physical fields after load so the audio
   engine can build an immutable transport snapshot. New persistence strips

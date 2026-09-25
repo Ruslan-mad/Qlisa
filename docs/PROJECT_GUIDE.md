@@ -11,9 +11,15 @@ alone represents the running desktop build.
 Qlisa is a live-show cue-list application, derived from Inkue. The release
 command keeps the application version synchronized in `package.json`,
 `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.lock`.
-`.inkue` workspaces and several internal `inkue` names are retained for
-compatibility. This is not an official upstream Inkue release checkout. The
-current version in this checkout is 1.5.6. The source repository is public at
+The primary project extension in this source checkout is `.qlisa`. Legacy
+`.inkue` projects remain openable; ordinary Save keeps the opened file path.
+Save As offers `.qlisa` by default and preserves an explicitly chosen `.inkue`
+suffix. Collect and Save writes `.qlisa`. Windows file association is for
+`.qlisa` only. Both extensions use the existing JSON workspace schema;
+internal `inkue` keys and IPC names remain for compatibility. These project
+extension changes are unreleased and are not included in the 1.5.6 installer.
+This is not an official upstream Inkue release checkout. The current version
+in this checkout is 1.5.6. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
 downloads. The Tauri updater is configured for signed GitHub Releases. The
 1.5.4 local updater E2E check passed. The 1.5.5 per-machine install and the
@@ -101,8 +107,9 @@ scripts/                               Native runtime sync and asset helpers
 ```
 
 Some source files and thread labels still use Inkue identifiers intentionally.
-Do not rename persisted keys, command/event names, `.inkue` extensions, or OSC
-addresses as a cosmetic cleanup without a migration plan.
+Do not rename persisted keys, command/event names, or OSC addresses as a
+cosmetic cleanup without a migration plan. `.inkue` is now the legacy project
+extension, not the primary Qlisa extension.
 
 ## Architecture and data flow
 
@@ -304,16 +311,16 @@ controls the camera's attached audio voice; it does not pause the live source.
 
 ## Workspace persistence and configuration
 
-- A `.inkue` is a JSON workspace containing metadata, cue lists/cues (including
-  group children), a compatibility/runtime preferences mirror, audio
-  input/output patches, OSC
-  patches, DMX universe mappings, fixture definitions/groups, and the active
-  cue-list ID.
+- A `.qlisa` project is a JSON workspace containing metadata, cue lists/cues
+  (including group children), a compatibility/runtime preferences mirror,
+  audio input/output patches, OSC patches, DMX universe mappings, fixture
+  definitions/groups, and the active cue-list ID. Legacy `.inkue` files use
+  this same schema and remain openable.
 - File paths are recursively made relative to the workspace's parent directory
   when possible. Files outside that directory or on another drive remain
   absolute. Loading resolves relative paths against the workspace location.
   **Collect and Save** copies referenced media into a destination folder and
-  updates references for portability.
+  updates references for portability, then writes a `.qlisa` project file.
 - Workspace schema version is declared in `show/workspace.rs`. Unknown or bad
   cue JSON can be skipped and counted; the app should tell the operator instead
   of silently losing cues.
@@ -333,7 +340,7 @@ controls the camera's attached audio voice; it does not pause the live source.
   Once present, Open/Recovery overlay the global tree and append only unknown
   legacy output IDs once. Existing global IDs and the global default output
   always win. Project-specific cues, patches, and other show data remain in
-  `.inkue`; Project Settings are not a separate UI yet.
+  the project file; Project Settings are not a separate UI yet.
 - Cue identity uses UUIDs. Display numbers may be automatically renumbered on
   reorder depending on preferences, and explicit renumber commands exist.
 

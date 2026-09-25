@@ -23,31 +23,37 @@ use inkue_lib::show::workspace::Workspace;
 fn save_load_roundtrip_preserves_cues() {
     let registry = full_registry();
     let dir = temp_dir("ws_roundtrip");
-    let path = dir.join("show.inkue");
+    for extension in ["qlisa", "inkue"] {
+        let path = dir.join(format!("show.{extension}"));
 
-    let mut ws = Workspace::new("My Show");
-    {
-        let list = ws.active_cue_list_mut().expect("default cue list");
-        for (t, name) in [
-            (CueType::Memo, "Intro note"),
-            (CueType::Audio, "Walk-in music"),
-            (CueType::Stop, "Kill music"),
-        ] {
-            let mut cue = registry.create(&t).unwrap();
-            cue.set_name(name.to_string());
-            list.push(cue);
+        let mut ws = Workspace::new("My Show");
+        {
+            let list = ws.active_cue_list_mut().expect("default cue list");
+            for (t, name) in [
+                (CueType::Memo, "Intro note"),
+                (CueType::Audio, "Walk-in music"),
+                (CueType::Stop, "Kill music"),
+            ] {
+                let mut cue = registry.create(&t).unwrap();
+                cue.set_name(name.to_string());
+                list.push(cue);
+            }
         }
-    }
-    ws.save(Some(path.clone())).expect("save should succeed");
-    assert!(path.exists(), ".inkue file must be written");
+        ws.save(Some(path.clone())).expect("save should succeed");
+        assert!(path.exists(), ".{extension} file must be written");
 
-    let loaded = Workspace::load(path, &registry).expect("load should succeed");
-    let list = loaded.active_cue_list().expect("active cue list after load");
-    let names: Vec<&str> = list.cues.iter().map(|c| c.name()).collect();
-    assert_eq!(list.cues.len(), 3, "all three cues must survive save/load");
-    assert!(names.contains(&"Intro note"));
-    assert!(names.contains(&"Walk-in music"));
-    assert!(names.contains(&"Kill music"));
+        let mut loaded = Workspace::load(path.clone(), &registry).expect("load should succeed");
+        let list = loaded.active_cue_list().expect("active cue list after load");
+        let names: Vec<&str> = list.cues.iter().map(|c| c.name()).collect();
+        assert_eq!(list.cues.len(), 3, "all three cues must survive save/load");
+        assert!(names.contains(&"Intro note"));
+        assert!(names.contains(&"Walk-in music"));
+        assert!(names.contains(&"Kill music"));
+
+        loaded.save(None).expect("ordinary save should succeed");
+        assert!(path.exists(), "ordinary save must keep the .{extension} path");
+        assert_eq!(loaded.file_path.as_deref(), Some(path.as_path()));
+    }
 }
 
 // ---------------------------------------------------------------------------

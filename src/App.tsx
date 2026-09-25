@@ -10,7 +10,6 @@ import { EditMenu } from "./components/MenuBar/EditMenu";
 import { CartView } from "./components/CueList/CartView";
 import { ShowModeView } from "./components/ShowMode/ShowModeView";
 import { ActiveCuesView } from "./components/ActiveCues/ActiveCuesView";
-import { Activity } from "lucide-react";
 import { migrateRightPanelMode, toggleRightPanel, type RightPanelMode, flattenActiveCues } from "./components/ActiveCues/activeCueModel";
 import { CueListTabs } from "./components/CueList/CueListTabs";
 import { InspectorPanel } from "./components/Inspector/InspectorPanel";
@@ -21,7 +20,7 @@ import { FullscreenControl } from "./components/Transport/FullscreenControl";
 import { useTauriEvents } from "./hooks/useTauriEvents";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useWorkspaceStore } from "./stores/workspaceStore";
-import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, getCueLists, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences } from "./lib/commands";
+import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, getWorkspaceInfo, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, getCueLists, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences } from "./lib/commands";
 import { AboutDialog } from "./components/About/AboutDialog";
 import { UpdateDialog } from "./components/Update/UpdateDialog";
 import { useUpdateStore } from "./stores/updateStore";
@@ -29,17 +28,17 @@ import { InkueMark } from "./components/common/InkueMark";
 import { PreflightModal } from "./components/Preflight/PreflightModal";
 import { LogViewerModal } from "./components/Logs/LogViewerModal";
 import { HealthBanner } from "./components/Health/HealthBanner";
-import { CueTypeIcon } from "./components/common/CueTypeIcon";
 import type { CollectReport, ImportReport, RecoveryInfo, CueType, NumberCueData } from "./lib/types";
 import { QlabImportDialog } from "./components/Import/QlabImportDialog";
 import type { CueSummary } from "./lib/types";
-import { COMMAND_CUE_TYPES, CUE_TYPE_COLORS } from "./lib/types";
 import { useLocale } from "./i18n";
 import { CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, normalizeClipEditorVisibility, resolveClipEditorTargetCueId, toggleClipEditorPanel } from "./lib/clipEditorPrefs";
 import { hasActivePlayback } from "./lib/closeGuard";
 import { normalizeNumberCueData } from "./components/Inspector/numberModel";
 import { resolveMonitorPreviewSelection } from "./components/Inspector/numberPreviewSelection";
 import { useNumberPreviewStore } from "./stores/numberPreviewStore";
+import { CueToolbar } from "./components/CueToolbar/CueToolbar";
+import { inspectWorkspaceGuard, isProjectFilePath, resolveWorkspaceGuard, withDefaultProjectExtension } from "./lib/projectFile";
 
 // ---------------------------------------------------------------------------
 // Recent files
@@ -115,10 +114,14 @@ function WindowControls() {
 // ---------------------------------------------------------------------------
 
 function CloseConfirmDialog({
+  titleKey = "dialogs.unsavedChanges",
+  messageKey = "dialogs.closeMessage",
   onSave,
   onDiscard,
   onCancel,
 }: {
+  titleKey?: "dialogs.unsavedChanges" | "dialogs.workspaceChangeTitle";
+  messageKey?: "dialogs.closeMessage" | "dialogs.workspaceChangeMessage";
   onSave: () => void;
   onDiscard: () => void;
   onCancel: () => void;
@@ -140,10 +143,10 @@ function CloseConfirmDialog({
         }}
       >
         <div style={{ fontSize: 15, fontWeight: 600, color: "var(--wc-text-bright)", marginBottom: 8 }}>
-          {t("dialogs.unsavedChanges")}
+          {t(titleKey)}
         </div>
         <div style={{ fontSize: 13, color: "var(--wc-text-secondary)", marginBottom: 24 }}>
-          {t("dialogs.closeMessage")}
+          {t(messageKey)}
         </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <DialogBtn label={t("common.cancel")} onClick={onCancel} />
@@ -822,20 +825,6 @@ function findNumberOwner(cues: CueSummary[], targetId: string | null): string | 
   return null;
 }
 
-/** Quick press-and-flash micro-interaction when a toolbar button is clicked.
- *  Uses the Web Animations API so it needs no React state or re-render and
- *  plays in the button's own accent color (via the brightness boost). */
-function pulseButton(el: HTMLElement) {
-  el.animate(
-    [
-      { transform: "scale(1)",    filter: "brightness(1)" },
-      { transform: "scale(0.88)", filter: "brightness(1.7)", offset: 0.35 },
-      { transform: "scale(1)",    filter: "brightness(1)" },
-    ],
-    { duration: 260, easing: "cubic-bezier(.2,.7,.3,1)" },
-  );
-}
-
 export default function App() {
   const { t } = useLocale();
   const { refreshCues, refreshWorkspaceInfo, refreshValidation, refreshHealth, brokenCueIds, loadGeneralPrefs, loadDisplayPrefs, displayPrefs, workspaceInfo, selectedCueId, selectedCueIds, cues, cueLists, activeCueListId } =
@@ -860,6 +849,8 @@ export default function App() {
   const [outputSurfaceVisible, setOutputSurfaceVisible] = useState(false);
   const [outputMonitorVisible, setOutputMonitorVisible] = useState(false);
   const [loadError, setLoadError]                 = useState<string | null>(null);
+  const [workspaceGuardOpen, setWorkspaceGuardOpen] = useState(false);
+  const [workspaceError, setWorkspaceError]         = useState<string | null>(null);
   const [collectReport, setCollectReport]         = useState<CollectReport | null>(null);
   const [importReport, setImportReport]           = useState<ImportReport | null>(null);
   const [recentFiles, setRecentFiles]             = useState<string[]>(loadRecentFiles);
@@ -871,6 +862,10 @@ export default function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const closeDialogOpenRef = useRef(false);
   const activePlaybackCloseOpenRef = useRef(false);
+  const pendingWorkspaceActionRef = useRef<(() => Promise<void>) | null>(null);
+  const pendingProjectOpensRef = useRef<string[]>([]);
+  const processingProjectOpensRef = useRef(false);
+  const workspaceActionBusyRef = useRef(false);
 
   // Persist panel visibility + inspector width across launches.
   useEffect(() => {
@@ -1010,38 +1005,161 @@ export default function App() {
    *  Returns true if the save completed, false if the user cancelled. */
   const handleSaveAs = useCallback(async (): Promise<boolean> => {
     const path = await saveDialog({
-      filters: [{ name: "Qlisa Workspace", extensions: ["inkue"] }],
-      defaultPath: (workspaceInfo?.name ?? t("app.untitled")) + ".inkue",
+      filters: [{ name: "Qlisa Project", extensions: ["qlisa", "inkue"] }],
+      defaultPath: (workspaceInfo?.name ?? t("app.untitled")) + ".qlisa",
     });
     if (typeof path !== "string") return false;
-    const filePath = path.endsWith(".inkue") ? path : path + ".inkue";
-    await saveWorkspace(filePath).catch(console.error);
-    await refreshWorkspaceInfo();
-    setRecentFiles(pushRecentFile(filePath));
-    return true;
+    const filePath = withDefaultProjectExtension(path);
+    try {
+      await saveWorkspace(filePath);
+      await refreshWorkspaceInfo();
+      setRecentFiles(pushRecentFile(filePath));
+      return true;
+    } catch (error) {
+      console.error("Failed to save Qlisa project", error);
+      setWorkspaceError(String(error));
+      return false;
+    }
   }, [workspaceInfo, refreshWorkspaceInfo]);
 
   const handleSave = useCallback(async (): Promise<boolean> => {
-    const path = workspaceInfo?.file_path;
+    let path: string | null;
+    try {
+      path = (await getWorkspaceInfo()).file_path;
+    } catch (error) {
+      console.error("Failed to read current Qlisa project before saving", error);
+      setWorkspaceError(String(error));
+      return false;
+    }
     if (path) {
-      await saveWorkspace(path).catch(console.error);
-      await refreshWorkspaceInfo();
-      setRecentFiles(pushRecentFile(path));
-      return true;
+      try {
+        await saveWorkspace(path);
+        await refreshWorkspaceInfo();
+        setRecentFiles(pushRecentFile(path));
+        return true;
+      } catch (error) {
+        console.error("Failed to save Qlisa project", error);
+        setWorkspaceError(String(error));
+        return false;
+      }
     }
     return handleSaveAs();
-  }, [workspaceInfo, refreshWorkspaceInfo, handleSaveAs]);
+  }, [refreshWorkspaceInfo, handleSaveAs]);
+
+  const performOpenWorkspacePath = useCallback(async (path: string): Promise<boolean> => {
+    try {
+      await loadWorkspace(path);
+      setRecentFiles(pushRecentFile(path));
+      setSearchQuery("");
+      return true;
+    } catch (error) {
+      console.error("Failed to open Qlisa project", error);
+      setWorkspaceError(String(error));
+      return false;
+    }
+  }, []);
+
+  const runWorkspaceAction = useCallback(async (action: () => Promise<void>) => {
+    if (pendingWorkspaceActionRef.current || workspaceActionBusyRef.current) return;
+    workspaceActionBusyRef.current = true;
+    try {
+      const inspection = await inspectWorkspaceGuard(async () => (await getWorkspaceInfo()).is_modified);
+      if (inspection.result === "error") {
+        console.error("Failed to check Qlisa project dirty state", inspection.error);
+        setWorkspaceError(String(inspection.error));
+        return;
+      }
+      if (inspection.result === "prompt") {
+        pendingWorkspaceActionRef.current = action;
+        setWorkspaceGuardOpen(true);
+        return;
+      }
+      await action();
+    } catch (error) {
+      console.error("Workspace action failed", error);
+      setWorkspaceError(String(error));
+    } finally {
+      workspaceActionBusyRef.current = false;
+    }
+  }, []);
 
   const openWorkspacePath = useCallback(async (path: string) => {
-    await loadWorkspace(path).catch(console.error);
-    setRecentFiles(pushRecentFile(path));
-    setSearchQuery("");
-  }, []);
+    await runWorkspaceAction(async () => { await performOpenWorkspacePath(path); });
+  }, [runWorkspaceAction, performOpenWorkspacePath]);
+
+  const drainProjectOpenQueue = useCallback(async () => {
+    if (processingProjectOpensRef.current || pendingWorkspaceActionRef.current || workspaceActionBusyRef.current) return;
+    processingProjectOpensRef.current = true;
+    workspaceActionBusyRef.current = true;
+    try {
+      while (pendingProjectOpensRef.current.length > 0) {
+        if (pendingWorkspaceActionRef.current) return;
+        const path = pendingProjectOpensRef.current[0];
+        const inspection = await inspectWorkspaceGuard(async () => (await getWorkspaceInfo()).is_modified);
+        if (inspection.result === "error") {
+          console.error("Failed to check Qlisa project dirty state", inspection.error);
+          pendingProjectOpensRef.current = [];
+          setWorkspaceError(String(inspection.error));
+          return;
+        }
+        const action = async () => {
+          pendingProjectOpensRef.current.shift();
+          await performOpenWorkspacePath(path);
+          void drainProjectOpenQueue();
+        };
+        if (inspection.result === "prompt") {
+          pendingWorkspaceActionRef.current = action;
+          processingProjectOpensRef.current = false;
+          setWorkspaceGuardOpen(true);
+          return;
+        }
+        pendingProjectOpensRef.current.shift();
+        await performOpenWorkspacePath(path);
+      }
+    } finally {
+      processingProjectOpensRef.current = false;
+      workspaceActionBusyRef.current = false;
+    }
+  }, [performOpenWorkspacePath]);
+
+  const enqueueProjectOpens = useCallback((paths: string[]) => {
+    pendingProjectOpensRef.current.push(...paths.filter(isProjectFilePath));
+    void drainProjectOpenQueue();
+  }, [drainProjectOpenQueue]);
+
+  const resolveWorkspaceGuardAction = useCallback(async (choice: "save" | "discard" | "cancel") => {
+    const action = pendingWorkspaceActionRef.current;
+    if (!action || workspaceActionBusyRef.current) return;
+    workspaceActionBusyRef.current = true;
+    try {
+      const saved = choice === "save" ? await handleSave() : false;
+      // This dialog is only opened for a dirty workspace. Keep that original
+      // condition authoritative: a cancelled/failed Save must never allow replace.
+      const resolution = resolveWorkspaceGuard(true, choice, saved);
+      if (resolution !== "execute") {
+        if (choice === "cancel") {
+          pendingWorkspaceActionRef.current = null;
+          pendingProjectOpensRef.current = [];
+          setWorkspaceGuardOpen(false);
+        }
+        return;
+      }
+      pendingWorkspaceActionRef.current = null;
+      setWorkspaceGuardOpen(false);
+      await action();
+    } catch (error) {
+      console.error("Workspace action failed", error);
+      setWorkspaceError(String(error));
+    } finally {
+      workspaceActionBusyRef.current = false;
+      void drainProjectOpenQueue();
+    }
+  }, [handleSave, drainProjectOpenQueue]);
 
   const handleOpen = useCallback(async () => {
     const path = await openDialog({
       multiple: false,
-      filters: [{ name: "Qlisa Workspace", extensions: ["inkue", "wincue"] }],
+      filters: [{ name: "Qlisa Project", extensions: ["qlisa", "inkue", "wincue"] }],
     });
     if (typeof path === "string") {
       await openWorkspacePath(path);
@@ -1049,9 +1167,11 @@ export default function App() {
   }, [openWorkspacePath]);
 
   const handleNew = useCallback(async () => {
-    await newWorkspace().catch(console.error);
-    // cue-lists-changed and workspace-modified are emitted by the backend.
-  }, []);
+    runWorkspaceAction(async () => {
+      try { await newWorkspace(); }
+      catch (error) { console.error("Failed to create Qlisa project", error); setWorkspaceError(String(error)); }
+    });
+  }, [runWorkspaceAction]);
 
   const handleImportQlab = useCallback(async () => {
     const path = await openDialog({
@@ -1059,16 +1179,18 @@ export default function App() {
       filters: [{ name: "QLab Workspace", extensions: ["qlab5", "qlab4"] }],
     });
     if (typeof path !== "string") return;
-    try {
-      // The import replaces the current show and is deliberately left unsaved:
-      // media resolves against the QLab bundle folder, so nothing is written
-      // into the user's QLab project. Save As is the operator's next step.
-      setImportReport(await importQlabWorkspace(path));
-      setSearchQuery("");
-    } catch (err) {
-      setLoadError(String(err));
-    }
-  }, []);
+    runWorkspaceAction(async () => {
+      try {
+        // The import replaces the current show and is deliberately left unsaved:
+        // media resolves against the QLab bundle folder, so nothing is written
+        // into the user's QLab project. Save As is the operator's next step.
+        setImportReport(await importQlabWorkspace(path));
+        setSearchQuery("");
+      } catch (err) {
+        setWorkspaceError(String(err));
+      }
+    });
+  }, [runWorkspaceAction]);
 
   const handleCollectAndSave = useCallback(async () => {
     const dir = await openDialog({ directory: true });
@@ -1080,6 +1202,38 @@ export default function App() {
       setLoadError(String(err));
     }
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const drain = () => {
+      void drainPendingProjectOpens()
+        .then(enqueueProjectOpens)
+        .catch((error) => console.error("Failed to receive project-open request", error));
+    };
+    // Register first. The queue then covers both startup arguments and later
+    // single-instance/open-with requests without a startup race.
+    void listen("project-open-requested", drain).then((stop) => {
+      if (disposed) stop();
+      else {
+        unlisten = stop;
+        drain();
+      }
+    }).catch((error) => console.error("Failed to listen for project-open requests", error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [enqueueProjectOpens]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWindow().onDragDropEvent((event) => {
+      if (event.payload.type === "drop") enqueueProjectOpens(event.payload.paths);
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch((error) => console.error("Failed to listen for project file drops", error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [enqueueProjectOpens]);
 
   // -------------------------------------------------------------------------
   // Close-request interception
@@ -1196,6 +1350,8 @@ export default function App() {
     () => void handleToggleSurface(),
     () => setShowMode((v) => !v),
     () => handleToggleSearch(),
+    () => void handleNew(),
+    () => void handleSaveAs(),
   );
 
   const selectedCue = findCueRecursive(cues, selectedCueId) ?? null;
@@ -1420,6 +1576,13 @@ export default function App() {
         </div>
       )}
 
+      {workspaceError && (
+        <div role="alert" style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", zIndex: 100000, background: "#7f1d1d", border: "1px solid #ef4444", borderRadius: 8, padding: "10px 16px", maxWidth: 620, display: "flex", alignItems: "flex-start", gap: 12, boxShadow: "0 8px 24px rgba(0,0,0,0.8)" }}>
+          <span style={{ color: "#fecaca", fontSize: 13, flex: 1, overflowWrap: "anywhere" }}>{workspaceError}</span>
+          <button onClick={() => setWorkspaceError(null)} style={{ background: "transparent", border: "none", color: "#fca5a5", cursor: "pointer", fontSize: 16, padding: 0, lineHeight: 1, flexShrink: 0 }}>✕</button>
+        </div>
+      )}
+
       {/* Goto cue dialog */}
       {gotoOpen && (
         <GotoDialog onClose={() => setGotoOpen(false)} onRefresh={handleRefresh} />
@@ -1431,6 +1594,15 @@ export default function App() {
           onSave={confirmSaveAndClose}
           onDiscard={confirmDiscardAndClose}
           onCancel={cancelClose}
+        />
+      )}
+      {workspaceGuardOpen && !closeDialogOpen && !activePlaybackCloseOpen && (
+        <CloseConfirmDialog
+          titleKey="dialogs.workspaceChangeTitle"
+          messageKey="dialogs.workspaceChangeMessage"
+          onSave={() => void resolveWorkspaceGuardAction("save")}
+          onDiscard={() => void resolveWorkspaceGuardAction("discard")}
+          onCancel={() => void resolveWorkspaceGuardAction("cancel")}
         />
       )}
       {activePlaybackCloseOpen && (
@@ -1563,109 +1735,23 @@ export default function App() {
 
         </div>{/* end Row 1 */}
 
-        {/* Row 2 — cue toolbar on its own row.  It never competes with the Row 1
-            drag area, and wraps onto extra lines when the window is too narrow to
-            fit every button, so they all stay reachable.  Hidden in Show Mode. */}
-        <div
-          style={{ display: showMode ? "none" : "flex", flexWrap: "wrap", gap: 6, padding: "0 12px 6px", alignItems: "center" }}
-          onClick={(e) => { const btn = (e.target as HTMLElement).closest("button"); if (btn) pulseButton(btn); }}
-        >
-          <CueToolbarButton
-            type="audio" label={t("cueTypes.audio")}
-            title={t("toolbar.addCueAfterSelection", { cue: t("cueTypes.audio") })}
-            onAdd={handleAddAudio}
-            onDragStart={(e) => dispatchCueDrag("audio", e)}
-          />
-          <CueToolbarButton
-            type="video" label={t("cueTypes.video")}
-            title={t("toolbar.addCueAfterSelection", { cue: t("cueTypes.video") })}
-            onAdd={handleAddVideo}
-            onDragStart={(e) => dispatchCueDrag("video", e)}
-          />
-          <CueToolbarButton
-            type="image" label={t("cueTypes.image")}
-            title={t("toolbar.addCueAfterSelection", { cue: t("cueTypes.image") })}
-            onAdd={handleAddImage}
-            onDragStart={(e) => dispatchCueDrag("image", e)}
-          />
-          <CueToolbarButton
-            type="stop" label={t("cueTypes.stop")}
-            title={t("toolbar.addCueAfterSelection", { cue: t("cueTypes.stop") })}
-            onAdd={handleAddStop}
-            onDragStart={(e) => dispatchCueDrag("stop", e)}
-          />
-          <CueToolbarButton
-            type="fade" label={t("cueTypes.fade")}
-            title={t("toolbar.addCueAfterSelection", { cue: t("cueTypes.fade") })}
-            onAdd={handleAddFade}
-            onDragStart={(e) => dispatchCueDrag("fade", e)}
-          />
-          <CueToolbarButton
-            type="wait" label={t("cueTypes.wait")}
-            title={t("toolbar.addCueAfterSelection", { cue: t("cueTypes.wait") })}
-            onAdd={handleAddWait}
-            onDragStart={(e) => dispatchCueDrag("wait", e)}
-          />
-          <CueToolbarButton
-            type="group" label={t("cueTypes.group")}
-            title={t("toolbar.addCueAfterSelection", { cue: t("cueTypes.group") })}
-            onAdd={handleAddGroup}
-            onDragStart={(e) => dispatchCueDrag("group", e)}
-          />
-          <CueToolbarButton
-            type="number" label={t("cueTypes.number")}
-            title={t("toolbar.addCueAfterSelection", { cue: t("cueTypes.number") })}
-            onAdd={handleAddNumber}
-            onDragStart={(e) => dispatchCueDrag("number", e)}
-          />
-          <CueToolbarButton
-            type="text" label={t("cueTypes.text")}
-            title={t("toolbar.addCueAfterSelection", { cue: t("cueTypes.text") })}
-            onAdd={handleAddText}
-            onDragStart={(e) => dispatchCueDrag("text", e)}
-          />
-          <CueToolbarButton
-            type="memo" label={t("cueTypes.memo")}
-            title={t("toolbar.addMemo")}
-            onAdd={handleAddMemo}
-            onDragStart={(e) => dispatchCueDrag("memo", e)}
-          />
-          <OtherCueToolbarButton
-            onAdd={(t) => void handleAddCommand(t)}
-            onDragStart={(t, e) => dispatchCueDrag(t, e)}
-          />
-          {/* `marginLeft: auto` pins the right-side panel toggles to the right edge of
-              its flex line, away from the cue-creation buttons it does not
-              belong with — and it stays pinned when the row wraps. */}
-          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-            <button
-              style={toolbarBtn}
-              onClick={() => setRightPanel((v) => toggleRightPanel(v, "active-cues"))}
-              title={t("toolbar.activeCuesToggle")}
-              aria-pressed={rightPanel === "active-cues"}
-            >
-              <Activity size={14} style={{ verticalAlign: "-2px", marginRight: 5 }} />
-              {t("menus.activeCues")}
-              {activeCueCount > 0 && <span style={{ marginLeft: 6, padding: "1px 5px", borderRadius: 8, background: "var(--wc-bg-hover)", color: "var(--wc-text-secondary)", fontSize: 10 }}>{activeCueCount}</span>}
-            </button>
-            <button
-              style={toolbarBtn}
-              onClick={() => setRightPanel((v) => toggleRightPanel(v, "inspector"))}
-              title={t("toolbar.inspectorToggle")}
-              aria-pressed={rightPanel === "inspector"}
-            >
-              {t("menus.inspector")}
-            </button>
-          </div>
-          <button
-            style={toolbarBtn}
-            onClick={() => void openPreferencesWindow()}
-            title={`${t("app.preferences")} (Ctrl+,)`}
-            aria-label={t("app.preferences")}
-          >
-            ⚙ {t("menus.settings")}
-          </button>
-        </div>
+        {/* Row 2 — one-line cue toolbar. The fixed right controls keep their
+            width while the left cue actions move into More as space shrinks. */}
+        {showMode ? null : <CueToolbar
+          activeCueCount={activeCueCount}
+          rightPanel={rightPanel}
+          onToggleRightPanel={(panel) => setRightPanel((value) => toggleRightPanel(value, panel))}
+          onSettings={() => void openPreferencesWindow()}
+          onAdd={(type) => {
+            const direct: Partial<Record<CueType, () => void>> = {
+              audio: handleAddAudio, video: handleAddVideo, image: handleAddImage,
+              stop: handleAddStop, wait: handleAddWait, group: handleAddGroup,
+              number: handleAddNumber, fade: handleAddFade, memo: handleAddMemo, text: handleAddText,
+            };
+            (direct[type] ?? (() => void handleAddCommand(type)))();
+          }}
+          onDragStart={(type, event) => dispatchCueDrag(type, event)}
+        />}
       </div>
 
       {/* Runtime health banner (device/network faults) */}
@@ -1818,150 +1904,5 @@ export default function App() {
 
       <TransportBar onRefresh={handleRefresh} />
     </div>
-  );
-}
-
-const toolbarBtn: React.CSSProperties = {
-  padding: "3px 10px", background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)",
-  borderRadius: 4, color: "var(--wc-text)", cursor: "pointer", fontSize: 12,
-};
-
-/** Toolbar "+ Other" button: keeps specialist cue types available without
- *  making the main toolbar wrap across the top of the workspace. */
-function OtherCueToolbarButton({ onAdd, onDragStart }: {
-  onAdd: (type: CueType) => void;
-  onDragStart: (type: CueType, e: React.MouseEvent) => void;
-}) {
-  const { t } = useLocale();
-  const [open, setOpen] = useState(false);
-  const [hover, setHover] = useState(false);
-  const [hoveredItem, setHoveredItem] = useState<string | null>(null);
-  const color = "var(--wc-text-secondary)";
-  const otherCueTypes: { type: CueType; labelKey: string; hintKey?: string }[] = [
-    { type: "midi", labelKey: "cueTypes.midi" },
-    { type: "midi_file", labelKey: "cueTypes.midiFile", hintKey: "toolbar.addMidiFile" },
-    { type: "osc", labelKey: "cueTypes.osc" },
-    { type: "light", labelKey: "cueTypes.light" },
-    { type: "mic", labelKey: "cueTypes.mic" },
-    { type: "timecode", labelKey: "cueTypes.timecode" },
-    { type: "camera", labelKey: "cueTypes.camera", hintKey: "toolbar.addCamera" },
-    { type: "browser", labelKey: "cueTypes.browser", hintKey: "toolbar.addBrowser" },
-    { type: "devamp", labelKey: "cueTypes.devamp", hintKey: "toolbar.addDevamp" },
-    { type: "script", labelKey: "cueTypes.script" },
-    ...COMMAND_CUE_TYPES.map(({ type }) => ({ type, labelKey: `actions.${type}` })),
-  ];
-
-  return (
-    <div style={{ position: "relative", zIndex: open ? 10002 : undefined }}>
-      {open && <div style={{ position: "fixed", inset: 0, zIndex: 10000 }} onClick={() => setOpen(false)} />}
-      <button
-        style={{
-          ...toolbarBtn,
-          display: "inline-flex", alignItems: "center", gap: 5, userSelect: "none",
-          color: hover || open ? "var(--wc-text)" : color,
-          borderColor: hover || open ? "var(--wc-text-secondary)" : "var(--wc-border-strong)",
-          background: hover || open ? "var(--wc-bg-hover)" : "var(--wc-bg-surface)",
-          transition: "color 0.12s, border-color 0.12s, background 0.12s",
-        }}
-        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-        title={t("toolbar.otherTitle")}
-      >
-        <svg
-          aria-hidden="true"
-          width="14"
-          height="14"
-          viewBox="0 0 14 14"
-          fill="currentColor"
-          style={{ flexShrink: 0, opacity: 0.9 }}
-        >
-          <rect x="1" y="1" width="5" height="5" rx="1" />
-          <rect x="8" y="1" width="5" height="5" rx="1" />
-          <rect x="1" y="8" width="5" height="5" rx="1" />
-          <rect x="8" y="8" width="5" height="5" rx="1" />
-        </svg>
-        {t("toolbar.other")}
-        <span style={{ fontSize: 9, opacity: 0.7 }}>▾</span>
-      </button>
-      {open && (
-        <div
-          style={{
-            // The Fullscreen control is another title-bar popover.  Keep the
-            // Other menu in a higher local layer so it remains usable when
-            // the two menus overlap, even though the title bar itself is a
-            // stacking context above the cue table.
-            position: "absolute", left: 0, top: "100%", marginTop: 4, zIndex: 10001,
-            background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)",
-            borderRadius: 6, boxShadow: "0 8px 24px rgba(0,0,0,0.6)", padding: 4, minWidth: 262,
-          }}
-        >
-          {otherCueTypes.map(({ type, labelKey, hintKey: explicitHintKey }) => {
-            const hintKey = explicitHintKey ?? (COMMAND_CUE_TYPES.some((c) => c.type === type)
-              ? `toolbar.commandHint${type[0].toUpperCase()}${type.slice(1)}`
-              : "toolbar.addCueAfterSelection");
-            return (
-            <button
-              key={type}
-              onMouseEnter={() => setHoveredItem(type)}
-              onMouseLeave={() => setHoveredItem(null)}
-              onClick={(e) => { e.stopPropagation(); setOpen(false); onAdd(type); }}
-              // Arms the drag-to-insert gesture, exactly like the main cue
-              // buttons. It must NOT close the menu: unmounting the button on
-              // mousedown means no mouseup lands on it, so `click` never fires
-              // and the plain-click path silently does nothing.
-              onMouseDown={(e) => { if (e.button === 0) onDragStart(type, e); }}
-              style={{
-                display: "flex", alignItems: "center", gap: 10, width: "100%",
-                height: 26, padding: "0 10px", borderRadius: 4, border: "none", textAlign: "left",
-                background: hoveredItem === type ? "var(--wc-bg-hover)" : "transparent",
-                cursor: "pointer", whiteSpace: "nowrap",
-              }}
-            >
-              <CueTypeIcon type={type} size={16} tone="type" />
-              <span style={{ color: CUE_TYPE_COLORS[type], fontSize: 12, fontWeight: 600, width: 82, flexShrink: 0 }}>
-                {t(labelKey)}
-              </span>
-              <span style={{ color: "var(--wc-text-muted)", fontSize: 11 }}>
-                {hintKey === "toolbar.addCueAfterSelection" ? t(hintKey, { cue: t(labelKey) }) : t(hintKey)}
-              </span>
-            </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Toolbar cue button with the shared cue-type icon. */
-function CueToolbarButton({ type, label, title, onAdd, onDragStart }: {
-  type: CueType;
-  label: string;
-  title: string;
-  onAdd: () => void;
-  onDragStart: (e: React.MouseEvent) => void;
-}) {
-  const color = CUE_TYPE_COLORS[type];
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      style={{
-        ...toolbarBtn,
-        display: "inline-flex", alignItems: "center", gap: 5, userSelect: "none",
-        color: hover ? color : "var(--wc-text-secondary)",
-        borderColor: hover ? color : "var(--wc-border-strong)",
-        background: hover ? "var(--wc-bg-hover)" : "var(--wc-bg-surface)",
-        transition: "color 0.12s, border-color 0.12s, background 0.12s",
-      }}
-      onClick={onAdd}
-      onMouseDown={onDragStart}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title={title}
-    >
-      <CueTypeIcon type={type} size={18} tone="type" />
-      {label}
-    </button>
   );
 }

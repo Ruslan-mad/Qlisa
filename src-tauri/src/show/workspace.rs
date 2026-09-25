@@ -1,9 +1,10 @@
-//! [`Workspace`] — the top-level save unit for a Inkue show.
+//! [`Workspace`] — the top-level save unit for a Qlisa show.
 //!
-//! Corresponds to a `.inkue` file on disk.
+//! Corresponds to a `.qlisa` project file on disk. Legacy `.inkue` files use
+//! the same JSON format and remain loadable.
 
-/// Bumped whenever the `.inkue` JSON format gains a breaking change.
-/// Files written by newer Inkue versions (schema > this) are rejected
+/// Bumped whenever the project JSON format gains a breaking change.
+/// Files written by newer Qlisa versions (schema > this) are rejected
 /// at load time to prevent silent data corruption.
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -24,12 +25,12 @@ use crate::{
 use super::cue_list::CueList;
 
 // ---------------------------------------------------------------------------
-// Path helpers — keep file paths relative in the .inkue JSON so workspaces
+// Path helpers — keep file paths relative in the project JSON so workspaces
 // are portable across machines and drive letters.
 // ---------------------------------------------------------------------------
 
 /// Recursively walk a cues JSON array and convert absolute `file_path` values
-/// to paths relative to `base` (the directory containing the .inkue file).
+/// to paths relative to `base` (the directory containing the project file).
 fn relativize_paths(value: &mut serde_json::Value, base: &std::path::Path) {
     match value {
         serde_json::Value::Array(arr) => {
@@ -59,7 +60,7 @@ fn relativize_paths(value: &mut serde_json::Value, base: &std::path::Path) {
 }
 
 /// Recursively walk a cues JSON array and resolve relative `file_path` values
-/// to absolute paths using `base` (the directory containing the .inkue file).
+/// to absolute paths using `base` (the directory containing the project file).
 fn absolutize_paths(value: &mut serde_json::Value, base: &std::path::Path) {
     match value {
         serde_json::Value::Array(arr) => {
@@ -184,7 +185,7 @@ fn collect_all_media_paths(
 /// Result returned by [`Workspace::collect_and_save`].
 #[derive(Debug, Serialize)]
 pub struct CollectReport {
-    /// Absolute path to the newly created `.inkue` file.
+    /// Absolute path to the newly created `.qlisa` file.
     pub workspace_path: String,
     /// Number of media files successfully copied to the new location.
     pub files_copied: u32,
@@ -236,7 +237,7 @@ pub struct Workspace {
     pub fixture_groups: Vec<FixtureGroup>,
     /// Application-wide preferences (audio engine, defaults, …).
     pub preferences: AppPreferences,
-    /// Path to the .inkue file on disk, if it has been saved.
+    /// Path to the project file on disk, if it has been saved.
     pub file_path: Option<PathBuf>,
     /// Whether the workspace has unsaved changes.
     pub is_modified: bool,
@@ -407,7 +408,7 @@ impl Workspace {
     // -----------------------------------------------------------------------
 
     /// Serialise the workspace to a JSON string, with file paths made relative
-    /// to `save_path` so the `.inkue` file is portable.
+    /// to `save_path` so the project file is portable.
     fn to_json(&self, save_path: &Path) -> Result<String> {
         let base = save_path.parent();
 
@@ -448,7 +449,7 @@ impl Workspace {
     /// Differs from [`to_json`](Self::to_json) in two ways: media `file_path`s are
     /// kept **absolute** (the recovery file lives in the per-user config dir, not
     /// beside the show's media, so relative paths would not resolve), and the
-    /// original `.inkue` path is embedded under `recovery_original_path` so a
+    /// original project path is embedded under `recovery_original_path` so a
     /// restore can target the same file.  Compact (not pretty) since it is
     /// rewritten every few seconds.
     pub fn to_recovery_json(&self) -> Result<String> {
@@ -483,8 +484,8 @@ impl Workspace {
         std::fs::write(&target, json)
             .with_context(|| format!("Failed to write workspace to {}", target.display()))?;
 
-        // Derive the workspace name from the filename stem (e.g. "My Show" from
-        // "My Show.inkue") so the title bar reflects the saved file immediately.
+        // Derive the workspace name from the filename stem so the title bar
+        // reflects the saved file immediately.
         if let Some(stem) = target.file_stem().and_then(|s| s.to_str()) {
             self.metadata.name = stem.to_string();
         }
@@ -495,7 +496,7 @@ impl Workspace {
 
     /// Copy all media files referenced by this workspace into
     /// `{target_dir}/{workspace_name}/audio|video|images|midi/` and write a
-    /// self-contained `.inkue` file with updated relative paths.
+    /// self-contained `.qlisa` file with updated relative paths.
     ///
     /// The workspace in memory is **not modified** — this is a pure export.
     pub fn collect_and_save(&self, target_dir: &Path) -> Result<CollectReport> {
@@ -570,13 +571,13 @@ impl Workspace {
             path_map.insert(abs_path.clone(), new_rel);
         }
 
-        let new_inkue_path = project_dir.join(format!("{safe_name}.inkue"));
-        let json = self.to_json_collected(&new_inkue_path, &path_map)?;
-        std::fs::write(&new_inkue_path, json)
-            .with_context(|| format!("Failed to write {}", new_inkue_path.display()))?;
+        let new_project_path = project_dir.join(format!("{safe_name}.qlisa"));
+        let json = self.to_json_collected(&new_project_path, &path_map)?;
+        std::fs::write(&new_project_path, json)
+            .with_context(|| format!("Failed to write {}", new_project_path.display()))?;
 
         Ok(CollectReport {
-            workspace_path: new_inkue_path.to_string_lossy().into_owned(),
+            workspace_path: new_project_path.to_string_lossy().into_owned(),
             files_copied,
             files_skipped,
             files_missing,
@@ -622,7 +623,7 @@ impl Workspace {
         serde_json::to_string_pretty(&doc).context("Failed to serialize collected workspace")
     }
 
-    /// Load a workspace from a `.inkue` file.
+    /// Load a workspace from a project file (`.qlisa` or legacy `.inkue`).
     pub fn load(path: PathBuf, registry: &CueRegistry) -> Result<Self> {
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read workspace file: {}", path.display()))?;
@@ -642,7 +643,7 @@ impl Workspace {
     /// Parse a workspace document from a JSON string.
     ///
     /// `base_dir`, when `Some`, is the directory the document's media paths are
-    /// relative to (used to absolutize them) — pass the `.inkue` file's parent
+    /// relative to (used to absolutize them) — pass the project file's parent
     /// for a normal load.  Pass `None` when the document already stores absolute
     /// paths (the crash-recovery snapshot).  The returned workspace has
     /// `file_path: None` and `is_modified: false`; callers set those.
@@ -784,6 +785,12 @@ mod tests {
     use crate::engine::network_io::{NdiQuality, SrtMode};
     use crate::preferences::{OutputDestination, OutputSinkKind};
 
+    fn test_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("qlisa-{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create test directory");
+        path
+    }
+
     #[test]
     fn new_workspace_applies_default_auto_renumber_to_its_initial_cue_list() {
         let workspace = Workspace::new("New show");
@@ -825,6 +832,42 @@ mod tests {
         let patch = &saved["output_patches"][1];
         assert_eq!(patch["device_id"], "");
         assert_eq!(patch["channels"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn save_keeps_the_existing_legacy_inkue_path() {
+        let dir = test_dir("legacy-save");
+        let legacy_path = dir.join("Сцена репетиции.inkue");
+        let mut workspace = Workspace::new("Сцена репетиции");
+        workspace.file_path = Some(legacy_path.clone());
+
+        workspace.save(None).expect("save legacy project");
+
+        assert!(legacy_path.is_file());
+        assert_eq!(workspace.file_path.as_deref(), Some(legacy_path.as_path()));
+        let contents = std::fs::read_to_string(&legacy_path).expect("read saved project");
+        assert!(Workspace::from_json_str(&contents, Some(&dir), &CueRegistry::new()).is_ok());
+        std::fs::remove_dir_all(dir).expect("remove test directory");
+    }
+
+    #[test]
+    fn collect_and_save_writes_qlisa_in_unicode_path_with_spaces() {
+        let test_root = test_dir("collect-save");
+        let dir = test_root.join("Проект с пробелом");
+        std::fs::create_dir_all(&dir).expect("create target directory");
+        let workspace = Workspace::new("Спектакль русский");
+
+        let report = workspace.collect_and_save(&dir).expect("collect and save");
+        let expected = dir
+            .join("Спектакль русский")
+            .join("Спектакль русский.qlisa");
+        assert_eq!(PathBuf::from(&report.workspace_path), expected);
+        let contents = std::fs::read_to_string(&expected).expect("read collected project");
+        assert!(Workspace::from_json_str(&contents, Some(expected.parent().unwrap()), &CueRegistry::new()).is_ok());
+
+        std::fs::remove_file(&expected).expect("remove collected project");
+        std::fs::remove_dir_all(test_root)
+            .expect("remove test directory");
     }
 
     #[test]
