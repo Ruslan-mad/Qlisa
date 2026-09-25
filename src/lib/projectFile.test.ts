@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { isProjectFilePath, projectFileExtension, resolveWorkspaceGuard, withDefaultProjectExtension } from "./projectFile";
+import { describe, expect, it, vi } from "vitest";
+import { inspectWorkspaceGuard, isProjectFilePath, projectFileExtension, resolveWorkspaceGuard, withDefaultProjectExtension } from "./projectFile";
 
 describe("project file paths", () => {
   it("recognizes Qlisa and legacy project extensions on Windows paths", () => {
@@ -21,6 +21,13 @@ describe("unsaved workspace guard", () => {
   it("allows navigation for a clean workspace and prompts for a dirty one", () => {
     expect(resolveWorkspaceGuard(false, null)).toBe("execute");
     expect(resolveWorkspaceGuard(true, null)).toBe("prompt");
+  });
+
+  it("uses the asynchronous dirty-state source and fails closed on read errors", async () => {
+    const readDirty = vi.fn().mockResolvedValue(true);
+    await expect(inspectWorkspaceGuard(readDirty)).resolves.toEqual({ result: "prompt" });
+    expect(readDirty).toHaveBeenCalledOnce();
+    await expect(inspectWorkspaceGuard(async () => { throw new Error("IPC unavailable"); })).resolves.toMatchObject({ result: "error" });
   });
 
   it("executes only after discard or a successful save", () => {

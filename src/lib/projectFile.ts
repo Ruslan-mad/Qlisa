@@ -26,6 +26,21 @@ export type WorkspaceGuardChoice = "save" | "discard" | "cancel" | null;
 
 export type WorkspaceGuardResult = "execute" | "prompt" | "cancel";
 
+export type WorkspaceGuardInspection =
+  | { result: "execute" | "prompt" }
+  | { result: "error"; error: unknown };
+
+/** Read dirty state asynchronously and fail closed if the source is unavailable. */
+export async function inspectWorkspaceGuard(
+  readIsModified: () => Promise<boolean>,
+): Promise<WorkspaceGuardInspection> {
+  try {
+    return { result: await readIsModified() ? "prompt" : "execute" };
+  } catch (error) {
+    return { result: "error", error };
+  }
+}
+
 /** Keep destructive workspace navigation behind the same dirty-state decision. */
 export function resolveWorkspaceGuard(
   isModified: boolean,

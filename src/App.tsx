@@ -20,7 +20,7 @@ import { FullscreenControl } from "./components/Transport/FullscreenControl";
 import { useTauriEvents } from "./hooks/useTauriEvents";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useWorkspaceStore } from "./stores/workspaceStore";
-import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, getCueLists, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences } from "./lib/commands";
+import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, getWorkspaceInfo, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, getCueLists, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences } from "./lib/commands";
 import { AboutDialog } from "./components/About/AboutDialog";
 import { UpdateDialog } from "./components/Update/UpdateDialog";
 import { useUpdateStore } from "./stores/updateStore";
@@ -38,7 +38,7 @@ import { normalizeNumberCueData } from "./components/Inspector/numberModel";
 import { resolveMonitorPreviewSelection } from "./components/Inspector/numberPreviewSelection";
 import { useNumberPreviewStore } from "./stores/numberPreviewStore";
 import { CueToolbar } from "./components/CueToolbar/CueToolbar";
-import { isProjectFilePath, resolveWorkspaceGuard, withDefaultProjectExtension } from "./lib/projectFile";
+import { inspectWorkspaceGuard, isProjectFilePath, resolveWorkspaceGuard, withDefaultProjectExtension } from "./lib/projectFile";
 
 // ---------------------------------------------------------------------------
 // Recent files
@@ -865,6 +865,7 @@ export default function App() {
   const pendingWorkspaceActionRef = useRef<(() => Promise<void>) | null>(null);
   const pendingProjectOpensRef = useRef<string[]>([]);
   const processingProjectOpensRef = useRef(false);
+  const workspaceActionBusyRef = useRef(false);
 
   // Persist panel visibility + inspector width across launches.
   useEffect(() => {
@@ -1022,7 +1023,14 @@ export default function App() {
   }, [workspaceInfo, refreshWorkspaceInfo]);
 
   const handleSave = useCallback(async (): Promise<boolean> => {
-    const path = workspaceInfo?.file_path;
+    let path: string | null;
+    try {
+      path = (await getWorkspaceInfo()).file_path;
+    } catch (error) {
+      console.error("Failed to read current Qlisa project before saving", error);
+      setWorkspaceError(String(error));
+      return false;
+    }
     if (path) {
       try {
         await saveWorkspace(path);
@@ -1036,7 +1044,7 @@ export default function App() {
       }
     }
     return handleSaveAs();
-  }, [workspaceInfo, refreshWorkspaceInfo, handleSaveAs]);
+  }, [refreshWorkspaceInfo, handleSaveAs]);
 
   const performOpenWorkspacePath = useCallback(async (path: string): Promise<boolean> => {
     try {
@@ -1051,44 +1059,66 @@ export default function App() {
     }
   }, []);
 
-  const runWorkspaceAction = useCallback((action: () => Promise<void>) => {
-    if (pendingWorkspaceActionRef.current) return;
-    const modified = !!useWorkspaceStore.getState().workspaceInfo?.is_modified;
-    if (resolveWorkspaceGuard(modified, null) === "prompt") {
-      pendingWorkspaceActionRef.current = action;
-      setWorkspaceGuardOpen(true);
-      return;
-    }
-    void action().catch((error) => {
+  const runWorkspaceAction = useCallback(async (action: () => Promise<void>) => {
+    if (pendingWorkspaceActionRef.current || workspaceActionBusyRef.current) return;
+    workspaceActionBusyRef.current = true;
+    try {
+      const inspection = await inspectWorkspaceGuard(async () => (await getWorkspaceInfo()).is_modified);
+      if (inspection.result === "error") {
+        console.error("Failed to check Qlisa project dirty state", inspection.error);
+        setWorkspaceError(String(inspection.error));
+        return;
+      }
+      if (inspection.result === "prompt") {
+        pendingWorkspaceActionRef.current = action;
+        setWorkspaceGuardOpen(true);
+        return;
+      }
+      await action();
+    } catch (error) {
       console.error("Workspace action failed", error);
       setWorkspaceError(String(error));
-    });
+    } finally {
+      workspaceActionBusyRef.current = false;
+    }
   }, []);
 
-  const openWorkspacePath = useCallback((path: string) => {
-    runWorkspaceAction(async () => { await performOpenWorkspacePath(path); });
+  const openWorkspacePath = useCallback(async (path: string) => {
+    await runWorkspaceAction(async () => { await performOpenWorkspacePath(path); });
   }, [runWorkspaceAction, performOpenWorkspacePath]);
 
   const drainProjectOpenQueue = useCallback(async () => {
-    if (processingProjectOpensRef.current || pendingWorkspaceActionRef.current) return;
+    if (processingProjectOpensRef.current || pendingWorkspaceActionRef.current || workspaceActionBusyRef.current) return;
     processingProjectOpensRef.current = true;
+    workspaceActionBusyRef.current = true;
     try {
       while (pendingProjectOpensRef.current.length > 0) {
-        const path = pendingProjectOpensRef.current.shift()!;
+        if (pendingWorkspaceActionRef.current) return;
+        const path = pendingProjectOpensRef.current[0];
+        const inspection = await inspectWorkspaceGuard(async () => (await getWorkspaceInfo()).is_modified);
+        if (inspection.result === "error") {
+          console.error("Failed to check Qlisa project dirty state", inspection.error);
+          pendingProjectOpensRef.current = [];
+          setWorkspaceError(String(inspection.error));
+          return;
+        }
         const action = async () => {
+          pendingProjectOpensRef.current.shift();
           await performOpenWorkspacePath(path);
           void drainProjectOpenQueue();
         };
-        if (resolveWorkspaceGuard(!!useWorkspaceStore.getState().workspaceInfo?.is_modified, null) === "prompt") {
+        if (inspection.result === "prompt") {
           pendingWorkspaceActionRef.current = action;
           processingProjectOpensRef.current = false;
           setWorkspaceGuardOpen(true);
           return;
         }
+        pendingProjectOpensRef.current.shift();
         await performOpenWorkspacePath(path);
       }
     } finally {
       processingProjectOpensRef.current = false;
+      workspaceActionBusyRef.current = false;
     }
   }, [performOpenWorkspacePath]);
 
@@ -1099,28 +1129,31 @@ export default function App() {
 
   const resolveWorkspaceGuardAction = useCallback(async (choice: "save" | "discard" | "cancel") => {
     const action = pendingWorkspaceActionRef.current;
-    if (!action) return;
-    const saved = choice === "save" ? await handleSave() : false;
-    // This dialog is only opened for a dirty workspace. Keep that original
-    // condition authoritative: a cancelled/failed Save must never allow replace.
-    const resolution = resolveWorkspaceGuard(true, choice, saved);
-    if (resolution !== "execute") {
-      if (choice === "cancel") {
-        pendingWorkspaceActionRef.current = null;
-        pendingProjectOpensRef.current = [];
-        setWorkspaceGuardOpen(false);
-      }
-      return;
-    }
-    pendingWorkspaceActionRef.current = null;
-    setWorkspaceGuardOpen(false);
+    if (!action || workspaceActionBusyRef.current) return;
+    workspaceActionBusyRef.current = true;
     try {
+      const saved = choice === "save" ? await handleSave() : false;
+      // This dialog is only opened for a dirty workspace. Keep that original
+      // condition authoritative: a cancelled/failed Save must never allow replace.
+      const resolution = resolveWorkspaceGuard(true, choice, saved);
+      if (resolution !== "execute") {
+        if (choice === "cancel") {
+          pendingWorkspaceActionRef.current = null;
+          pendingProjectOpensRef.current = [];
+          setWorkspaceGuardOpen(false);
+        }
+        return;
+      }
+      pendingWorkspaceActionRef.current = null;
+      setWorkspaceGuardOpen(false);
       await action();
     } catch (error) {
       console.error("Workspace action failed", error);
       setWorkspaceError(String(error));
+    } finally {
+      workspaceActionBusyRef.current = false;
+      void drainProjectOpenQueue();
     }
-    void drainProjectOpenQueue();
   }, [handleSave, drainProjectOpenQueue]);
 
   const handleOpen = useCallback(async () => {
