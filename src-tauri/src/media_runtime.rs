@@ -188,6 +188,41 @@ fn download(url: &str, dest: &Path, app: &AppHandle, label: &str, start: u8, end
     Ok(())
 }
 fn extract_member(archive: &Path, member: &str, dest: &Path) -> Result<(), String> {
+    if archive
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("7z"))
+    {
+        #[cfg(windows)]
+        {
+            let mut reader =
+                sevenz_rust2::ArchiveReader::open(archive, sevenz_rust2::Password::empty())
+                    .map_err(|e| format!("Не удалось открыть 7z-архив: {e}"))?;
+            let mut found = false;
+            reader
+                .for_each_entries(|entry, contents| {
+                    if entry.name() == member {
+                        let mut output = fs::File::create(dest)?;
+                        std::io::copy(contents, &mut output)?;
+                        found = true;
+                        return Ok(false);
+                    } else {
+                        // Solid 7z blocks must be decoded in order, including
+                        // entries that are not the requested member.
+                        std::io::copy(contents, &mut std::io::sink())?;
+                    }
+                    Ok(true)
+                })
+                .map_err(|e| format!("Ошибка распаковки 7z-архива: {e}"))?;
+            if !found {
+                return Err(format!("В 7z-архиве нет ожидаемого файла {member}"));
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            return Err("Извлечение 7z доступно только в Windows runtime bootstrap".into());
+        }
+    }
     let stdout = fs::File::create(dest).map_err(|e| e.to_string())?;
     #[cfg(windows)]
     let output = std::process::Command::new("tar.exe")
@@ -381,6 +416,22 @@ mod tests {
         assert_eq!(ffmpeg_member("pinned-root", "ffmpeg.exe").unwrap(), "pinned-root/bin/ffmpeg.exe");
         assert!(ffmpeg_member("../escape", "ffmpeg.exe").is_err());
         assert!(ffmpeg_member("pinned-root", "../escape").is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn extracts_7z_member_with_lzma() {
+        let work = std::env::temp_dir().join(format!("qlisa-7z-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&work).unwrap();
+        let archive = work.join("fixture.7z");
+        let output = work.join("libmpv-2.dll");
+        fs::write(
+            &archive,
+            include_bytes!("../tests/fixtures/libmpv-extract-fixture.7z"),
+        )
+        .unwrap();
+        extract_member(&archive, "libmpv-2.dll", &output).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"fixture dll payload");
+        fs::remove_dir_all(work).unwrap();
     }
     #[test]
     fn repair_replaces_only_the_missing_file() {

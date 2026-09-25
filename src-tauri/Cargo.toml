@@ -124,6 +124,9 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# Windows' inbox tar.exe cannot decode the LZMA-compressed pinned mpv archive.
+# Decode 7z in-process so first-run setup does not depend on an installed tool.
+sevenz-rust2 = { version = "=0.22.2", default-features = false }
 # windows-sys — monitor enumeration, camera COM enumeration, font registration.
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
