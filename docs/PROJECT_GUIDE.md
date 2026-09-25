@@ -17,9 +17,9 @@ Save As offers `.qlisa` by default and preserves an explicitly chosen `.inkue`
 suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
-extension changes are planned for Qlisa 1.5.8. The latest released version is
-1.5.7; the `.qlisa` file association is not in that release. This is not an
-official upstream Inkue release checkout. The source repository is public at
+extension changes are included in Qlisa 1.5.8, the latest release. The `.qlisa`
+Windows file association is included in that release. This is not an official
+upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
 downloads. The Tauri updater is configured for signed GitHub Releases. The
 1.5.4 local updater E2E check passed. The 1.5.5 per-machine install and the
