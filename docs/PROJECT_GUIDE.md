@@ -211,10 +211,12 @@ also serves live input feeds and optional post-master network audio taps.
 Streaming starvation is counted per callback block and reported outside the
 real-time thread. The diagnostic log includes voice/cue identity, silent output
 frame count and duration, source and output rates, ring fill/capacity,
-loop-boundary proximity, and the cue's underrun-event count. The UI keeps one
-stable alert. An ordinary Voice loop rewind uses a 100 ms refill watermark.
-Slice transitions, control seeks, and initial playback keep the 750 ms
-watermark.
+loop-boundary proximity, and the cue's underrun-event count. Whole-file loops
+append the next decoded pass to the existing PCM ring before it drains. The
+callback keeps its interpolation lookahead across that seam and wraps the
+logical play position without seeking or resetting the ring. Trimmed and sliced
+loops keep their existing seek behavior. Slice transitions, control seeks, and
+initial playback keep the 750 ms watermark.
 Run the ignored 30-minute callback/decoder loop stress test with
 `cd src-tauri && cargo test streaming_audio_loop_wall_clock_30m -- --ignored --nocapture`.
 Set `QLISA_AUDIO_STRESS_SECONDS` to a smaller number for a smoke run. The test
@@ -222,12 +224,16 @@ reports loop count, underruns, silent frames, ring fill, decoder time, and
 refill scheduling delay; collect process CPU and memory separately while it
 runs.
 
-The streaming EOF path now preserves looping Voices instead of stopping them
-at the decoder tail. A 30-minute wall-clock run completed 895 loop boundaries
-with the Voice still Playing and zero decode failures. It recorded 899
-underrun callbacks and 431,520 silent frames, about one 10 ms callback gap per
-loop boundary; peak observed RSS was 16.8 MB and process CPU time was 11.8 s
-after 27 minutes. The loop rewind still has a short silent gap.
+The previous 30-minute run completed 895 loop boundaries but recorded 899
+underruns and 431,520 silent frames. The whole-file loop path now keeps decoded
+PCM contiguous across EOF. Its 30-minute WAV regression run completed 900 loop
+boundaries with zero underruns, zero silent frames, zero decode failures, and
+the Voice still Playing. Peak decode time was 8,744 µs; maximum refill wait was
+1,000 µs. During a 25-minute resource sample, RSS moved from 26.2 to 26.4 MB,
+private memory from 10.0 to 10.1–10.2 MB, and process CPU reached 16.56 s.
+Short MP3 stress and bit-exact repeated-sample checks also passed. These results
+cover whole-file loops. Trimmed and sliced loops retain their previous seek
+behavior and are not seamless-loop claims.
 
 The Windows Qlisa application always uses the Cargo feature `asio-support`.
 Build or run the Windows app with an ASIO-enabled command; do not omit ASIO.

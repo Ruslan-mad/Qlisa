@@ -87,6 +87,7 @@ pub struct StreamingAudioSource {
     requested_frame: AtomicU64,
     decoded_frames: AtomicU64,
     total_frames: AtomicU64,
+    loop_length_exact: AtomicBool,
     eof: AtomicBool,
     ready: AtomicBool,
     /// Loop seeks resume from a smaller watermark than initial GO.
@@ -94,6 +95,7 @@ pub struct StreamingAudioSource {
     underruns: AtomicU64,
     decode_failures: AtomicU64,
     reusable: AtomicBool,
+    seamless_loop: AtomicBool,
     underrun_reported: AtomicU64,
     refill_requested: AtomicBool,
     playback_state: AtomicU8,
@@ -230,12 +232,14 @@ impl StreamingAudioSource {
             requested_frame: AtomicU64::new(initial_frame),
             decoded_frames: AtomicU64::new(0),
             total_frames: AtomicU64::new(info.total_frames.unwrap_or(0)),
+            loop_length_exact: AtomicBool::new(false),
             eof: AtomicBool::new(false),
             ready: AtomicBool::new(false),
             loop_rebuffer: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
             decode_failures: AtomicU64::new(0),
             reusable: AtomicBool::new(false),
+            seamless_loop: AtomicBool::new(false),
             underrun_reported: AtomicU64::new(0),
             refill_requested: AtomicBool::new(true),
             // 0 = paused, 1 = preload/idle, 2 = playing normal.
@@ -290,12 +294,14 @@ impl StreamingAudioSource {
             requested_frame: AtomicU64::new(0),
             decoded_frames: AtomicU64::new(frames.len() as u64),
             total_frames: AtomicU64::new(frames.len() as u64),
+            loop_length_exact: AtomicBool::new(true),
             eof: AtomicBool::new(eof),
             ready: AtomicBool::new(ready),
             loop_rebuffer: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
             decode_failures: AtomicU64::new(0),
             reusable: AtomicBool::new(false),
+            seamless_loop: AtomicBool::new(false),
             underrun_reported: AtomicU64::new(0),
             refill_requested: AtomicBool::new(!eof),
             playback_state: AtomicU8::new(StreamPlaybackState::Playing as u8),
@@ -319,6 +325,10 @@ impl StreamingAudioSource {
 
     pub fn total_frames(&self) -> u64 {
         self.total_frames.load(Ordering::Acquire)
+    }
+
+    pub fn has_exact_loop_length(&self) -> bool {
+        self.loop_length_exact.load(Ordering::Acquire)
     }
 
     pub fn id(&self) -> Uuid { self.source_id }
@@ -380,6 +390,7 @@ impl StreamingAudioSource {
     }
     pub fn keep_worker_for_loop(self: &Arc<Self>) {
         self.reusable.store(true, Ordering::Release);
+        self.seamless_loop.store(false, Ordering::Release);
         // A short non-loop source can hit EOF before the cue finishes setting
         // its loop policy. Restart only after the ring is empty; otherwise a
         // second decode would duplicate still-buffered PCM.
@@ -389,6 +400,25 @@ impl StreamingAudioSource {
             // this control path; `request_refill` intentionally rejects EOF.
             let _ = self.prepare_seek(0);
         }
+    }
+
+    /// Queue whole-file passes directly in the existing PCM ring. Trimmed and
+    /// sliced loops continue to use decoder seeks.
+    pub fn enable_seamless_loop(self: &Arc<Self>) {
+        if self.requested_frame.load(Ordering::Acquire) != 0 {
+            self.keep_worker_for_loop();
+            return;
+        }
+        self.reusable.store(true, Ordering::Release);
+        self.seamless_loop.store(true, Ordering::Release);
+        if self.is_eof() {
+            self.eof.store(false, Ordering::Release);
+            self.request_refill();
+        }
+    }
+
+    pub fn is_seamless_looping(&self) -> bool {
+        self.seamless_loop.load(Ordering::Acquire)
     }
     pub fn should_report_underrun(&self, count: u64) -> bool {
         let threshold = (count / 4096) * 4096;
@@ -1214,6 +1244,7 @@ struct StreamDecoder {
 struct DecoderSession {
     decoder: StreamDecoder,
     frame: u64,
+    seek_target_frame: u64,
     generation: u64,
 }
 
@@ -1355,6 +1386,7 @@ fn run_stream_job(job: StreamJob) {
             Ok(Some(decoder)) => DecoderSession {
                 decoder,
                 frame: 0,
+                seek_target_frame: source.requested_frame.load(Ordering::Acquire),
                 generation,
             },
             Ok(None) => {
@@ -1372,9 +1404,10 @@ fn run_stream_job(job: StreamJob) {
         },
     };
     source.eof.store(false, Ordering::Release);
-    source
-        .total_frames
-        .store(session.decoder.total_frames.unwrap_or(0), Ordering::Release);
+    let reported_frames = session.decoder.total_frames.unwrap_or(0);
+    if !source.is_seamless_looping() || source.total_frames() == 0 {
+        source.total_frames.store(reported_frames, Ordering::Release);
+    }
     let target = source.target_threshold();
     while source.buffered_samples() < target {
         if source.cancel.load(Ordering::Acquire)
@@ -1407,7 +1440,7 @@ fn run_stream_job(job: StreamJob) {
                     {
                         return;
                     }
-                    if session.frame < source.requested_frame.load(Ordering::Acquire) {
+                    if session.frame < session.seek_target_frame {
                         session.frame += 1;
                         source
                             .decoded_frames
@@ -1433,6 +1466,23 @@ fn run_stream_job(job: StreamJob) {
             }
             Ok(_) => {}
             Err(symphonia::core::errors::Error::IoError(_)) => {
+                if source.is_seamless_looping() && session.frame > 0 {
+                    // Use the decoded sample count, not a possibly absent or
+                    // approximate MP3 container duration, for loop boundaries.
+                    source.total_frames.store(session.frame, Ordering::Release);
+                    source.loop_length_exact.store(true, Ordering::Release);
+                    match stream_decoder(&source.path, true)
+                        .or_else(|_| stream_decoder(&source.path, false))
+                    {
+                        Ok(Some(decoder)) => {
+                            session.decoder = decoder;
+                            session.frame = 0;
+                            session.seek_target_frame = 0;
+                            continue;
+                        }
+                        _ => source.decode_failures.fetch_add(1, Ordering::Relaxed),
+                    };
+                }
                 if source.buffered_samples() > 0 {
                     source.ready.store(true, Ordering::Release);
                 }
@@ -1846,12 +1896,14 @@ mod streaming_tests {
             requested_frame: AtomicU64::new(0),
             decoded_frames: AtomicU64::new(0),
             total_frames: AtomicU64::new(0),
+            loop_length_exact: AtomicBool::new(false),
             eof: AtomicBool::new(false),
             ready: AtomicBool::new(ready),
             loop_rebuffer: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
             decode_failures: AtomicU64::new(0),
             reusable: AtomicBool::new(false),
+            seamless_loop: AtomicBool::new(false),
             underrun_reported: AtomicU64::new(0),
             refill_requested: AtomicBool::new(true),
             playback_state: AtomicU8::new(state as u8),

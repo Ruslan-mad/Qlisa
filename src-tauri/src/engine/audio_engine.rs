@@ -3052,6 +3052,13 @@ fn mix_stream(
     let matrix_ptr = voice.inner.level_matrix.get();
     let fade_ptr = voice.inner.fade.get();
     let end = unsafe { *voice.inner.end_frame.get() }.unwrap_or(u64::MAX);
+    let loop_end = if source.is_seamless_looping() && source.has_exact_loop_length() {
+        source.total_frames()
+    } else if source.is_seamless_looping() {
+        u64::MAX
+    } else {
+        end
+    };
     let mut frame_pos = voice.current_frame();
     let ratio = (voice.inner.rate() as f64
         * source.sample_rate as f64
@@ -3111,7 +3118,7 @@ fn mix_stream(
                 let _ = status_prod.try_push(AudioStatus::Completed { voice_id: voice.id });
                 break;
             }
-        } else if frame_pos >= end
+        } else if frame_pos >= loop_end
             && !(voice.stream.is_some()
                 && voice.inner.loops_remaining.load(Ordering::Relaxed) == 0
                 && unsafe { (*cursor_ptr).initialized && (*cursor_ptr).current_is_tail })
@@ -3119,9 +3126,11 @@ fn mix_stream(
             let loops = voice.inner.loops_remaining.load(Ordering::Relaxed);
             if loops > 0 {
                 if loops != u32::MAX { voice.inner.loops_remaining.fetch_sub(1, Ordering::Relaxed); }
-                source.request_loop_seek_rt(0);
                 voice.has_looped.store(true, Ordering::Relaxed);
-                voice.reset_stream_cursor();
+                if !source.is_seamless_looping() {
+                    source.request_loop_seek_rt(0);
+                    voice.reset_stream_cursor();
+                }
                 frame_pos = 0;
             } else {
                 voice.set_stopped();
@@ -3695,13 +3704,18 @@ mod tests {
                 .unwrap_or(30 * 60),
         );
 
-        let path = std::env::temp_dir().join(format!("qlisa-loop-{}.wav", uuid::Uuid::new_v4()));
-        write_loop_stress_wav(&path, 2);
+        let external_path = std::env::var_os("QLISA_AUDIO_STRESS_PATH").map(std::path::PathBuf::from);
+        let path = external_path.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("qlisa-loop-{}.wav", uuid::Uuid::new_v4()))
+        });
+        if external_path.is_none() {
+            write_loop_stress_wav(&path, 2);
+        }
         let info = crate::cue::media_decode::probe_audio_track(&path)
             .expect("probe stress WAV")
             .expect("stress WAV audio track");
         let source = StreamingAudioSource::start(path.clone(), info).expect("start stream");
-        source.keep_worker_for_loop();
+        source.enable_seamless_loop();
         source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
         let voice = Arc::new(Voice::new_stream(Arc::clone(&source), 1.0, 0.0));
         voice.set_playing();
@@ -3772,6 +3786,134 @@ mod tests {
         println!("duration_s={} loop_boundaries={} underrun_events={} silent_frames={} source_underruns={} frame_pos={} voice_state={:?} ready={} eof={} buffer_fill_frames={} buffer_capacity_frames={} decode_failures={} max_decode_us={} max_refill_wait_us={}", started.elapsed().as_secs(), loop_boundaries, underrun_events, silent_frames, diagnostics.underruns, voice.current_frame(), voice.voice_state(), diagnostics.ready, diagnostics.eof, diagnostics.buffered_frames, diagnostics.capacity_frames, diagnostics.decode_failures, diagnostics.max_decode_us, diagnostics.max_refill_wait_us);
         assert_eq!(diagnostics.decode_failures, 0, "decoder errors during loop");
         assert!(loop_boundaries > 0, "the Voice did not traverse a loop boundary");
+        assert_eq!(diagnostics.underruns, 0, "loop boundary starved the callback");
+        source.cancel();
+        if external_path.is_none() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn seamless_stream_repeats_decoded_samples_without_a_gap() {
+        let external_path = std::env::var_os("QLISA_AUDIO_STRESS_PATH").map(std::path::PathBuf::from);
+        let path = external_path.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("qlisa-sample-order-{}.wav", uuid::Uuid::new_v4()))
+        });
+        if external_path.is_none() {
+            write_loop_stress_wav(&path, 1);
+        }
+        let info = crate::cue::media_decode::probe_audio_track(&path)
+            .expect("probe sample-order media")
+            .expect("media audio track");
+        let source = StreamingAudioSource::start(path.clone(), info).expect("start stream");
+        source.enable_seamless_loop();
+        source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !source.is_ready() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(source.is_ready(), "decoder did not prebuffer the loop");
+        while !source.has_exact_loop_length() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(source.has_exact_loop_length(), "loop length was not finalized at EOF");
+        let pass_frames = source.total_frames() as usize;
+        assert!(pass_frames > 0, "decoder reported an empty pass");
+
+        let mut actual = [0.0_f32; 2];
+        let mut first_pass = Vec::with_capacity(pass_frames);
+        for frame in 0..pass_frames {
+            assert!(source.pop_frame(&mut actual), "missing first-pass PCM at frame {frame}");
+            first_pass.push(actual);
+        }
+        for (frame, expected) in first_pass.iter().enumerate() {
+            assert!(source.pop_frame(&mut actual), "missing repeated PCM at frame {frame}");
+            assert_eq!(&actual, expected, "sample mismatch at loop seam frame {frame}");
+        }
+        let seek_frame = pass_frames / 2;
+        source.prepare_seek(seek_frame as u64).expect("seek into loop source");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !source.is_ready() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(source.is_ready(), "seeked decoder did not prebuffer");
+        for (frame, expected) in first_pass[seek_frame..].iter().enumerate() {
+            assert!(source.pop_frame(&mut actual), "missing sought PCM at frame {frame}");
+            assert_eq!(&actual, expected, "seeked sample mismatch at frame {frame}");
+        }
+        for (frame, expected) in first_pass.iter().enumerate() {
+            assert!(source.pop_frame(&mut actual), "missing post-seek loop PCM at frame {frame}");
+            assert_eq!(&actual, expected, "post-seek loop mismatch at frame {frame}");
+        }
+        assert_eq!(source.underruns(), 0);
+        source.cancel();
+        if external_path.is_none() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn seamless_stream_loop_supports_pause_resume_stop_and_finite_count() {
+        use std::time::{Duration, Instant};
+
+        let path = std::env::temp_dir().join(format!("qlisa-transport-{}.wav", uuid::Uuid::new_v4()));
+        write_loop_stress_wav(&path, 1);
+        let info = crate::cue::media_decode::probe_audio_track(&path)
+            .expect("probe transport WAV")
+            .expect("WAV audio track");
+        let source = StreamingAudioSource::start(path.clone(), info).expect("start stream");
+        source.enable_seamless_loop();
+        source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
+        let voice = Arc::new(Voice::new_stream(Arc::clone(&source), 1.0, 0.0));
+        voice.set_playing();
+        unsafe { *voice.inner.end_frame.get() = Some(source.total_frames()); }
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !source.is_ready() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(source.is_ready(), "decoder did not prebuffer the loop");
+
+        let first = run_fill(Arc::clone(&voice), 4_800, 48_000);
+        assert!(first > 0, "playing did not advance the stream cursor");
+        voice.set_paused();
+        let paused_at = voice.current_frame();
+        assert_eq!(run_fill(Arc::clone(&voice), 4_800, 48_000), paused_at);
+
+        voice.set_playing();
+        assert!(run_fill(Arc::clone(&voice), 4_800, 48_000) > paused_at);
+
+        voice.inner.loops_remaining.store(1, Ordering::Relaxed);
+        let stop_deadline = Instant::now() + Duration::from_secs(5);
+        while voice.voice_state() != VoiceState::Stopped && Instant::now() < stop_deadline {
+            run_fill(Arc::clone(&voice), 4_800, 48_000);
+        }
+        assert_eq!(voice.voice_state(), VoiceState::Stopped, "finite loop did not stop");
+        assert_eq!(source.underruns(), 0, "transport caused stream starvation");
+        source.cancel();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn seamless_stream_long_file_reaches_ready_before_ring_fills() {
+        use std::time::{Duration, Instant};
+
+        let path = std::env::temp_dir().join(format!("qlisa-long-loop-{}.wav", uuid::Uuid::new_v4()));
+        write_loop_stress_wav(&path, 12);
+        let info = crate::cue::media_decode::probe_audio_track(&path)
+            .expect("probe long WAV")
+            .expect("WAV audio track");
+        let source = StreamingAudioSource::start(path.clone(), info).expect("start stream");
+        source.enable_seamless_loop();
+        source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !source.is_ready() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(source.is_ready(), "long file GO waited for decoder EOF");
+        assert!(source.buffered_samples() > 0);
         source.cancel();
         let _ = std::fs::remove_file(path);
     }

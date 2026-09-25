@@ -317,7 +317,17 @@ impl AudioCue {
             }
         };
         if self.loop_count > 0 || !self.slices.is_empty() {
-            if let Some(stream) = &voice.stream { stream.keep_worker_for_loop(); }
+            if let Some(stream) = &voice.stream {
+                if self.loop_count > 0
+                    && self.slices.is_empty()
+                    && self.start_time.is_none()
+                    && self.end_time.is_none()
+                {
+                    stream.enable_seamless_loop();
+                } else {
+                    stream.keep_worker_for_loop();
+                }
+            }
         }
 
         voice.inner.loops_remaining.store(self.loop_count, std::sync::atomic::Ordering::Relaxed);
@@ -476,7 +486,15 @@ impl AudioCue {
     ) -> Result<()> {
         let source = crate::cue::media_decode::StreamingAudioSource::start(path, info)?;
         if self.loop_count > 0 || !self.slices.is_empty() {
-            source.keep_worker_for_loop();
+            if self.loop_count > 0
+                && self.slices.is_empty()
+                && self.start_time.is_none()
+                && self.end_time.is_none()
+            {
+                source.enable_seamless_loop();
+            } else {
+                source.keep_worker_for_loop();
+            }
         }
         self.stream_source = Some(source);
         Ok(())
