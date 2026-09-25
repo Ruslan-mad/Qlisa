@@ -12,7 +12,7 @@ use std::io::Write;
 
 use common::*;
 use inkue_lib::cue::audio_cue::AudioCue;
-use inkue_lib::cue::media_decode::decode_audio_track;
+use inkue_lib::cue::media_decode::{decode_audio_track, probe_audio_track};
 
 fn is_non_silent(samples: &[f32]) -> bool {
     samples.iter().any(|s| s.abs() > 0.01)
@@ -146,6 +146,27 @@ fn decode_missing_file_errors() {
     let path = temp_dir("decmissing").join("nope.wav");
     let result = decode_audio_track(&path);
     assert!(result.is_err(), "missing file must return Err");
+}
+
+#[test]
+fn known_image_formats_are_not_probed_as_audio() {
+    let dir = temp_dir("image-not-audio");
+    for extension in ["webp", "png", "jpg", "jpeg"] {
+        let path = dir.join(format!("fixture.{extension}"));
+        // A bogus image payload is enough: the extension guard must run before
+        // opening the file or invoking Symphonia/libmpv.
+        std::fs::write(&path, b"not an audio stream").unwrap();
+        assert_eq!(
+            probe_audio_track(&path).expect("image probe should be a no-audio result"),
+            None,
+            ".{extension} must not enter streaming audio probe"
+        );
+        assert_eq!(
+            decode_audio_track(&path).expect("image decode should be a no-audio result"),
+            None,
+            ".{extension} must not enter legacy audio decode"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

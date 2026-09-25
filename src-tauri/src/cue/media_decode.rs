@@ -52,6 +52,9 @@ pub struct AudioStreamInfo {
 /// this cheap metadata pass, then starts a bounded source that keeps only its
 /// small ready/target window in memory.
 pub fn probe_audio_track(path: &Path) -> Result<Option<AudioStreamInfo>> {
+    if is_known_image_format(path) {
+        return Ok(None);
+    }
     let Some(decoder) = stream_decoder(path, true).or_else(|_| stream_decoder(path, false))? else {
         return Ok(None);
     };
@@ -1484,11 +1487,18 @@ pub fn decode_audio_track(path: &Path) -> Result<Option<(Vec<f32>, u16, u32)>> {
 /// (pre-existing waveform/preflight commands and unsupported streaming codecs).
 /// Playback and workspace preload use [`StreamingAudioSource`] instead.
 pub fn decode_audio_track_legacy(path: &Path) -> Result<Option<(Vec<f32>, u16, u32)>> {
+    // These files are image cues. Symphonia's RIFF demuxer, for example, sees
+    // WEBP's RIFF container and reports that it is not WAVE. Do not probe a
+    // known image as audio; libmpv remains responsible for displaying it.
+    if is_known_image_format(path) {
+        return Ok(None);
+    }
+
     // Try symphonia first (two attempts: gapless on, then off).
     match decode_with_symphonia(path) {
         Ok(r) => return Ok(r),
         Err(e) => {
-            log::warn!(
+            log::debug!(
                 "Symphonia could not decode '{}': {e}. Trying libmpv fallback.",
                 path.display()
             );
@@ -1496,7 +1506,27 @@ pub fn decode_audio_track_legacy(path: &Path) -> Result<Option<(Vec<f32>, u16, u
     }
 
     // Fallback: transcode via libmpv (ffmpeg) → temp WAV → re-read with symphonia.
-    decode_via_mpv(path)
+    match decode_via_mpv(path) {
+        Ok(decoded) => Ok(decoded),
+        Err(error) => {
+            log::warn!(
+                "Audio decode failed for '{}': Symphonia and libmpv fallback both failed: {error:#}",
+                path.display()
+            );
+            Err(error)
+        }
+    }
+}
+
+fn is_known_image_format(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg"
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------
