@@ -244,6 +244,8 @@ snapshot rather than probing files on every render.
 The transport bar's global fullscreen control lists physical display outputs,
 shows or hides them, and assigns a monitor to an output. It controls physical
 display windows; network destinations remain explicitly routed outputs.
+On Windows, physical output windows do not appear on the taskbar; the main
+Qlisa window remains there.
 
 With an ASIO backend, Settings > Audio can route preview to a different stereo
 pair of the already-open main stream. The pair must exist and must differ from

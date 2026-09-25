@@ -953,6 +953,12 @@ impl ApplicationHandler<OutputCommand> for OutputApp {
             })
             .with_inner_size(LogicalSize::new(1920u32, 1080u32));
 
+        #[cfg(target_os = "windows")]
+        let attrs = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs.with_skip_taskbar(true)
+        };
+
         let window = match el.create_window(attrs) {
             Ok(w)  => Arc::new(w),
             Err(e) => {
