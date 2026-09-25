@@ -3127,11 +3127,17 @@ fn mix_stream(
             if loops > 0 {
                 if loops != u32::MAX { voice.inner.loops_remaining.fetch_sub(1, Ordering::Relaxed); }
                 voice.has_looped.store(true, Ordering::Relaxed);
-                if !source.is_seamless_looping() {
-                    source.request_loop_seek_rt(0);
-                    voice.reset_stream_cursor();
+                if source.is_trimmed_looping() {
+                    // The producer has already appended the next trimmed pass
+                    // to the ring. Keep its PCM and interpolation cursor.
+                    frame_pos = source.trim_loop_start();
+                } else {
+                    if !source.is_seamless_looping() {
+                        source.request_loop_seek_rt(0);
+                        voice.reset_stream_cursor();
+                    }
+                    frame_pos = 0;
                 }
-                frame_pos = 0;
             } else {
                 voice.set_stopped();
                 let _ = status_prod.try_push(AudioStatus::Completed { voice_id: voice.id });
@@ -3684,6 +3690,102 @@ mod tests {
         }
     }
 
+    fn write_trim_loop_fixture(path: &std::path::Path) {
+        use std::io::Write;
+        let sr = 48_000_u32;
+        let frames = sr as usize;
+        let bytes = (frames * 4) as u32;
+        let mut file = std::fs::File::create(path).expect("create trim WAV");
+        file.write_all(b"RIFF").unwrap(); file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap(); file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap(); file.write_all(&2_u16.to_le_bytes()).unwrap();
+        file.write_all(&sr.to_le_bytes()).unwrap(); file.write_all(&(sr * 4).to_le_bytes()).unwrap();
+        file.write_all(&4_u16.to_le_bytes()).unwrap(); file.write_all(&16_u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap(); file.write_all(&bytes.to_le_bytes()).unwrap();
+        for frame in 0..frames {
+            let t = frame as f64 / sr as f64;
+            let (frequency, phase) = if (0.025..0.05).contains(&t) { (400.0, t - 0.025) } else { (220.0, t) };
+            let pcm = ((0.25 + 0.10 * (phase * frequency * std::f64::consts::TAU).sin()) * i16::MAX as f64).round() as i16;
+            file.write_all(&pcm.to_le_bytes()).unwrap(); file.write_all(&pcm.to_le_bytes()).unwrap();
+        }
+    }
+
+    fn run_trimmed_loop_fixture(path: &std::path::Path, format: &str) -> (u64, u64, u64, u64, f32, f32, u64) {
+        use ringbuf::traits::Consumer;
+        use std::time::{Duration, Instant};
+        const START: u64 = 1_200;
+        const END: u64 = 2_400;
+        const REPEATS: u32 = 100;
+        const FRAMES: usize = 48;
+        let info = crate::cue::media_decode::probe_audio_track(path).unwrap().unwrap();
+        let source = StreamingAudioSource::start(path.to_path_buf(), info).unwrap();
+        source.enable_seamless_loop();
+        let prebuffer_deadline = Instant::now() + Duration::from_secs(10);
+        while (!source.is_ready() || source.buffered_samples() <= (END as usize * 2))
+            && Instant::now() < prebuffer_deadline { std::thread::sleep(Duration::from_millis(2)); }
+        assert!(source.buffered_samples() > END as usize * 2, "{format}: fixture did not prebuffer stale post-trim PCM");
+        assert!(source.enable_trimmed_loop(START, END));
+        assert!(!source.is_seamless_looping(), "{format}: trimmed mode must replace full-file mode");
+        let voice = Arc::new(Voice::new_stream(Arc::clone(&source), 1.0, 0.0));
+        voice.set_playing();
+        voice.frame_pos.store(START, Ordering::Relaxed);
+        voice.inner.loops_remaining.store(REPEATS, Ordering::Relaxed);
+        unsafe { *voice.inner.end_frame.get() = Some(END); }
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        let feeds: Arc<Mutex<Vec<InputFeed>>> = Arc::new(Mutex::new(Vec::new()));
+        let (_, mut commands) = HeapRb::<AudioCommand>::new(16).split();
+        let (mut statuses, mut status_cons) = HeapRb::<AudioStatus>::new(4096).split();
+        let master = Arc::new(std::sync::atomic::AtomicU32::new(f32::to_bits(1.0)));
+        let period = Arc::new(std::sync::atomic::AtomicU32::new(FRAMES as u32));
+        let mut output = vec![0.0_f32; FRAMES * 2];
+        let mut program = vec![0.0_f32; FRAMES * 2];
+        let taps = empty_program_audio_taps();
+        let ready_deadline = Instant::now() + Duration::from_secs(10);
+        let target_samples = 4 * 48_000 * 2;
+        while (!source.is_ready() || source.buffered_samples() < target_samples)
+            && Instant::now() < ready_deadline { std::thread::sleep(Duration::from_millis(2)); }
+        assert!(source.is_ready() && source.buffered_samples() >= target_samples, "{format}: trimmed PCM target was not filled");
+        source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
+        let mut zero_frames = 0_u64;
+        let mut callback_events = 0_u64;
+        let mut passes = Vec::<Vec<f32>>::new();
+        let mut current = Vec::<f32>::new();
+        let mut last: Option<f32> = None;
+        let mut seam_delta = 0.0_f32;
+        let mut pass_count = 1_u64;
+        let mut next = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while voice.voice_state() != VoiceState::Stopped && Instant::now() < deadline {
+            let before = voice.inner.loops_remaining.load(Ordering::Relaxed);
+            fill_buffer(&mut output, &mut program, 2, 48_000, &pool, &feeds, &taps,
+                &mut commands, &mut statuses, &master, &period);
+            let after = voice.inner.loops_remaining.load(Ordering::Relaxed);
+            if after < before {
+                if let Some(prev) = last { seam_delta = seam_delta.max((output[0] - prev).abs()); }
+                passes.push(std::mem::take(&mut current)); pass_count += 1;
+            }
+            let still_playing = voice.voice_state() != VoiceState::Stopped;
+            for frame in output.chunks_exact(2) {
+                if still_playing && frame[0] == 0.0 && frame[1] == 0.0 { zero_frames += 1; }
+                current.push(frame[0]); last = Some(frame[0]);
+            }
+            while let Some(status) = status_cons.try_pop() {
+                if matches!(status, AudioStatus::Underrun { .. }) { callback_events += 1; }
+            }
+            next += Duration::from_millis(1);
+            if next > Instant::now() { std::thread::sleep(next - Instant::now()); }
+        }
+        assert_eq!(voice.voice_state(), VoiceState::Stopped, "{format}: loop did not finish");
+        let d = source.diagnostics();
+        let repeats = REPEATS as u64 - voice.inner.loops_remaining.load(Ordering::Relaxed) as u64;
+        let difference = passes.get(1).map(|second| passes[0].iter().zip(second).take((END - START) as usize)
+            .map(|(a, b)| (a - b).abs()).sum::<f32>() / (END - START) as f32).unwrap_or(f32::INFINITY);
+        source.cancel();
+        println!("{format}: passes={pass_count} events={callback_events} source_underruns={} diag_silence={} rendered_zero={} seam_delta={} pass_difference={}",
+            d.underruns, d.silent_frames, zero_frames, seam_delta, difference);
+        (repeats, d.underruns, d.silent_frames, zero_frames, seam_delta, difference, callback_events)
+    }
+
     /// Manual 30-minute test through the same `fill_buffer` path used by cpal.
     /// It uses a real decoder worker, an actual looping Voice, and drains the
     /// callback status ring on every block. Run with
@@ -3914,6 +4016,76 @@ mod tests {
         }
         assert!(source.is_ready(), "long file GO waited for decoder EOF");
         assert!(source.buffered_samples() > 0);
+        source.cancel();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn trimmed_wav_mp3_loops_keep_pcm_contiguous_for_100_repeats() {
+        let dir = std::env::temp_dir().join(format!("qlisa-trim-loop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("trim.wav"); let mp3 = dir.join("trim.mp3");
+        write_trim_loop_fixture(&wav);
+        let bundled_ffmpeg = std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .map(|root| root.join("Qlisa/runtime/ffmpeg.exe"))
+            .filter(|path| path.exists());
+        let path_ffmpeg = std::process::Command::new("ffmpeg").arg("-version").output()
+            .ok().filter(|output| output.status.success()).map(|_| std::path::PathBuf::from("ffmpeg"));
+        let ffmpeg = bundled_ffmpeg.or(path_ffmpeg);
+        let mut results = Vec::new();
+        let mut formats = vec![("WAV", wav.as_path())];
+        if let Some(ffmpeg) = ffmpeg {
+            let encoded = std::process::Command::new(ffmpeg).args(["-y", "-v", "error", "-i"])
+                .arg(&wav).args(["-codec:a", "libmp3lame", "-q:a", "2"]).arg(&mp3).status().unwrap();
+            assert!(encoded.success(), "ffmpeg failed to create MP3 fixture");
+            formats.push(("MP3", mp3.as_path()));
+        } else {
+            println!("TRIMMED MP3: SKIP (ffmpeg.exe is unavailable in LOCALAPPDATA and PATH)");
+        }
+        for (name, path) in formats {
+            let result = run_trimmed_loop_fixture(path, name);
+            println!("TRIMMED {name}: repeats={} underruns={} silent_frames={} rendered_zero={} seam_delta={} pass_difference={}",
+                result.0, result.1, result.2, result.3, result.4, result.5);
+            results.push((name, result));
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        for (format, (repeats, underruns, silent, zeros, seam, difference, _)) in results {
+            assert_eq!(repeats, 100, "{format}: repeat count");
+            assert_eq!(underruns, 0, "{format}: source underruns");
+            assert_eq!(silent, 0, "{format}: silent frames");
+            assert_eq!(zeros, 0, "{format}: rendered zero frames");
+            assert!(seam < 0.02, "{format}: audible click at seam ({seam})");
+            assert!(difference < 0.01, "{format}: repeated PCM differs from trimmed pass ({difference})");
+        }
+    }
+
+    #[test]
+    fn trimmed_preload_can_switch_back_to_clean_full_file_loop() {
+        use std::time::{Duration, Instant};
+        let path = std::env::temp_dir().join(format!("qlisa-loop-mode-{}.wav", uuid::Uuid::new_v4()));
+        write_trim_loop_fixture(&path);
+        let expected = crate::cue::media_decode::decode_audio_track_legacy(&path).unwrap().unwrap().0;
+        let info = crate::cue::media_decode::probe_audio_track(&path).unwrap().unwrap();
+        let source = StreamingAudioSource::start(path.clone(), info).unwrap();
+        assert!(source.enable_trimmed_loop(1_200, 2_400));
+        source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !source.is_ready() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(2)); }
+        assert!(source.is_ready(), "trim preload did not become ready");
+
+        source.enable_seamless_loop();
+        assert!(source.is_seamless_looping());
+        assert!(!source.is_trimmed_looping());
+        assert_eq!(source.requested_frame(), 0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !source.is_ready() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(2)); }
+        assert!(source.is_ready(), "full-file loop did not refill after mode switch");
+        let mut actual = [0.0_f32; 2];
+        for frame in 0..128 {
+            assert!(source.pop_frame(&mut actual), "missing full-file PCM frame {frame}");
+            assert!((actual[0] - expected[frame * 2]).abs() < 0.0001, "trim PCM leaked after mode switch at frame {frame}");
+        }
         source.cancel();
         let _ = std::fs::remove_file(path);
     }

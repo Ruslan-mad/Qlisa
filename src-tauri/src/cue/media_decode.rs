@@ -88,6 +88,9 @@ pub struct StreamingAudioSource {
     decoded_frames: AtomicU64,
     total_frames: AtomicU64,
     loop_length_exact: AtomicBool,
+    trim_loop: AtomicBool,
+    trim_loop_start: AtomicU64,
+    trim_loop_end: AtomicU64,
     eof: AtomicBool,
     ready: AtomicBool,
     /// Loop seeks resume from a smaller watermark than initial GO.
@@ -233,6 +236,9 @@ impl StreamingAudioSource {
             decoded_frames: AtomicU64::new(0),
             total_frames: AtomicU64::new(info.total_frames.unwrap_or(0)),
             loop_length_exact: AtomicBool::new(false),
+            trim_loop: AtomicBool::new(false),
+            trim_loop_start: AtomicU64::new(0),
+            trim_loop_end: AtomicU64::new(0),
             eof: AtomicBool::new(false),
             ready: AtomicBool::new(false),
             loop_rebuffer: AtomicBool::new(false),
@@ -295,6 +301,9 @@ impl StreamingAudioSource {
             decoded_frames: AtomicU64::new(frames.len() as u64),
             total_frames: AtomicU64::new(frames.len() as u64),
             loop_length_exact: AtomicBool::new(true),
+            trim_loop: AtomicBool::new(false),
+            trim_loop_start: AtomicU64::new(0),
+            trim_loop_end: AtomicU64::new(0),
             eof: AtomicBool::new(eof),
             ready: AtomicBool::new(ready),
             loop_rebuffer: AtomicBool::new(false),
@@ -391,6 +400,11 @@ impl StreamingAudioSource {
     pub fn keep_worker_for_loop(self: &Arc<Self>) {
         self.reusable.store(true, Ordering::Release);
         self.seamless_loop.store(false, Ordering::Release);
+        let was_trimmed = self.trim_loop.swap(false, Ordering::AcqRel);
+        if was_trimmed {
+            let _ = self.prepare_seek(self.requested_frame.load(Ordering::Acquire));
+            return;
+        }
         // A short non-loop source can hit EOF before the cue finishes setting
         // its loop policy. Restart only after the ring is empty; otherwise a
         // second decode would duplicate still-buffered PCM.
@@ -402,9 +416,15 @@ impl StreamingAudioSource {
         }
     }
 
-    /// Queue whole-file passes directly in the existing PCM ring. Trimmed and
-    /// sliced loops continue to use decoder seeks.
+    /// Queue whole-file passes directly in the PCM ring. Trimmed loops use
+    /// their own bounded producer window; sliced transitions still seek.
     pub fn enable_seamless_loop(self: &Arc<Self>) {
+        if self.trim_loop.swap(false, Ordering::AcqRel) {
+            self.reusable.store(true, Ordering::Release);
+            self.seamless_loop.store(true, Ordering::Release);
+            let _ = self.prepare_seek(0);
+            return;
+        }
         if self.requested_frame.load(Ordering::Acquire) != 0 {
             self.keep_worker_for_loop();
             return;
@@ -415,6 +435,37 @@ impl StreamingAudioSource {
             self.eof.store(false, Ordering::Release);
             self.request_refill();
         }
+    }
+
+    /// Feed a trimmed loop window continuously into the existing PCM ring.
+    /// The mixer owns repeat counts and only wraps its logical source cursor;
+    /// the decoder worker keeps publishing `[start, end)` passes.
+    pub fn enable_trimmed_loop(self: &Arc<Self>, start_frame: u64, end_frame: u64) -> bool {
+        if end_frame <= start_frame { return false; }
+        if self.is_trimmed_looping()
+            && self.trim_loop_start.load(Ordering::Acquire) == start_frame
+            && self.trim_loop_end.load(Ordering::Acquire) == end_frame
+        {
+            return true;
+        }
+        self.trim_loop_start.store(start_frame, Ordering::Relaxed);
+        self.trim_loop_end.store(end_frame, Ordering::Relaxed);
+        self.reusable.store(true, Ordering::Release);
+        self.seamless_loop.store(false, Ordering::Release);
+        self.trim_loop.store(true, Ordering::Release);
+        // `start_at` can already have queued PCM beyond the requested trim end.
+        // Publish a fresh generation before playback so that stale samples are
+        // discarded and the producer starts at the beginning of the loop window.
+        let _ = self.prepare_seek(start_frame);
+        true
+    }
+
+    pub fn is_trimmed_looping(&self) -> bool {
+        self.trim_loop.load(Ordering::Acquire)
+    }
+
+    pub fn trim_loop_start(&self) -> u64 {
+        self.trim_loop_start.load(Ordering::Acquire)
     }
 
     pub fn is_seamless_looping(&self) -> bool {
@@ -1409,7 +1460,7 @@ fn run_stream_job(job: StreamJob) {
         source.total_frames.store(reported_frames, Ordering::Release);
     }
     let target = source.target_threshold();
-    while source.buffered_samples() < target {
+    'fill: while source.buffered_samples() < target {
         if source.cancel.load(Ordering::Acquire)
             || source.seek_generation.load(Ordering::Acquire) != generation
         {
@@ -1439,6 +1490,26 @@ fn run_stream_job(job: StreamJob) {
                         || source.seek_generation.load(Ordering::Acquire) != generation
                     {
                         return;
+                    }
+                    if source.is_trimmed_looping()
+                        && session.frame >= source.trim_loop_end.load(Ordering::Acquire)
+                    {
+                        match stream_decoder(&source.path, true)
+                            .or_else(|_| stream_decoder(&source.path, false))
+                        {
+                            Ok(Some(decoder)) => {
+                                session.decoder = decoder;
+                                session.frame = 0;
+                                session.seek_target_frame = source.trim_loop_start.load(Ordering::Acquire);
+                                continue 'fill;
+                            }
+                            _ => {
+                                source.decode_failures.fetch_add(1, Ordering::Relaxed);
+                                source.ready.store(true, Ordering::Release);
+                                source.eof.store(true, Ordering::Release);
+                                break 'fill;
+                            }
+                        }
                     }
                     if session.frame < session.seek_target_frame {
                         session.frame += 1;
@@ -1897,6 +1968,9 @@ mod streaming_tests {
             decoded_frames: AtomicU64::new(0),
             total_frames: AtomicU64::new(0),
             loop_length_exact: AtomicBool::new(false),
+            trim_loop: AtomicBool::new(false),
+            trim_loop_start: AtomicU64::new(0),
+            trim_loop_end: AtomicU64::new(0),
             eof: AtomicBool::new(false),
             ready: AtomicBool::new(ready),
             loop_rebuffer: AtomicBool::new(false),

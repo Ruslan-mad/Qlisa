@@ -318,12 +318,20 @@ impl AudioCue {
         };
         if self.loop_count > 0 || !self.slices.is_empty() {
             if let Some(stream) = &voice.stream {
-                if self.loop_count > 0
-                    && self.slices.is_empty()
-                    && self.start_time.is_none()
-                    && self.end_time.is_none()
-                {
-                    stream.enable_seamless_loop();
+                if self.loop_count > 0 && self.slices.is_empty() {
+                    if self.start_time.is_none() && self.end_time.is_none() {
+                        stream.enable_seamless_loop();
+                    } else {
+                        let start = self.start_time
+                            .map(|time| (time.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
+                            .unwrap_or(0);
+                        let end = self.end_time
+                            .map(|time| (time.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
+                            .unwrap_or_else(|| stream.total_frames());
+                        if !stream.enable_trimmed_loop(start, end) {
+                            stream.keep_worker_for_loop();
+                        }
+                    }
                 } else {
                     stream.keep_worker_for_loop();
                 }
@@ -338,6 +346,13 @@ impl AudioCue {
             let end_frame = (end.as_secs_f64() * self.decoded_sample_rate as f64) as u64;
             // SAFETY: written once before play_voice(); RT thread has not started yet.
             unsafe { *voice.inner.end_frame.get() = Some(end_frame); }
+        } else if self.loop_count > 0 && self.slices.is_empty() && self.start_time.is_some() {
+            if let Some(stream) = &voice.stream {
+                let end_frame = stream.total_frames();
+                if end_frame > 0 {
+                    unsafe { *voice.inner.end_frame.get() = Some(end_frame); }
+                }
+            }
         }
         if let Some(start) = self.start_time {
             let start_frame = (start.as_secs_f64() * self.decoded_sample_rate as f64) as u64;

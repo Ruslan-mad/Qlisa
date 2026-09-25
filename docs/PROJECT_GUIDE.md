@@ -212,11 +212,10 @@ Streaming starvation is counted per callback block and reported outside the
 real-time thread. The diagnostic log includes voice/cue identity, silent output
 frame count and duration, source and output rates, ring fill/capacity,
 loop-boundary proximity, and the cue's underrun-event count. Whole-file loops
-append the next decoded pass to the existing PCM ring before it drains. The
-callback keeps its interpolation lookahead across that seam and wraps the
-logical play position without seeking or resetting the ring. Trimmed and sliced
-loops keep their existing seek behavior. Slice transitions, control seeks, and
-initial playback keep the 750 ms watermark.
+append the next decoded pass to the existing PCM ring before it drains. Trimmed
+loops do the same for their `[start, end)` PCM window; the callback wraps only
+the logical play position. Slice transitions still use the seek path. Control
+seeks and initial playback keep the 750 ms watermark.
 Run the ignored 30-minute callback/decoder loop stress test with
 `cd src-tauri && cargo test streaming_audio_loop_wall_clock_30m -- --ignored --nocapture`.
 Set `QLISA_AUDIO_STRESS_SECONDS` to a smaller number for a smoke run. The test
@@ -232,8 +231,10 @@ the Voice still Playing. Peak decode time was 8,744 µs; maximum refill wait was
 1,000 µs. During a 25-minute resource sample, RSS moved from 26.2 to 26.4 MB,
 private memory from 10.0 to 10.1–10.2 MB, and process CPU reached 16.56 s.
 Short MP3 stress and bit-exact repeated-sample checks also passed. These results
-cover whole-file loops. Trimmed and sliced loops retain their previous seek
-behavior and are not seamless-loop claims.
+cover whole-file loops. A paced `fill_buffer` regression also checks 100 trimmed
+WAV and MP3 repeats for underruns, silent output frames, the seam's adjacent
+sample delta, and repeated-window PCM equality. Sliced loops are not included in
+that coverage and still use decoder seeks.
 
 The Windows Qlisa application always uses the Cargo feature `asio-support`.
 Build or run the Windows app with an ASIO-enabled command; do not omit ASIO.
