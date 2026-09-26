@@ -5,7 +5,8 @@
 //! [`AudioEngine`](crate::engine::AudioEngine) when triggered.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -28,6 +29,62 @@ use super::{
         CueType, FadeCurve, FadeSpec,
     },
 };
+
+#[derive(Clone)]
+struct SlicePcmCache {
+    ranges: Vec<(u64, u64)>,
+    samples: Arc<Vec<f32>>,
+    offsets: Vec<u64>,
+    _reservation: Arc<SlicePcmCacheReservation>,
+}
+
+struct SlicePcmCacheState {
+    ready: bool,
+    cache: Option<SlicePcmCache>,
+    fallback_reason: Option<String>,
+}
+
+const SLICE_PCM_CACHE_GLOBAL_MAX_BYTES: usize = 128 * 1024 * 1024;
+const SLICE_PCM_PRELOAD_WORKER_MAX: usize = 4;
+const SLICE_PCM_PRELOAD_QUEUE_MAX: usize = 64;
+static SLICE_PCM_CACHE_BYTES: AtomicUsize = AtomicUsize::new(0);
+type SlicePcmPreloadJob = Box<dyn FnOnce() + Send + 'static>;
+static SLICE_PCM_PRELOAD_QUEUE: std::sync::OnceLock<Option<crossbeam_channel::Sender<SlicePcmPreloadJob>>> = std::sync::OnceLock::new();
+
+struct SlicePcmCacheReservation(usize);
+impl Drop for SlicePcmCacheReservation {
+    fn drop(&mut self) { SLICE_PCM_CACHE_BYTES.fetch_sub(self.0, Ordering::AcqRel); }
+}
+
+fn reserve_slice_pcm_bytes(bytes: usize) -> Option<Arc<SlicePcmCacheReservation>> {
+    let mut current = SLICE_PCM_CACHE_BYTES.load(Ordering::Acquire);
+    loop {
+        let next = current.checked_add(bytes)?;
+        if next > SLICE_PCM_CACHE_GLOBAL_MAX_BYTES { return None; }
+        match SLICE_PCM_CACHE_BYTES.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Some(Arc::new(SlicePcmCacheReservation(bytes))),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+fn enqueue_slice_pcm_preload(job: SlicePcmPreloadJob) -> Result<(), String> {
+    let queue = SLICE_PCM_PRELOAD_QUEUE.get_or_init(|| {
+        let (sender, receiver) = crossbeam_channel::bounded::<SlicePcmPreloadJob>(SLICE_PCM_PRELOAD_QUEUE_MAX);
+        let mut workers = 0;
+        for index in 0..SLICE_PCM_PRELOAD_WORKER_MAX {
+            let receiver = receiver.clone();
+            if std::thread::Builder::new().name(format!("qlisa-slice-preload-{index}")).spawn(move || {
+                while let Ok(job) = receiver.recv() { job(); }
+            }).is_ok() { workers += 1; }
+        }
+        (workers > 0).then_some(sender)
+    }).as_ref().ok_or_else(|| "slice PCM preload workers could not start".to_string())?;
+    queue.try_send(job).map_err(|error| match error {
+        crossbeam_channel::TrySendError::Full(_) => "slice PCM preload queue is full".to_string(),
+        crossbeam_channel::TrySendError::Disconnected(_) => "slice PCM preload workers stopped".to_string(),
+    })
+}
 
 // ---------------------------------------------------------------------------
 // AudioCue
@@ -99,6 +156,7 @@ pub struct AudioCue {
     /// retained only for legacy/test injection.
     stream_path: Option<PathBuf>,
     stream_source: Option<Arc<crate::cue::media_decode::StreamingAudioSource>>,
+    slice_pcm_cache: Arc<(Mutex<SlicePcmCacheState>, Condvar)>,
     decoded_channels: u16,
     decoded_sample_rate: u32,
     /// The voice ID currently in use, if any.
@@ -193,6 +251,7 @@ impl AudioCue {
             decoded_samples: None,
             stream_path: None,
             stream_source: None,
+            slice_pcm_cache: Arc::new((Mutex::new(SlicePcmCacheState { ready: true, cache: None, fallback_reason: None }), Condvar::new())),
             decoded_channels: 2,
             decoded_sample_rate: 44100,
             active_voice_id: None,
@@ -238,6 +297,7 @@ impl AudioCue {
                 start_frame: s * sr / 1000,
                 end_frame: e * sr / 1000,
                 play_count: count,
+                pcm_offset_frames: None,
             })
             .collect();
         crate::engine::voice::SliceProgram::new(segments)
@@ -285,8 +345,42 @@ impl AudioCue {
     /// `tick()` once the pre-wait timer has expired.
     fn start_audio_action(&mut self, context: &CueContext) -> Result<()> {
         let gain = crate::cue::types::db_to_linear(self.volume_db) as f32;
+        let slice_program = self.build_slice_program();
+        let cached_slice_pcm = if slice_program.is_some() && self.decoded_samples.is_none() {
+            let (lock, ready) = &*self.slice_pcm_cache;
+            let mut state = lock.lock().map_err(|_| anyhow!("slice PCM preload state is unavailable"))?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !state.ready {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(anyhow!("AudioCue '{}': slice media is still being prepared; retry GO", self.name));
+                }
+                let (next_state, timeout) = ready.wait_timeout(state, remaining)
+                    .map_err(|_| anyhow!("slice PCM preload worker failed"))?;
+                state = next_state;
+                if timeout.timed_out() && !state.ready {
+                    return Err(anyhow!("AudioCue '{}': slice media is still being prepared; retry GO", self.name));
+                }
+            }
+            let expected_ranges = slice_program.as_ref().map(|program| program.segments.iter()
+                .map(|segment| (segment.start_frame, segment.end_frame)).collect::<Vec<_>>()).unwrap_or_default();
+            let matching_cache = state.cache.clone().filter(|cache| cache.ranges == expected_ranges);
+            if matching_cache.is_none() {
+                let reason = if state.cache.is_some() { "slice ranges changed after preload" }
+                    else { state.fallback_reason.as_deref().unwrap_or("slice PCM cache is unavailable") };
+                log::warn!("AudioCue '{}' ({}) uses streaming slice seek fallback: {reason}", self.name, self.id);
+            }
+            matching_cache
+        } else { None };
+        let mut slice_pcm_offsets = None;
         let mut voice = if let Some(samples) = &self.decoded_samples {
             Voice::new(Arc::clone(samples), self.decoded_channels, self.decoded_sample_rate, gain, self.pan)
+        } else if let Some(cache) = cached_slice_pcm {
+            slice_pcm_offsets = Some(cache.offsets);
+            let mut voice = Voice::new(cache.samples, self.decoded_channels, self.decoded_sample_rate, gain, self.pan);
+            let reservation: Arc<dyn std::any::Any + Send + Sync> = cache._reservation;
+            voice.pcm_keepalive = Some(reservation);
+            voice
         } else {
             let path = self
                 .stream_path
@@ -316,6 +410,9 @@ impl AudioCue {
                 }
             }
         };
+        if voice.stream.is_none() {
+            if let Some(source) = self.stream_source.take() { source.cancel(); }
+        }
         if self.loop_count > 0 || !self.slices.is_empty() {
             if let Some(stream) = &voice.stream {
                 if self.loop_count > 0 && self.slices.is_empty() {
@@ -328,7 +425,15 @@ impl AudioCue {
                         let end = self.end_time
                             .map(|time| (time.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
                             .unwrap_or_else(|| stream.total_frames());
-                        if !stream.enable_trimmed_loop(start, end) {
+                        let configured = if stream.is_trimmed_looping()
+                            && stream.trim_loop_start() == start
+                            && stream.trim_loop_end() == end
+                        {
+                            stream.restart_trimmed_loop(start, end)
+                        } else {
+                            stream.enable_trimmed_loop(start, end)
+                        };
+                        if !configured {
                             stream.keep_worker_for_loop();
                         }
                     }
@@ -362,7 +467,12 @@ impl AudioCue {
         // Slice program (QLab slices): resolved against the clip window in
         // frames.  When active it owns all boundaries — loop_count/end_frame
         // are ignored by the callback.
-        if let Some(program) = self.build_slice_program() {
+        if let Some(mut program) = self.build_slice_program() {
+            if let Some(offsets) = slice_pcm_offsets {
+                for (segment, offset) in program.segments.iter_mut().zip(offsets) {
+                    segment.pcm_offset_frames = Some(offset);
+                }
+            }
             voice.frame_pos.store(
                 program.segments[0].start_frame,
                 std::sync::atomic::Ordering::Relaxed,
@@ -566,6 +676,7 @@ impl Cue for AudioCue {
         duration: std::time::Duration,
     ) {
         self.decoded_samples = Some(samples);
+        self.slice_pcm_cache = Arc::new((Mutex::new(SlicePcmCacheState { ready: true, cache: None, fallback_reason: None }), Condvar::new()));
         self.stream_path = None;
         if let Some(stream) = self.stream_source.take() { stream.cancel(); }
         self.decoded_channels = channels;
@@ -580,12 +691,69 @@ impl Cue for AudioCue {
         sample_rate: u32,
         duration: Option<Duration>,
     ) {
-        self.stream_path = Some(path);
-        if let Some(stream) = self.stream_source.take() { stream.cancel(); }
+        self.stream_path = Some(path.clone());
         self.decoded_samples = None;
         self.decoded_channels = channels.max(1);
         self.decoded_sample_rate = sample_rate.max(1);
         self.cached_duration = duration.filter(|d| !d.is_zero());
+        let ranges = self.build_slice_program().map(|program| program.segments.iter()
+            .map(|segment| (segment.start_frame, segment.end_frame)).collect::<Vec<_>>());
+        self.slice_pcm_cache = Arc::new((Mutex::new(SlicePcmCacheState { ready: ranges.is_none(), cache: None, fallback_reason: None }), Condvar::new()));
+        if let Some(ranges) = ranges {
+            let frames = ranges.iter().try_fold(0_u64, |sum, (start, end)| sum.checked_add(end.saturating_sub(*start)));
+            let requested_bytes = frames.and_then(|frames| frames.checked_mul(channels as u64 * std::mem::size_of::<f32>() as u64))
+                .and_then(|bytes| usize::try_from(bytes).ok());
+            let preload = requested_bytes.filter(|bytes| *bytes <= crate::cue::media_decode::SLICE_PCM_CACHE_MAX_BYTES)
+                .and_then(|bytes| reserve_slice_pcm_bytes(bytes).map(|reservation| (bytes, reservation)));
+            let reason = if requested_bytes.is_none() {
+                Some("requested slice cache size overflowed".to_string())
+            } else if requested_bytes.is_some_and(|bytes| bytes > crate::cue::media_decode::SLICE_PCM_CACHE_MAX_BYTES) {
+                Some("unique slice PCM exceeds the 64 MiB per-cue cache limit".to_string())
+            } else if preload.is_none() {
+                Some(format!("global slice PCM cache budget of {} MiB is full", SLICE_PCM_CACHE_GLOBAL_MAX_BYTES / (1024 * 1024)))
+            } else { None };
+            if let Some((_bytes, reservation)) = preload {
+                let cache_slot = Arc::clone(&self.slice_pcm_cache);
+                let path = path.clone();
+                let job: SlicePcmPreloadJob = Box::new(move || {
+                match crate::cue::media_decode::decode_slice_ranges(&path, crate::cue::media_decode::AudioStreamInfo {
+                    channels, sample_rate, total_frames: duration.map(|d| (d.as_secs_f64() * sample_rate as f64) as u64),
+                }, &ranges) {
+                    Ok(Some((samples, offsets))) => {
+                        if let Ok(mut state) = cache_slot.0.lock() {
+                            state.cache = Some(SlicePcmCache { ranges, samples: Arc::new(samples), offsets, _reservation: reservation });
+                            state.fallback_reason = None;
+                            state.ready = true;
+                            cache_slot.1.notify_all();
+                        }
+                    }
+                    Ok(None) => {
+                        if let Ok(mut state) = cache_slot.0.lock() {
+                            let frames = ranges.iter().try_fold(0_u64, |sum, (start, end)| sum.checked_add(end.saturating_sub(*start)));
+                            let bytes = frames.and_then(|frames| frames.checked_mul(channels as u64 * std::mem::size_of::<f32>() as u64));
+                            state.fallback_reason = Some(if bytes.is_some_and(|bytes| bytes > crate::cue::media_decode::SLICE_PCM_CACHE_MAX_BYTES as u64) {
+                                format!("unique slice PCM exceeds {} MiB cache limit", crate::cue::media_decode::SLICE_PCM_CACHE_MAX_BYTES / (1024 * 1024))
+                            } else { "decoder could not provide all requested slice frames".into() });
+                            state.ready = true; cache_slot.1.notify_all();
+                        }
+                    }
+                    Err(error) => {
+                        if let Ok(mut state) = cache_slot.0.lock() {
+                            state.fallback_reason = Some(format!("slice PCM decode failed: {error:#}"));
+                            state.ready = true; cache_slot.1.notify_all();
+                        }
+                    }
+                }
+                });
+                if let Err(reason) = enqueue_slice_pcm_preload(job) {
+                    log::warn!("Could not queue AudioCue slice PCM preload: {reason}");
+                    if let Ok(mut state) = self.slice_pcm_cache.0.lock() { state.fallback_reason = Some(reason); state.ready = true; self.slice_pcm_cache.1.notify_all(); }
+                }
+            } else if let Some(reason) = reason {
+                if let Ok(mut state) = self.slice_pcm_cache.0.lock() { state.fallback_reason = Some(reason); state.ready = true; self.slice_pcm_cache.1.notify_all(); }
+            }
+        }
+        if let Some(stream) = self.stream_source.take() { stream.cancel(); }
     }
 
     fn go(&mut self, context: &CueContext) -> Result<()> {
@@ -616,6 +784,7 @@ impl Cue for AudioCue {
         if let Err(e) = self.start_audio_action(context) {
             self.state = CueState::Standby;
             self.started_at = None;
+            self.in_pre_wait = false;
             return Err(e);
         }
         Ok(())
@@ -817,7 +986,13 @@ impl Cue for AudioCue {
 
     fn tick(&mut self, context: &CueContext) -> Result<()> {
         if self.in_pre_wait && self.elapsed() >= self.pre_wait {
-            self.start_audio_action(context)?;
+            if let Err(error) = self.start_audio_action(context) {
+                self.state = CueState::Standby;
+                self.started_at = None;
+                self.action_started_at = None;
+                self.in_pre_wait = false;
+                return Err(error);
+            }
         }
         self.tick_eof_fade(context);
         Ok(())
@@ -936,6 +1111,12 @@ impl Cue for AudioCue {
         let samples = self.decoded_samples.as_ref()?;
         let duration = self.cached_duration?;
         Some((Arc::clone(samples), self.decoded_channels, self.decoded_sample_rate, duration))
+    }
+
+    fn extract_preloaded_stream(
+        &self,
+    ) -> Option<(PathBuf, u16, u32, Option<Duration>)> {
+        Some((self.stream_path.clone()?, self.decoded_channels, self.decoded_sample_rate, self.cached_duration))
     }
 
     fn waveform_peaks(&self, bins: usize) -> Option<Vec<f32>> {
@@ -1225,6 +1406,147 @@ mod level_matrix_tests {
         let rebuilt = factory.from_json(json).unwrap();
 
         assert_eq!(rebuilt.serialize()["level_matrix"], serde_json::Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod sliced_cache_go_tests {
+    use super::*;
+    use crate::cue::traits::Cue;
+    use crate::engine::{
+        dmx_engine::DmxEngine,
+        engine_traits::OutputEngineApi,
+        output_engine::ContentRequest,
+        ring_command::VoiceId,
+    };
+    use anyhow::Result;
+    use crossbeam_channel::unbounded;
+
+    struct NullOutput;
+    impl OutputEngineApi for NullOutput {
+        fn show_content(&self, _req: ContentRequest<'_>) -> Result<VoiceId> { anyhow::bail!("unused") }
+        fn stop_content(&self, _voice_id: VoiceId, _visual_fade_ms: u32, _audio_fade_ms: u32) {}
+        fn hard_stop_current(&self) {}
+        fn panic_stop(&self) {}
+        fn video_audio_voice(&self, _voice_id: VoiceId) -> Option<VoiceId> { None }
+        fn resync_audio_to_video(&self, _voice_id: VoiceId) {}
+        fn get_voice_opacity(&self, _voice_id: VoiceId) -> f32 { 1.0 }
+        fn set_voice_opacity(&self, _voice_id: VoiceId, _opacity: f32) {}
+        fn stop_voice(&self, _voice_id: VoiceId, _fade_ms: u32) -> Result<()> { Ok(()) }
+        fn pause_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
+        fn resume_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
+        fn seek_voice_ms(&self, _voice_id: VoiceId, _position_ms: u64) {}
+        fn show_text_overlay(&self, _ass_text: &str, _screen_index: Option<u32>) {}
+        fn clear_text_overlay(&self) {}
+        fn begin_eof_fade_out(&self, _voice_id: VoiceId, _fade_ms: u32) -> bool { false }
+        fn devamp_voice(&self, _voice_id: VoiceId, _stop_at_end: bool) {}
+        fn start_preloaded(&self, _voice_id: VoiceId) -> bool { false }
+    }
+
+    #[test]
+    fn ordinary_go_uses_preloaded_slice_cache() {
+        use crate::cue::types::SliceList;
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("qlisa-slice-go-{}.wav", Uuid::new_v4()));
+        let sr = 48_000_u32;
+        let frames = sr as usize;
+        let bytes = (frames * 4) as u32;
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"RIFF").unwrap(); file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap(); file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap(); file.write_all(&2_u16.to_le_bytes()).unwrap();
+        file.write_all(&sr.to_le_bytes()).unwrap(); file.write_all(&(sr * 4).to_le_bytes()).unwrap();
+        file.write_all(&4_u16.to_le_bytes()).unwrap(); file.write_all(&16_u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap(); file.write_all(&bytes.to_le_bytes()).unwrap();
+        for frame in 0..frames {
+            let value = ((frame as f64 * 440.0 * std::f64::consts::TAU / sr as f64).sin() * 12_000.0) as i16;
+            file.write_all(&value.to_le_bytes()).unwrap(); file.write_all(&value.to_le_bytes()).unwrap();
+        }
+        drop(file);
+
+        let mut cue = AudioCue::new();
+        cue.file_path = Some(path.clone());
+        cue.slices = SliceList { markers: vec![25, 50], play_counts: vec![1, 101, 1] };
+        cue.accept_preloaded_stream(path.clone(), 2, sr, Some(Duration::from_secs(1)));
+        let audio = crate::engine::audio_engine::AudioEngine::new_silent(&crate::preferences::MachineAudioConfig::default());
+        let (events, _receiver) = unbounded();
+        let context = CueContext::new(
+            audio, Arc::new(NullOutput), events, 0, Vec::new(), None, None, Vec::new(),
+            Arc::new(DmxEngine::new()), Vec::new(), Vec::new(), Vec::new(), 256,
+        );
+        cue.go(&context).expect("normal AudioCue GO");
+        assert!(cue.voice_id().is_some(), "GO submitted an audio voice");
+        assert!(cue.stream_source.is_none(), "GO selected the preloaded PCM cache and retired its stream");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn go_times_out_instead_of_silently_using_seek_loop_while_cache_is_pending() {
+        use crate::cue::types::SliceList;
+        let mut cue = AudioCue::new();
+        cue.stream_path = Some(PathBuf::from("not-opened-before-cache-read.wav"));
+        cue.decoded_sample_rate = 48_000;
+        cue.cached_duration = Some(Duration::from_secs(1));
+        cue.slices = SliceList { markers: vec![25, 50], play_counts: vec![1, 101, 1] };
+        cue.slice_pcm_cache = Arc::new((Mutex::new(SlicePcmCacheState { ready: false, cache: None, fallback_reason: None }), Condvar::new()));
+        let audio = crate::engine::audio_engine::AudioEngine::new_silent(&crate::preferences::MachineAudioConfig::default());
+        let (events, _receiver) = unbounded();
+        let context = CueContext::new(
+            audio, Arc::new(NullOutput), events, 0, Vec::new(), None, None, Vec::new(),
+            Arc::new(DmxEngine::new()), Vec::new(), Vec::new(), Vec::new(), 256,
+        );
+        let error = cue.go(&context).expect_err("GO must not enter the broken seek fallback while cache is pending");
+        assert!(error.to_string().contains("still being prepared"));
+        assert!(cue.voice_id().is_none());
+    }
+
+    #[test]
+    fn pre_wait_cache_timeout_rolls_cue_back_to_standby() {
+        use crate::cue::types::SliceList;
+        let mut cue = AudioCue::new();
+        cue.stream_path = Some(PathBuf::from("not-opened-before-cache-read.wav"));
+        cue.decoded_sample_rate = 48_000;
+        cue.cached_duration = Some(Duration::from_secs(1));
+        cue.slices = SliceList { markers: vec![25, 50], play_counts: vec![1, 101, 1] };
+        cue.pre_wait = Duration::from_millis(1);
+        cue.slice_pcm_cache = Arc::new((Mutex::new(SlicePcmCacheState { ready: false, cache: None, fallback_reason: None }), Condvar::new()));
+        let audio = crate::engine::audio_engine::AudioEngine::new_silent(&crate::preferences::MachineAudioConfig::default());
+        let (events, _receiver) = unbounded();
+        let context = CueContext::new(
+            audio, Arc::new(NullOutput), events, 0, Vec::new(), None, None, Vec::new(),
+            Arc::new(DmxEngine::new()), Vec::new(), Vec::new(), Vec::new(), 256,
+        );
+        cue.go(&context).unwrap();
+        assert_eq!(cue.state(), CueState::Running);
+        assert!(cue.in_pre_wait);
+        std::thread::sleep(Duration::from_millis(2));
+        let error = cue.tick(&context).expect_err("expired pre-wait must report pending media");
+        assert!(error.to_string().contains("still being prepared"));
+        assert_eq!(cue.state(), CueState::Standby);
+        assert!(!cue.in_pre_wait);
+        assert!(cue.started_at.is_none());
+    }
+
+    #[test]
+    fn active_voice_keeps_slice_cache_reservation_alive_after_cache_drop() {
+        let reservation = reserve_slice_pcm_bytes(256).expect("small reservation should fit");
+        let weak_reservation = Arc::downgrade(&reservation);
+        let samples = Arc::new(vec![0.0_f32; 128]);
+        let cache = SlicePcmCache {
+            ranges: vec![(0, 64)],
+            samples: Arc::clone(&samples),
+            offsets: vec![0],
+            _reservation: Arc::clone(&reservation),
+        };
+        let mut voice = Voice::new(cache.samples.clone(), 2, 48_000, 1.0, 0.0);
+        voice.pcm_keepalive = Some(cache._reservation.clone());
+
+        drop(cache);
+        drop(reservation);
+        assert!(weak_reservation.upgrade().is_some(), "active voice must retain the memory lease");
+
+        drop(voice);
+        assert!(weak_reservation.upgrade().is_none(), "lease must release after the active voice drops");
     }
 }
 

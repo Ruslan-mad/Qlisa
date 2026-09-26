@@ -2784,7 +2784,12 @@ fn fill_buffer(
             if let Some(prog) = unsafe { &mut *slices_ptr } {
                 // Sliced playback: the program owns loop/advance decisions.
                 let seg = prog.segments[prog.current];
-                if int_pos >= seg.end_frame.min(total_frames) {
+                let seg_end = if seg.pcm_offset_frames.is_some() {
+                    seg.end_frame
+                } else {
+                    seg.end_frame.min(total_frames)
+                };
+                if int_pos >= seg_end {
                     let req = voice
                         .inner
                         .devamp_request
@@ -2848,9 +2853,26 @@ fn fill_buffer(
             // --- Sample with linear interpolation (handles rate != 1.0) --------
             let int_pos = frame_pos_f as u64;
             let frac = (frame_pos_f - int_pos as f64) as f32;
-            let base = int_pos as usize * voice_channels;
-            // Clamp next frame to last valid frame for interpolation at end.
-            let next = (int_pos + 1).min(total_frames.saturating_sub(1)) as usize * voice_channels;
+            let (base, next) = unsafe {
+                if let Some(program) = (&*slices_ptr).as_ref() {
+                    let segment = program.segments[program.current];
+                    if let Some(offset) = segment.pcm_offset_frames {
+                        let segment_frames = segment.end_frame.saturating_sub(segment.start_frame);
+                        let local = int_pos.saturating_sub(segment.start_frame).min(segment_frames.saturating_sub(1));
+                        let base_frame = offset.saturating_add(local) as usize;
+                        let next_frame = offset.saturating_add((local + 1).min(segment_frames.saturating_sub(1))) as usize;
+                        (base_frame * voice_channels, next_frame * voice_channels)
+                    } else {
+                        let base = int_pos as usize * voice_channels;
+                        let next = (int_pos + 1).min(total_frames.saturating_sub(1)) as usize * voice_channels;
+                        (base, next)
+                    }
+                } else {
+                    let base = int_pos as usize * voice_channels;
+                    let next = (int_pos + 1).min(total_frames.saturating_sub(1)) as usize * voice_channels;
+                    (base, next)
+                }
+            };
 
             let sample_l = voice.samples[base] + (voice.samples[next] - voice.samples[base]) * frac;
             let sample_r = if voice_channels > 1 {
@@ -3710,6 +3732,27 @@ mod tests {
         }
     }
 
+    fn maybe_dump_loop_wav(kind: &str, format: &str, stereo_pcm: &[f32]) {
+        let Some(root) = std::env::var_os("QLISA_AUDIO_TEST_DUMP_DIR") else { return; };
+        use std::io::Write;
+        let root = std::path::PathBuf::from(root);
+        std::fs::create_dir_all(&root).expect("create optional audio dump directory");
+        let path = root.join(format!("{kind}-{format}.wav"));
+        let data_bytes = (stereo_pcm.len() * 2) as u32;
+        let mut file = std::fs::File::create(&path).expect("create optional rendered WAV");
+        file.write_all(b"RIFF").unwrap(); file.write_all(&(36_u32 + data_bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap(); file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap(); file.write_all(&2_u16.to_le_bytes()).unwrap();
+        file.write_all(&48_000_u32.to_le_bytes()).unwrap(); file.write_all(&(48_000_u32 * 4).to_le_bytes()).unwrap();
+        file.write_all(&4_u16.to_le_bytes()).unwrap(); file.write_all(&16_u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap(); file.write_all(&data_bytes.to_le_bytes()).unwrap();
+        for sample in stereo_pcm {
+            let pcm = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+            file.write_all(&pcm.to_le_bytes()).unwrap();
+        }
+        println!("Optional rendered audio dump: {}", path.display());
+    }
+
     fn run_trimmed_loop_fixture(path: &std::path::Path, format: &str) -> (u64, u64, u64, u64, f32, f32, u64) {
         use ringbuf::traits::Consumer;
         use std::time::{Duration, Instant};
@@ -3750,6 +3793,7 @@ mod tests {
         let mut callback_events = 0_u64;
         let mut passes = Vec::<Vec<f32>>::new();
         let mut current = Vec::<f32>::new();
+        let mut rendered_pcm = Vec::<f32>::with_capacity((END - START) as usize * (REPEATS as usize + 1) * 2);
         let mut last: Option<f32> = None;
         let mut seam_delta = 0.0_f32;
         let mut pass_count = 1_u64;
@@ -3759,6 +3803,10 @@ mod tests {
             let before = voice.inner.loops_remaining.load(Ordering::Relaxed);
             fill_buffer(&mut output, &mut program, 2, 48_000, &pool, &feeds, &taps,
                 &mut commands, &mut statuses, &master, &period);
+            let target_frames = (END - START) as usize * (REPEATS as usize + 1);
+            let captured_frames = rendered_pcm.len() / 2;
+            let take_frames = target_frames.saturating_sub(captured_frames).min(FRAMES);
+            rendered_pcm.extend_from_slice(&output[..take_frames * 2]);
             let after = voice.inner.loops_remaining.load(Ordering::Relaxed);
             if after < before {
                 if let Some(prev) = last { seam_delta = seam_delta.max((output[0] - prev).abs()); }
@@ -3780,6 +3828,7 @@ mod tests {
         let repeats = REPEATS as u64 - voice.inner.loops_remaining.load(Ordering::Relaxed) as u64;
         let difference = passes.get(1).map(|second| passes[0].iter().zip(second).take((END - START) as usize)
             .map(|(a, b)| (a - b).abs()).sum::<f32>() / (END - START) as f32).unwrap_or(f32::INFINITY);
+        maybe_dump_loop_wav("trimmed", format, &rendered_pcm);
         source.cancel();
         println!("{format}: passes={pass_count} events={callback_events} source_underruns={} diag_silence={} rendered_zero={} seam_delta={} pass_difference={}",
             d.underruns, d.silent_frames, zero_frames, seam_delta, difference);
@@ -4024,25 +4073,11 @@ mod tests {
     fn trimmed_wav_mp3_loops_keep_pcm_contiguous_for_100_repeats() {
         let dir = std::env::temp_dir().join(format!("qlisa-trim-loop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let wav = dir.join("trim.wav"); let mp3 = dir.join("trim.mp3");
+        let wav = dir.join("trim.wav");
         write_trim_loop_fixture(&wav);
-        let bundled_ffmpeg = std::env::var_os("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .map(|root| root.join("Qlisa/runtime/ffmpeg.exe"))
-            .filter(|path| path.exists());
-        let path_ffmpeg = std::process::Command::new("ffmpeg").arg("-version").output()
-            .ok().filter(|output| output.status.success()).map(|_| std::path::PathBuf::from("ffmpeg"));
-        let ffmpeg = bundled_ffmpeg.or(path_ffmpeg);
         let mut results = Vec::new();
-        let mut formats = vec![("WAV", wav.as_path())];
-        if let Some(ffmpeg) = ffmpeg {
-            let encoded = std::process::Command::new(ffmpeg).args(["-y", "-v", "error", "-i"])
-                .arg(&wav).args(["-codec:a", "libmp3lame", "-q:a", "2"]).arg(&mp3).status().unwrap();
-            assert!(encoded.success(), "ffmpeg failed to create MP3 fixture");
-            formats.push(("MP3", mp3.as_path()));
-        } else {
-            println!("TRIMMED MP3: SKIP (ffmpeg.exe is unavailable in LOCALAPPDATA and PATH)");
-        }
+        let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_slice.mp3");
+        let formats = [("WAV", wav.as_path()), ("MP3", mp3.as_path())];
         for (name, path) in formats {
             let result = run_trimmed_loop_fixture(path, name);
             println!("TRIMMED {name}: repeats={} underruns={} silent_frames={} rendered_zero={} seam_delta={} pass_difference={}",
@@ -4088,6 +4123,158 @@ mod tests {
         }
         source.cancel();
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn end_only_trim_re_go_restarts_at_first_pcm_frame() {
+        use std::time::{Duration, Instant};
+        let path = std::env::temp_dir().join(format!("qlisa-trim-rego-{}.wav", uuid::Uuid::new_v4()));
+        write_trim_loop_fixture(&path);
+        let info = crate::cue::media_decode::probe_audio_track(&path).unwrap().unwrap();
+        let (expected, _) = crate::cue::media_decode::decode_slice_ranges(&path, info, &[(0, 1)])
+            .unwrap().expect("first frame decode");
+        let source = StreamingAudioSource::start_at(path.clone(), info, 0).unwrap();
+        assert!(source.enable_trimmed_loop(0, 2_400)); // end_time only: trim start is zero
+        source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while (!source.is_ready() || source.buffered_samples() < 800) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(source.is_ready() && source.buffered_samples() >= 800, "trim producer did not prebuffer");
+        let mut sample = [0.0_f32; 2];
+        for _ in 0..300 { assert!(source.pop_frame(&mut sample)); }
+
+        assert!(source.restart_trimmed_loop(0, 2_400), "new GO must re-arm the same trim window");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while (!source.is_ready() || source.buffered_samples() < 2) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(source.is_ready() && source.pop_frame(&mut sample), "trim PCM was not refilled after re-GO");
+        assert!((sample[0] - expected[0]).abs() < 0.0001, "re-GO started at stale PCM {}, expected {}", sample[0], expected[0]);
+        assert!((sample[1] - expected[1]).abs() < 0.0001);
+        source.cancel();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn sliced_pcm_cache_wav_mp3_100_repeats_without_gaps() {
+        use ringbuf::traits::Consumer;
+        use std::time::{Duration, Instant};
+        const START: u64 = 1_200;
+        const END: u64 = 2_400;
+        const PLAYS: u32 = 101;
+        const FRAMES: usize = 48;
+        let dir = std::env::temp_dir().join(format!("qlisa-sliced-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = dir.join("slice.wav");
+        write_trim_loop_fixture(&wav);
+        let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_slice.mp3");
+        let formats = [("WAV", wav.as_path()), ("MP3", mp3.as_path())];
+        for (format, path) in formats {
+            let info = crate::cue::media_decode::probe_audio_track(path).unwrap().unwrap();
+            let (reference, _) = crate::cue::media_decode::decode_slice_ranges(
+                path, info, &[(0, info.total_frames.expect("fixture frame count"))],
+            ).unwrap().expect("full reference decode");
+            let (compact, offsets) = crate::cue::media_decode::decode_slice_ranges(path, info, &[(START, END)])
+                .unwrap().expect("slice PCM cache should fit");
+            assert_eq!(offsets, vec![0]);
+            let voice = Arc::new(Voice::new(Arc::new(compact), info.channels, info.sample_rate, 1.0, 0.0));
+            set_slices(&voice, &[(START, END, PLAYS)]);
+            unsafe {
+                let program = (*voice.inner.slices.get()).as_mut().unwrap();
+                program.segments[0].pcm_offset_frames = Some(offsets[0]);
+            }
+            voice.set_playing();
+            let pool = rt_pool(vec![Arc::clone(&voice)]);
+            let feeds: Arc<Mutex<Vec<InputFeed>>> = Arc::new(Mutex::new(Vec::new()));
+            let (_, mut commands) = HeapRb::<AudioCommand>::new(16).split();
+            let (mut statuses, mut status_cons) = HeapRb::<AudioStatus>::new(4096).split();
+            let master = Arc::new(std::sync::atomic::AtomicU32::new(f32::to_bits(1.0)));
+            let period = Arc::new(std::sync::atomic::AtomicU32::new(FRAMES as u32));
+            let mut output = vec![0.0_f32; FRAMES * 2]; let mut program = output.clone();
+            let taps = empty_program_audio_taps();
+            let mut rendered = Vec::with_capacity((END - START) as usize * PLAYS as usize * 2);
+            let mut underrun_events = 0_u64;
+            let mut next = Instant::now(); let deadline = Instant::now() + Duration::from_secs(15);
+            while voice.voice_state() != VoiceState::Stopped && Instant::now() < deadline {
+                fill_buffer(&mut output, &mut program, 2, 48_000, &pool, &feeds, &taps,
+                    &mut commands, &mut statuses, &master, &period);
+                let target_samples = (END - START) as usize * PLAYS as usize * 2;
+                let remaining_samples = target_samples.saturating_sub(rendered.len());
+                rendered.extend_from_slice(&output[..remaining_samples.min(output.len())]);
+                while let Some(status) = status_cons.try_pop() {
+                    if matches!(status, AudioStatus::Underrun { .. }) { underrun_events += 1; }
+                }
+                next += Duration::from_millis(1);
+                if next > Instant::now() { std::thread::sleep(next - Instant::now()); }
+            }
+            let mut expected = Vec::with_capacity(rendered.len());
+            let slice_frames = END - START;
+            let ratio = info.sample_rate as f64 / 48_000.0;
+            for output_frame in 0..(rendered.len() / 2) {
+                let phase = (output_frame as f64 * ratio) % slice_frames as f64;
+                let local = phase.floor() as u64;
+                let fraction = (phase - local as f64) as f32;
+                let base = (START + local) as usize * info.channels as usize;
+                let next = (START + (local + 1).min(slice_frames - 1)) as usize * info.channels as usize;
+                for channel in 0..2 {
+                    let a = reference[base + channel];
+                    let b = reference[next + channel];
+                    expected.push(a + (b - a) * fraction);
+                }
+            }
+            let scale = rendered.iter().zip(&expected).map(|(a,b)| a*b).sum::<f32>()
+                / expected.iter().map(|sample| sample*sample).sum::<f32>();
+            let max_error = rendered.iter().zip(&expected).map(|(a,b)| (a-b*scale).abs()).fold(0.0_f32, f32::max);
+            let silent_frames = rendered.chunks_exact(2).filter(|frame| frame[0] == 0.0 && frame[1] == 0.0).count();
+            let zero_frames = rendered.chunks_exact(2).filter(|frame| frame[0] == 0.0 && frame[1] == 0.0).count();
+            let max_delta = rendered.chunks_exact(2).map(|frame| frame[0]).collect::<Vec<_>>()
+                .windows(2).map(|pair| (pair[1] - pair[0]).abs()).fold(0.0_f32, f32::max);
+            let expected_delta = expected.chunks_exact(2).map(|frame| frame[0]).collect::<Vec<_>>()
+                .windows(2).map(|pair| (pair[1] - pair[0]).abs()).fold(0.0_f32, f32::max);
+            maybe_dump_loop_wav("sliced", format, &rendered);
+            println!("SLICED CACHE {format}: active_frames={} expected={} underruns={} silent_frames={} zero_frames={} scale={} max_error={} max_delta={} expected_delta={}", rendered.len()/2, expected.len()/2, underrun_events, silent_frames, zero_frames, scale, max_error, max_delta, expected_delta*scale);
+            assert_eq!(voice.voice_state(), VoiceState::Stopped, "{format}: finite slice timed out");
+            assert_eq!(rendered.len(), expected.len(), "{format}: rendered active frame count");
+            assert_eq!(underrun_events, 0, "{format}: callback underruns");
+            assert_eq!(silent_frames, 0, "{format}: silent frames while active");
+            assert_eq!(zero_frames, 0, "{format}: rendered zero frames while active");
+            assert!(max_error < 0.0002, "{format}: output does not follow exact repeated slice PCM");
+            assert!((max_delta - expected_delta*scale).abs() < 0.0001, "{format}: unexpected seam discontinuity");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compact_slice_program_preserves_devamp_and_next_segment() {
+        use crate::engine::voice::{DEVAMP_CONTINUE, DEVAMP_STOP};
+        // Compact PCM contains [source 10,20) then [source 30,40). The RT
+        // playhead must remain in source coordinates while reads use offsets.
+        let samples = Arc::new((0..20).flat_map(|frame| [frame as f32 / 20.0; 2]).collect());
+        let voice = Arc::new(Voice::new(samples, 2, 48_000, 1.0, 0.0));
+        set_slices(&voice, &[(10, 20, u32::MAX), (30, 40, 1)]);
+        unsafe {
+            let program = (*voice.inner.slices.get()).as_mut().unwrap();
+            program.segments[0].pcm_offset_frames = Some(0);
+            program.segments[1].pcm_offset_frames = Some(10);
+        }
+        voice.inner.devamp_request.store(DEVAMP_CONTINUE, Ordering::Relaxed);
+        voice.set_playing();
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        let statuses = run_block(&pool, None);
+        assert_eq!(voice.voice_state(), VoiceState::Stopped, "Devamp Continue must advance and finish the next segment");
+        assert!(statuses.iter().any(|status| matches!(status, AudioStatus::Completed { voice_id } if *voice_id == voice.id)));
+        assert_eq!(voice.frame_pos.load(Ordering::Relaxed), 40);
+
+        let stopped = Arc::new(Voice::new(Arc::new(vec![0.25; 20]), 2, 48_000, 1.0, 0.0));
+        set_slices(&stopped, &[(10, 20, u32::MAX)]);
+        unsafe { (*stopped.inner.slices.get()).as_mut().unwrap().segments[0].pcm_offset_frames = Some(0); }
+        stopped.inner.devamp_request.store(DEVAMP_STOP, Ordering::Relaxed);
+        stopped.set_playing();
+        let statuses = run_block(&rt_pool(vec![Arc::clone(&stopped)]), None);
+        assert_eq!(stopped.voice_state(), VoiceState::Stopped, "Devamp Stop must stop at the cached segment boundary");
+        assert!(statuses.iter().any(|status| matches!(status, AudioStatus::Completed { voice_id } if *voice_id == stopped.id)));
+        assert_eq!(stopped.frame_pos.load(Ordering::Relaxed), 20);
     }
 
     // The SR ratio (e.g. 44100/48000) is not exactly representable in f64, so
@@ -5156,6 +5343,7 @@ mod tests {
                     start_frame: s,
                     end_frame: e,
                     play_count: c,
+                    pcm_offset_frames: None,
                 })
                 .collect(),
         )

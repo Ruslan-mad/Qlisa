@@ -591,6 +591,14 @@ pub trait Cue: Send {
     ) {
     }
 
+    /// Return stream metadata so a cue rebuild can restore media that is not
+    /// held as a whole-file PCM buffer.
+    fn extract_preloaded_stream(
+        &self,
+    ) -> Option<(std::path::PathBuf, u16, u32, Option<Duration>)> {
+        None
+    }
+
     /// Returns the active audio voice ID if this cue is currently playing
     /// through the audio engine.  Non-audio cues return `None` (default).
     /// Used by the event loop to correlate [`crate::engine::ring_command::AudioStatus::Completed`]

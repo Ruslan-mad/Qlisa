@@ -214,8 +214,15 @@ frame count and duration, source and output rates, ring fill/capacity,
 loop-boundary proximity, and the cue's underrun-event count. Whole-file loops
 append the next decoded pass to the existing PCM ring before it drains. Trimmed
 loops do the same for their `[start, end)` PCM window; the callback wraps only
-the logical play position. Slice transitions still use the seek path. Control
-seeks and initial playback keep the 750 ms watermark.
+the logical play position. Audio Cue slices use a background-prepared compact
+PCM cache of their unique ranges (up to 64 MiB per cue and 128 MiB shared),
+prepared by at most four workers at once. Then the existing
+callback-owned SliceProgram handles repeats, next segments, and Devamp without
+seeking. If the cache is over the cap or decoding fails, playback keeps the
+streaming seek fallback and logs a warning with the cue and reason. GO waits up
+to three seconds for a pending slice preload, then returns a retryable error
+instead of silently starting the seek fallback. Control seeks and initial
+streaming playback keep the 750 ms watermark.
 Run the ignored 30-minute callback/decoder loop stress test with
 `cd src-tauri && cargo test streaming_audio_loop_wall_clock_30m -- --ignored --nocapture`.
 Set `QLISA_AUDIO_STRESS_SECONDS` to a smaller number for a smoke run. The test
@@ -234,7 +241,12 @@ Short MP3 stress and bit-exact repeated-sample checks also passed. These results
 cover whole-file loops. A paced `fill_buffer` regression also checks 100 trimmed
 WAV and MP3 repeats for underruns, silent output frames, the seam's adjacent
 sample delta, and repeated-window PCM equality. Sliced loops are not included in
-that coverage and still use decoder seeks.
+that coverage. A paced cache-path `fill_buffer` regression checks 100 WAV and
+MP3 repeats for exact active frame count, zero underrun events, zero silent or
+zero-valued active frames, and PCM continuity against the decoded slice window.
+Separate tests cover Devamp Continue/Stop, advancing to the next segment, and
+the memory-cap/overlap fallback. The cache-path test uses software-rendered PCM;
+it cannot establish speaker-level audibility on physical output devices.
 
 The Windows Qlisa application always uses the Cargo feature `asio-support`.
 Build or run the Windows app with an ASIO-enabled command; do not omit ASIO.

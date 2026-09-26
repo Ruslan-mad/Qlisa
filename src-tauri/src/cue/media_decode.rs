@@ -33,6 +33,8 @@ use uuid::Uuid;
 pub const STREAM_TARGET_SECONDS: usize = 4;
 pub const STREAM_READY_MILLIS: usize = 750;
 pub const STREAM_MAX_SECONDS: usize = 10;
+/// Maximum compact PCM retained for a sliced cue's unique ranges.
+pub const SLICE_PCM_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Four workers keep several simultaneous cues from starving each other while
 /// the queue remains bounded. A source still owns at most one active job.
 const STREAM_WORKERS: usize = 4;
@@ -460,12 +462,30 @@ impl StreamingAudioSource {
         true
     }
 
+    /// Reset the producer cursor for a new GO on an already configured trim.
+    /// This is a control-path operation; loop boundaries in the mixer never
+    /// call it and continue to consume the queued PCM without resetting the ring.
+    pub fn restart_trimmed_loop(self: &Arc<Self>, start_frame: u64, end_frame: u64) -> bool {
+        if end_frame <= start_frame { return false; }
+        self.trim_loop_start.store(start_frame, Ordering::Relaxed);
+        self.trim_loop_end.store(end_frame, Ordering::Relaxed);
+        self.reusable.store(true, Ordering::Release);
+        self.seamless_loop.store(false, Ordering::Release);
+        self.trim_loop.store(true, Ordering::Release);
+        let _ = self.prepare_seek(start_frame);
+        true
+    }
+
     pub fn is_trimmed_looping(&self) -> bool {
         self.trim_loop.load(Ordering::Acquire)
     }
 
     pub fn trim_loop_start(&self) -> u64 {
         self.trim_loop_start.load(Ordering::Acquire)
+    }
+
+    pub fn trim_loop_end(&self) -> u64 {
+        self.trim_loop_end.load(Ordering::Acquire)
     }
 
     pub fn is_seamless_looping(&self) -> bool {
@@ -1389,6 +1409,84 @@ fn interleaved(decoded: AudioBufferRef<'_>) -> Vec<f32> {
     out
 }
 
+/// Decode unique source frame ranges into one bounded compact PCM buffer.
+/// Returns one frame offset per requested range, preserving input order.
+/// `Ok(None)` means the ranges exceed the memory cap or the decoder cannot
+/// supply every requested frame; callers can keep the streaming seek path.
+pub fn decode_slice_ranges(
+    path: &Path,
+    expected: AudioStreamInfo,
+    ranges: &[(u64, u64)],
+) -> Result<Option<(Vec<f32>, Vec<u64>)>> {
+    if ranges.is_empty() || expected.channels == 0 { return Ok(None); }
+    if ranges.iter().any(|(start, end)| end <= start) { return Ok(None); }
+    let mut unique = ranges.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.windows(2).any(|pair| pair[1].0 < pair[0].1) {
+        return Ok(None);
+    }
+    let channels = expected.channels as usize;
+    let total_frames = unique.iter().try_fold(0_u64, |sum, (start, end)| {
+        sum.checked_add(end - start)
+    });
+    let Some(total_frames) = total_frames else { return Ok(None); };
+    let Some(total_samples) = total_frames.checked_mul(channels as u64) else { return Ok(None); };
+    let Some(total_bytes) = total_samples.checked_mul(std::mem::size_of::<f32>() as u64) else { return Ok(None); };
+    if total_bytes > SLICE_PCM_CACHE_MAX_BYTES as u64 { return Ok(None); }
+    let total_samples = usize::try_from(total_samples).ok();
+    let Some(total_samples) = total_samples else { return Ok(None); };
+
+    let Some(mut decoder) = stream_decoder(path, true).or_else(|_| stream_decoder(path, false))? else {
+        return Ok(None);
+    };
+    if decoder.channels != expected.channels || decoder.sample_rate != expected.sample_rate {
+        return Ok(None);
+    }
+    let mut compact = Vec::with_capacity(total_samples);
+    let mut source_frame = 0_u64;
+    let mut range_index = 0_usize;
+    let max_end = unique.last().map(|range| range.1).unwrap_or(0);
+    'decode: loop {
+        match decoder.format.next_packet() {
+            Ok(packet) if packet.track_id() == decoder.track_id => {
+                let decoded = match decoder.decoder.decode(&packet) {
+                    Ok(decoded) => decoded,
+                    Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if decoded.spec().channels.count() != channels { return Ok(None); }
+                let pcm = interleaved(decoded);
+                for frame in pcm.chunks_exact(channels) {
+                    while range_index < unique.len() && source_frame >= unique[range_index].1 {
+                        range_index += 1;
+                    }
+                    if range_index < unique.len() && source_frame >= unique[range_index].0 {
+                        compact.extend_from_slice(frame);
+                    }
+                    source_frame += 1;
+                    if source_frame >= max_end { break 'decode; }
+                }
+            }
+            Ok(_) => {}
+            Err(symphonia::core::errors::Error::IoError(_)) => break,
+            Err(symphonia::core::errors::Error::ResetRequired) => decoder.decoder.reset(),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if compact.len() != total_samples { return Ok(None); }
+    let offsets_by_range: Vec<u64> = unique.iter().scan(0_u64, |offset, (start, end)| {
+        let current = *offset;
+        *offset = offset.saturating_add(end - start);
+        Some(current)
+    }).collect();
+    let offsets = ranges.iter().map(|range| {
+        let index = unique.binary_search(range).expect("range was deduplicated");
+        offsets_by_range[index]
+    }).collect();
+    Ok(Some((compact, offsets)))
+}
+
 fn push_stream_frame(
     source: &StreamingAudioSource,
     ring: &PcmRing,
@@ -1923,7 +2021,7 @@ fn decode_via_mpv(path: &Path) -> Result<Option<(Vec<f32>, u16, u32)>> {
 
 #[cfg(test)]
 mod tests {
-    use super::observe_decoded_audio_format;
+    use super::{observe_decoded_audio_format, AudioStreamInfo, SLICE_PCM_CACHE_MAX_BYTES};
 
     #[test]
     fn decoded_format_prefers_actual_decoder_spec() {
@@ -1942,6 +2040,17 @@ mod tests {
         let error = observe_decoded_audio_format(&mut format, 44_100, 2)
             .expect_err("a single PCM buffer cannot carry two sample rates");
         assert!(error.to_string().contains("changed format"));
+    }
+
+    #[test]
+    fn slice_cache_cap_and_overlap_fall_back_before_decode() {
+        let path = std::path::Path::new("missing-file-should-not-be-opened.wav");
+        let info = AudioStreamInfo { channels: 2, sample_rate: 48_000, total_frames: None };
+        let too_many_frames = (SLICE_PCM_CACHE_MAX_BYTES as u64 / 8) + 1;
+        assert!(super::decode_slice_ranges(path, info, &[(0, too_many_frames)])
+            .unwrap().is_none(), "over-cap slices should use streaming fallback before allocation or file I/O");
+        assert!(super::decode_slice_ranges(path, info, &[(0, 100), (50, 150)])
+            .unwrap().is_none(), "overlapping compact ranges must be rejected explicitly");
     }
 }
 

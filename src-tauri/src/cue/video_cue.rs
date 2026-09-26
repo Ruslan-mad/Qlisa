@@ -375,6 +375,7 @@ impl VideoCue {
                     start_frame: s * sr / 1000,
                     end_frame: e * sr / 1000,
                     play_count: count,
+                    pcm_offset_frames: None,
                 })
                 .collect();
             if let Some(program) = crate::engine::voice::SliceProgram::new(segments) {

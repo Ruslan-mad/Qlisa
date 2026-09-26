@@ -59,6 +59,26 @@ fn restore_decoded_audio_recursive(
     }
 }
 
+type PreservedStream = (std::path::PathBuf, u16, u32, Option<Duration>);
+
+fn collect_stream_audio_recursive(cue: &dyn Cue, out: &mut HashMap<Uuid, PreservedStream>) {
+    if let Some(stream) = cue.extract_preloaded_stream() {
+        out.insert(cue.id(), stream);
+    }
+    if let Some(children) = cue.child_cues() {
+        for child in children { collect_stream_audio_recursive(child.as_ref(), out); }
+    }
+}
+
+fn restore_stream_audio_recursive(cue: &mut dyn Cue, streams: &HashMap<Uuid, PreservedStream>) {
+    if let Some((path, channels, sample_rate, duration)) = streams.get(&cue.id()) {
+        cue.accept_preloaded_stream(path.clone(), *channels, *sample_rate, *duration);
+    }
+    if let Some(children) = cue.child_cues_mut() {
+        for child in children { restore_stream_audio_recursive(child.as_mut(), streams); }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DTO types
 // ---------------------------------------------------------------------------
@@ -1638,9 +1658,12 @@ fn prepare_bulk_update(
     }
     let mut preserved_audio = HashMap::new();
     collect_decoded_audio_recursive(cue, &mut preserved_audio);
+    let mut preserved_streams = HashMap::new();
+    collect_stream_audio_recursive(cue, &mut preserved_streams);
     let runtime = cue.runtime_state();
     let mut rebuilt = registry.from_json(json).map_err(|e| e.to_string())?;
     restore_decoded_audio_recursive(rebuilt.as_mut(), &preserved_audio);
+    restore_stream_audio_recursive(rebuilt.as_mut(), &preserved_streams);
     rebuilt.restore_runtime_state(runtime);
 
     Ok(PreparedBulkUpdate {
@@ -3262,7 +3285,7 @@ pub fn duplicate_cue(
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
 
-    let (json, preserved_audio) = {
+    let (json, preserved_audio, preserved_stream) = {
         let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
         let cue = cue_list.get_recursive(&id).ok_or("Cue not found")?;
         let mut j = cue.serialize();
@@ -3271,12 +3294,16 @@ pub fn duplicate_cue(
         // Transfer decoded audio so the copy is playable immediately,
         // without requiring a background re-decode.
         let audio = cue.extract_decoded_audio();
-        (j, audio)
+        let stream = cue.extract_preloaded_stream();
+        (j, audio, stream)
     };
 
     let mut new_cue = registry.from_json(json).map_err(|e| e.to_string())?;
     if let Some((samples, channels, sample_rate, duration)) = preserved_audio {
         new_cue.accept_preloaded_audio(samples, channels, sample_rate, duration);
+    }
+    if let Some((path, channels, sample_rate, duration)) = preserved_stream {
+        new_cue.accept_preloaded_stream(path, channels, sample_rate, duration);
     }
     let new_id = new_cue.id().to_string();
 
@@ -3517,8 +3544,10 @@ pub fn update_cue(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
                     let mut preserved_audio = HashMap::new();
+                    let mut preserved_streams = HashMap::new();
                     if old_file_path == new_file_path {
                         collect_decoded_audio_recursive(cue, &mut preserved_audio);
+                        collect_stream_audio_recursive(cue, &mut preserved_streams);
                     }
                     if should_rename_target {
                         if let Some(name) =
@@ -3530,6 +3559,7 @@ pub fn update_cue(
                     let runtime = cue.runtime_state();
                     let mut new_cue = registry.from_json(json).map_err(|e| e.to_string())?;
                     restore_decoded_audio_recursive(new_cue.as_mut(), &preserved_audio);
+                    restore_stream_audio_recursive(new_cue.as_mut(), &preserved_streams);
                     new_cue.restore_runtime_state(runtime);
                     new_cue
                 };

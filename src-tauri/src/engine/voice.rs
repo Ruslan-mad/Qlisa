@@ -108,6 +108,9 @@ pub struct SliceSegment {
     pub end_frame: u64,
     /// Times to play this segment; `u32::MAX` = vamp (infinite).
     pub play_count: u32,
+    /// Optional offset into a compact per-slice PCM voice. Source timeline
+    /// frames above remain unchanged for cue progress and Devamp behavior.
+    pub pcm_offset_frames: Option<u64>,
 }
 
 /// Playback program for a sliced voice. Built once before `play_voice()`;
@@ -411,6 +414,11 @@ pub struct Voice {
     /// Fully decoded PCM samples, interleaved (L, R, L, R, …).
     pub samples: Arc<Vec<f32>>,
 
+    /// Optional owner for resources that must live as long as `samples`.
+    /// Sliced PCM uses this to keep its global memory reservation alive while
+    /// an active voice still holds the decoded data.
+    pub pcm_keepalive: Option<Arc<dyn std::any::Any + Send + Sync>>,
+
     /// Bounded streaming source for file/video audio.  The callback consumes
     /// it without locks; `samples` remains populated only for the isolated
     /// legacy/test path.
@@ -480,6 +488,7 @@ impl Voice {
         Self {
             id: Uuid::new_v4(),
             samples,
+            pcm_keepalive: None,
             stream: None,
             channels,
             sample_rate,
@@ -520,6 +529,7 @@ impl Voice {
         Self {
             id: Uuid::new_v4(),
             samples: Arc::new(Vec::new()),
+            pcm_keepalive: None,
             stream: Some(stream.clone()),
             channels: stream.channels,
             sample_rate: stream.sample_rate,
@@ -559,6 +569,7 @@ impl Voice {
         Self {
             id: Uuid::new_v4(),
             samples: Arc::new(Vec::new()),
+            pcm_keepalive: None,
             stream: None,
             channels: 2,
             sample_rate,
