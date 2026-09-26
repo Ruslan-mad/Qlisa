@@ -642,6 +642,15 @@ other unsupported cue types are not Number actions. GO, Pause/Resume, Stop/Hard
 Stop, timeline seek, trim, and relink are supported. Device timing still needs
 rehearsal on the target system.
 
+For a directly trimmed Audio master, the Number clock uses the effective
+`[start_time_ms, end_time_ms)` range, and the master waveform maps through the
+same source bounds. Trim edits update the timeline duration and waveform range;
+clearing trim restores the full file. The Number timeline keeps full-file
+waveform peaks in its existing media asset map and reuses them while the cue ID
+and file path stay the same. Video filmstrips are refreshed for a changed trim
+range. Group waveforms are recomposed from the retained leaf peaks after trim
+edits. Nested media in Group masters uses the same effective-range calculation.
+
 ## Active Cues sidebar
 
 The main window shows Active Cues and Inspector in one mutually exclusive

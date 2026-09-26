@@ -22,6 +22,15 @@ export interface NumberAudioSegment {
 
 type WaveformAsset = WaveformData | null | undefined;
 
+/** Full-file waveform peaks remain valid when only a cue's trim range changes. */
+export function canReuseNumberWaveformAsset(
+  asset: { cueId: string; filePath: string | null; waveform: WaveformAsset } | null | undefined,
+  cueId: string,
+  filePath: string | null | undefined,
+): boolean {
+  return Boolean(filePath && asset?.waveform && asset.cueId === cueId && asset.filePath === filePath);
+}
+
 /**
  * Source-file duration, not the playable Cue duration. `get_cue(Number)`
  * serializes media children with `cached_duration_ms`; Cue-list summaries use
@@ -56,7 +65,7 @@ function cueMediaDurationMs(cue: CueSummary): number {
   return endMs - startMs;
 }
 
-function cueSourceWindow(cue: CueSummary): { startMs: number; endMs: number } {
+export function cueSourceWindow(cue: CueSummary): { startMs: number; endMs: number } {
   const timed = cue as CueSummary & { start_time_ms?: number | null; end_time_ms?: number | null };
   const fileDuration = cueFileDurationMs(cue);
   const startMs = Math.min(fileDuration, Math.max(0, timed.start_time_ms ?? 0));
@@ -224,7 +233,7 @@ export function snapNumberTime(value: number, duration: number, edges: number[],
 export function numberMasterDuration(cue: NumberCueData): number {
   const master = cue.children.find((child) => child.id === cue.number_master_id);
   if (master?.cue_type === "group") return groupDurationMs(master);
-  return Math.max(0, master?.duration_ms ?? master?.file_duration_ms ?? master?.cached_duration_ms ?? 0);
+  return master ? cueMediaDurationMs(master) : 0;
 }
 
 export function numberActionDuration(child: NumberVisualAction, masterDuration: number): number {

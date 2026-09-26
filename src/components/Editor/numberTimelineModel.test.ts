@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyNumberDragSnap, composeGroupWaveform, groupAudioSegments, groupDurationMs, numberActionDuration, numberActionLooped, numberChildTimelineStartMs, numberDragRange, numberMasterDuration, numberPreviewItem, numberPreviewSourcePosition, numberPreviewSourceWindow, numberVisualActions, shouldRetainNumberPreviewAsset, snapNumberTime } from "./numberTimelineModel";
+import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, groupAudioSegments, groupDurationMs, numberActionDuration, numberActionLooped, numberChildTimelineStartMs, numberDragRange, numberMasterDuration, numberPreviewItem, numberPreviewSourcePosition, numberPreviewSourceWindow, numberVisualActions, shouldRetainNumberPreviewAsset, snapNumberTime } from "./numberTimelineModel";
+import { mediaSourceMsAtPixel } from "./timelineViewModel";
 
 const child = (id: string, type: "video" | "image", extra: Record<string, unknown> = {}) => ({
   id, cue_type: type, name: id, duration_ms: 4000, file_duration_ms: 5000,
@@ -81,6 +82,79 @@ describe("numberTimelineModel", () => {
       child("master", "video", { duration_ms: undefined, file_duration_ms: null, cached_duration_ms: 2500 }),
     ] } as any;
     expect(numberMasterDuration(cue)).toBe(2500);
+  });
+
+  it("uses the effective source range for a trimmed Audio master and restores full duration when trim is removed", () => {
+    const audioMaster = (trim: Record<string, unknown> = {}) => ({
+      id: "master", cue_type: "audio", name: "master", cached_duration_ms: 10_000, ...trim,
+    });
+    const numberWith = (master: ReturnType<typeof audioMaster>) => ({ number_master_id: "master", children: [master] } as any);
+
+    // No trim, start only, end only, and both edges. The same source window
+    // drives the timeline width and maps waveform/seek positions to the file.
+    for (const [trim, duration, sourceStart, sourceEnd] of [
+      [{}, 10_000, 0, 10_000],
+      [{ start_time_ms: 2_000 }, 8_000, 2_000, 10_000],
+      [{ end_time_ms: 7_000 }, 7_000, 0, 7_000],
+      [{ start_time_ms: 2_000, end_time_ms: 7_000 }, 5_000, 2_000, 7_000],
+    ] as const) {
+      const master = audioMaster(trim);
+      expect(numberMasterDuration(numberWith(master))).toBe(duration);
+      expect(cueSourceWindow(master as any)).toEqual({ startMs: sourceStart, endMs: sourceEnd });
+    }
+    const trimmed = audioMaster({ start_time_ms: 2_000, end_time_ms: 7_000 });
+    expect(numberMasterDuration(numberWith(audioMaster()))).toBe(10_000);
+    expect(numberMasterDuration(numberWith(trimmed))).toBe(5_000);
+  });
+
+  it("maps Number-clock playhead positions to the trimmed Audio master source range", () => {
+    const master = {
+      id: "master", cue_type: "audio", name: "master", cached_duration_ms: 10_000,
+      start_time_ms: 2_000, end_time_ms: 7_000,
+    } as any;
+    const source = cueSourceWindow(master);
+    const numberDuration = numberMasterDuration({ number_master_id: "master", children: [master] } as any);
+    expect(numberDuration).toBe(5_000);
+    expect([0, 500, 1000].map((x) => mediaSourceMsAtPixel(
+      x, 1000, 0, numberDuration, 0, numberDuration, source.startMs, source.endMs,
+    ))).toEqual([2_000, 4_500, 7_000]);
+  });
+
+  it("reuses full-file waveform assets across trim edits but invalidates them when cue or file changes", () => {
+    const waveform = { peaks: [0.1, 0.2], rms: [0.05, 0.1], file_duration_s: 2 };
+    const asset = { cueId: "audio-a", filePath: "media/a.wav", waveform };
+    expect(canReuseNumberWaveformAsset(asset, "audio-a", "media/a.wav")).toBe(true);
+    expect(canReuseNumberWaveformAsset(asset, "audio-a", "media/replaced.wav")).toBe(false);
+    expect(canReuseNumberWaveformAsset(asset, "audio-b", "media/a.wav")).toBe(false);
+    expect(canReuseNumberWaveformAsset({ ...asset, waveform: null }, "audio-a", "media/a.wav")).toBe(false);
+    expect(canReuseNumberWaveformAsset(asset, "audio-a", null)).toBe(false);
+  });
+
+  it("recomposes a Group waveform from the reused full-file asset after a trim edit", () => {
+    const waveform = { peaks: [0.1, 0.2, 0.3, 0.4], rms: [0.01, 0.02, 0.03, 0.04], file_duration_s: 4 };
+    const assets = { a: waveform };
+    const makeGroup = (start: number, end: number) => ({
+      id: "group", cue_type: "group", group_mode: "simultaneous", duration_ms: null,
+      children: [{ id: "a", cue_type: "audio", name: "a", cached_duration_ms: 4_000, start_time_ms: start, end_time_ms: end }],
+    } as any);
+    const first = composeGroupWaveform(makeGroup(0, 2_000), assets, 2)!;
+    const afterTrim = composeGroupWaveform(makeGroup(2_000, 4_000), assets, 2)!;
+    expect(first.peaks).toEqual([0.1, 0.2]);
+    expect(afterTrim.peaks).toEqual([0.3, 0.4]);
+    expect(afterTrim.file_duration_s).toBe(2);
+  });
+
+  it("repeats a trimmed Number action across the Number duration using only its source span", () => {
+    const master = child("master", "video", { cue_type: "audio", duration_ms: 10_000, file_duration_ms: 10_000 });
+    const loop = child("loop", "video", {
+      cue_type: "audio", cached_duration_ms: 10_000, start_time_ms: 2_000,
+      end_time_ms: 3_000, loop_count: 4294967295,
+    });
+    const cue = { number_master_id: "master", children: [master, loop] } as any;
+    const action = numberVisualActions(cue)[0];
+    expect(numberActionDuration(action, 10_000)).toBe(1_000);
+    expect([action.timeline_start_ms, action.timeline_end_ms, action.looped]).toEqual([0, 10_000, true]);
+    expect(numberPreviewSourceWindow(action)).toEqual({ startMs: 2_000, endMs: 3_000 });
   });
 
   it("moves a block without changing its duration", () => {
