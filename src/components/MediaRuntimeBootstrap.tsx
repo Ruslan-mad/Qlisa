@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { useLocale } from "../i18n";
-import { getMediaRuntimeStatus, prepareMediaRuntime } from "../lib/commands";
+import { getMediaRuntimeStatus, isBackendReady, prepareMediaRuntime } from "../lib/commands";
 import type { MediaRuntimeProgress } from "../lib/types";
 
 type ViewState = "checking" | "preparing" | "error" | "ready";
@@ -19,6 +19,17 @@ export function MediaRuntimeBootstrap({ children }: { children: React.ReactNode 
     setView("preparing");
     setError("");
     try {
+      // Tauri creates the main WebView before its setup callback has finished.
+      // Do not mount App until AppState and startup services are available.
+      let backendReady = false;
+      const readinessDeadline = Date.now() + 60_000;
+      while (!backendReady) {
+        try { backendReady = await isBackendReady(); }
+        catch { /* setup may still be registering the invoke handler */ }
+        if (backendReady) break;
+        if (Date.now() >= readinessDeadline) throw new Error(t("mediaRuntimeUi.backendTimeout"));
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+      }
       if (!force && !relaunchRequired.current) {
         const current = await getMediaRuntimeStatus();
         if (current.ready) {

@@ -17,7 +17,7 @@ export const en = {
   },
   mediaRuntimeUi: {
     preparing: 'Preparing Qlisa', title: 'Media Runtime', downloading: 'Preparing media components…', downloadingFfmpeg: 'Downloading FFmpeg and ffprobe…', downloadingLibmpv: 'Downloading libmpv…', complete: 'Media components are ready.',
-    failed: 'Could not prepare Qlisa media components.', unknownError: 'Unknown error.', incomplete: 'Media components are incomplete.',
+    failed: 'Could not prepare Qlisa media components.', unknownError: 'Unknown error.', incomplete: 'Media components are incomplete.', backendTimeout: 'Qlisa startup did not finish in time. Retry to check again.',
     settings: 'Media Runtime', installed: 'Installed', missing: 'Missing', checkIntegrity: 'Check integrity', reinstall: 'Reinstall', restartWarning: 'Qlisa must restart to reinstall Media Runtime. Unsaved changes may be lost and playback will stop. Continue?',
   },
   audioBusUi: {
@@ -595,7 +595,7 @@ export const ru: TranslationDictionary = {
   },
   mediaRuntimeUi: {
     preparing: 'Подготовка Qlisa', title: 'Media Runtime', downloading: 'Подготовка медиакомпонентов…', downloadingFfmpeg: 'Загрузка FFmpeg и ffprobe…', downloadingLibmpv: 'Загрузка libmpv…', complete: 'Медиакомпоненты готовы.',
-    failed: 'Не удалось подготовить медиакомпоненты Qlisa.', unknownError: 'Неизвестная ошибка.', incomplete: 'Подготовлены не все медиакомпоненты.',
+    failed: 'Не удалось подготовить медиакомпоненты Qlisa.', unknownError: 'Неизвестная ошибка.', incomplete: 'Подготовлены не все медиакомпоненты.', backendTimeout: 'Запуск Qlisa не завершился вовремя. Нажмите «Повторить», чтобы проверить ещё раз.',
     settings: 'Media Runtime', installed: 'Установлен', missing: 'Отсутствует', checkIntegrity: 'Проверить целостность', reinstall: 'Переустановить', restartWarning: 'Для переустановки Media Runtime Qlisa перезапустится. Несохранённые изменения могут быть потеряны, воспроизведение остановится. Продолжить?',
   },
   audioBusUi: {

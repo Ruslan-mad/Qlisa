@@ -64,6 +64,7 @@ import type {
 } from "./types";
 
 export const getMediaRuntimeStatus = () => invoke<MediaRuntimeStatus>("get_media_runtime_status");
+export const isBackendReady = () => invoke<boolean>("is_backend_ready");
 export const prepareMediaRuntime = (force: boolean) => invoke<MediaRuntimeStatus>("prepare_media_runtime", { force });
 export const scheduleMediaRuntimeReinstall = () => invoke<void>("schedule_media_runtime_reinstall");
 

@@ -16,6 +16,7 @@ pub mod recovery;
 pub mod show;
 pub mod state;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use commands::{
@@ -101,6 +102,11 @@ use project_open::{PendingProjectOpens, drain_pending_project_opens};
 use state::AppState;
 use tauri::Manager;
 
+#[tauri::command]
+fn is_backend_ready(ready: tauri::State<'_, Arc<AtomicBool>>) -> bool {
+    ready.load(Ordering::Acquire)
+}
+
 /// Build and run the Tauri application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -120,6 +126,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(pending_project_opens)
+        // The frontend can start before setup finishes. Keep the main app
+        // behind a small readiness gate until AppState and startup services
+        // are fully initialized.
+        .manage(Arc::new(AtomicBool::new(false)))
         // Acquire the app-wide lock before setup. A second launch forwards its
         // arguments here, restores the existing main window, then exits.
         .plugin(tauri_plugin_single_instance::init(move |app, argv, cwd| {
@@ -580,10 +590,12 @@ pub fn run() {
                     .expect("Failed to spawn device-watchdog thread");
             }
 
+            app.state::<Arc<AtomicBool>>().store(true, Ordering::Release);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             drain_pending_project_opens,
+            is_backend_ready,
             get_media_runtime_status,
             prepare_media_runtime,
             schedule_media_runtime_reinstall,
