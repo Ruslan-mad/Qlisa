@@ -22,6 +22,8 @@
   regression evidence, and remaining device-validation risks.
 - [Audio trim loop regression](audio-trim-loop-regression.md) — PCM and video
   trim-loop behavior, regression coverage, and runtime-test limits.
+- [Audio underrun diagnostics](audio-underrun-diagnostics.md) — callback-safe
+  underrun context, reproduced cold-start evidence, and real-device test setup.
 - [Windows network runtime](windows-network-runtime.md) — NDI and FFmpeg/SRT
   runtime prerequisites and packaging notes.
 

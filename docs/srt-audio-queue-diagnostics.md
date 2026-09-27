@@ -74,3 +74,36 @@ not read or change application preferences.
 - A stable connected run should sustain near 48,000 enqueued and pipe-written
   frames per second, decoded audio PTS and output progress should track wall
   time, and the queue should have zero drops.
+
+## Real application loopback observation (2026-09-27)
+
+The same queue behavior was reproduced with the real Qlisa audio callback,
+post-master tap, network worker, FFmpeg sender, and local FFmpeg receiver. Before
+the caller connected, enqueue ran at about 48,000 frames per second while queue
+pop and pipe-write stopped. The 24,000-frame queue reached its 500 ms cap; the
+writer was blocked for 27.3 seconds. The producer kept the newest half-second
+and discarded older samples, about 240,000 frames per five seconds. Those
+samples were lost before SRT could send them. This is the configured bounded
+live-audio policy while no receiver accepts output, not a pacing defect.
+
+The caller connected at about 19:27:05 local time. The final catch-up interval
+raised the cumulative drop count to 1,430,880 frames (29.81 seconds at 48 kHz).
+By 19:27:12, enqueue, queue-pop, and pipe-write were all about 48,000 frames per
+second, the queue was 10 ms deep, and no pipe write was blocked. The cumulative
+drop count then stayed at 1,430,880; that counter is historical and does not
+mean audio was still dropping. FFmpeg receiver progress advanced after
+connection. During the later concurrent Video Cue #1 and Audio Cue #2 run, the
+receiver also continued to decode video frames and one-second audio blocks.
+The combined run passed from 19:31:46.190 to 20:01:46.459 local time
+(1,800.269 seconds). Across 360 five-second reports, the cumulative drop count
+did not increase. Sampled queue depth was 480–1,440 frames (10–30 ms); the
+24,000-frame lifetime high-water mark came from the pre-connection period and
+is not the maximum queue depth observed during this run. The receiver exited
+cleanly.
+
+The earlier 10-second test failure had a separate cause: the test harness killed
+a live caller after five seconds without decoded progress, then retried. The
+production sender reported a broken pipe after those forced disconnects. The
+harness now keeps a live caller through FFmpeg input probing, up to its overall
+20-second startup deadline. This change is test-only; the queue and sender
+pacing were not changed for that failure.

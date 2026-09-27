@@ -66,7 +66,23 @@ finite repeats, infinite looping, pause, seek, resume, and 100 start-only
 repeats. The test remains ignored by default and requires the installed Qlisa
 runtime under `%LOCALAPPDATA%\Qlisa\runtime`.
 
-No installed Windows ASIO hardware, packaged application, or manual listening
-check was used. The 30-minute playback test has not been run. These results
-validate the Rust callback and the installed headless libmpv path, not playback
-through a physical output device or the packaged release.
+The debug application also completed an actual 30-minute transport run on
+2026-09-27, from 19:31:46.190 to 20:01:46.459 (1,800.269 seconds). It used the
+ASIO-enabled build with the virtual CABLE-A device at 48 kHz, a trimmed VideoCue
+(15–45 seconds, infinite repeat), infinite WAV trim (2–28 seconds), full-file
+MP3, display output, and a local SRT receiver. An automated OSC script issued
+91 audio GOs, 31 video GOs, 90 seeks, and pause/resume and stop/start actions.
+The run recorded zero audio underruns and no warning or error logs. This was a
+transport/stability run; it did not verify 100 physical repeats of a trimmed
+cue. The 100-repeat PCM tests and headless mpv test above provide those range
+checks separately.
+
+Separate manual playback checks used one WAV cue and one MP3 cue: three seeks
+on the WAV cue and two on the MP3 cue while audio was playing. The playhead
+moved after each seek, with no yellow underrun indicator.
+
+No physical Windows ASIO hardware, speaker-level listening check, or packaged
+installer was tested. The app run used a virtual audio device. The results
+validate callback rendering, headless libmpv, and the debug app transport under
+that device; they do not establish audio quality on physical hardware or
+behavior of the packaged release.
