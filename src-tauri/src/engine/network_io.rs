@@ -581,6 +581,28 @@ pub struct SrtSenderStats {
     pub submitted_bytes: u64,
     pub failed_writes: u64,
     pub started_at_unix_ms: u64,
+    /// Audio counters describe raw samples accepted by or written to the
+    /// FFmpeg input pipe. They are not encoded or remotely received samples.
+    pub audio_enqueued_frames: u64,
+    pub audio_pipe_written_frames: u64,
+    pub audio_dropped_frames: u64,
+    pub audio_queue_frames: u64,
+    pub audio_queue_ms: u64,
+    pub audio_queue_high_water_frames: u64,
+    pub audio_pipe_write_blocked_ms: u64,
+    pub audio_pipe_write_current_blocked_ms: u64,
+    pub audio_enqueue_frames_per_second: u64,
+    pub audio_pipe_write_frames_per_second: u64,
+    /// Sample-clock positions of data submitted to and written through the
+    /// raw FFmpeg pipe. These are not FFmpeg encoder/output timestamps.
+    pub audio_input_sample_time_ms: u64,
+    pub audio_pipe_sample_time_ms: u64,
+    /// FFmpeg mux/output progress. This is output time for the muxed stream,
+    /// not an audio-only timestamp or proof of remote decoding.
+    pub ffmpeg_output_frames: Option<u64>,
+    pub ffmpeg_output_time_us: Option<u64>,
+    pub ffmpeg_progress_state: Option<String>,
+    pub ffmpeg_progress_age_ms: Option<u64>,
 }
 
 const FFMPEG_DIAGNOSTIC_LIMIT: usize = 8 * 1024;
@@ -822,28 +844,69 @@ struct SrtWriterState {
     stats: SrtSenderStats,
     last_error: Option<String>,
     pending_audio_drop_warning_frames: u64,
-    last_audio_drop_warning_at: Option<Instant>,
+    last_audio_report_at: Option<Instant>,
+    reported_enqueued_frames: u64,
+    reported_queue_pop_frames: u64,
+    reported_pipe_written_frames: u64,
+    audio_pipe_write_started_at: Option<Instant>,
 }
 
-fn report_srt_audio_drops(state: &Mutex<SrtWriterState>, dropped_frames: usize) {
-    if dropped_frames == 0 {
-        return;
-    }
+fn report_srt_audio_drops(
+    state: &Mutex<SrtWriterState>,
+    queue: &SrtAudioQueue,
+    dropped_frames: usize,
+    diagnostic: &Mutex<FfmpegDiagnostics>,
+) {
     let Ok(mut state) = state.lock() else {
         return;
     };
     state.pending_audio_drop_warning_frames = state
         .pending_audio_drop_warning_frames
         .saturating_add(dropped_frames as u64);
-    let should_warn = state
-        .last_audio_drop_warning_at
-        .map_or(true, |last| last.elapsed() >= Duration::from_secs(5));
-    if should_warn {
-        let dropped = std::mem::take(&mut state.pending_audio_drop_warning_frames);
-        state.last_audio_drop_warning_at = Some(Instant::now());
-        log::warn!(
-            "[srt-output] dropped {dropped} oldest program-audio frames to keep the queue within {SRT_AUDIO_QUEUE_MAX_MS} ms"
-        );
+    let now = Instant::now();
+    let interval = state
+        .last_audio_report_at
+        .map(|last| now.duration_since(last))
+        .unwrap_or(Duration::from_secs(5));
+    if interval < Duration::from_secs(5) {
+        return;
+    }
+    let interval_s = interval.as_secs_f64().max(0.001);
+    let interval_enqueued = queue.enqueued_frames.saturating_sub(state.reported_enqueued_frames);
+    let interval_popped = queue.dequeued_frames.saturating_sub(state.reported_queue_pop_frames);
+    let interval_written = state
+        .stats
+        .audio_pipe_written_frames
+        .saturating_sub(state.reported_pipe_written_frames);
+    let interval_dropped = std::mem::take(&mut state.pending_audio_drop_warning_frames);
+    state.last_audio_report_at = Some(now);
+    state.reported_enqueued_frames = queue.enqueued_frames;
+    state.reported_queue_pop_frames = queue.dequeued_frames;
+    state.reported_pipe_written_frames = state.stats.audio_pipe_written_frames;
+    let queued_ms = queue.queued_frames.saturating_mul(1_000) / queue.sample_rate.max(1) as usize;
+    let enqueue_fps = interval_enqueued as f64 / interval_s;
+    let queue_pop_fps = interval_popped as f64 / interval_s;
+    let pipe_write_fps = interval_written as f64 / interval_s;
+    let current_write_blocked_ms = state
+        .audio_pipe_write_started_at
+        .map(|started| started.elapsed().as_millis() as u64)
+        .unwrap_or(0);
+    let progress = diagnostic.lock().ok().map(|value| value.progress_snapshot());
+    let (output_frames, output_time_us, output_state, output_age_ms) =
+        progress.unwrap_or_default();
+    let message = format!(
+        "[srt-output] queue frames={} high-water={}frames duration={queued_ms}ms capacity={SRT_AUDIO_QUEUE_MAX_MS}ms, interval enqueue={enqueue_fps:.0}fps queue-pop={queue_pop_fps:.0}fps pipe-write={pipe_write_fps:.0}fps, cumulative dropped={}, FFmpeg=alive-at-last-health-check output frame={output_frames:?} out_time_us={output_time_us:?} progress={output_state:?} age_ms={output_age_ms:?}; pipe-write-blocked-current={current_write_blocked_ms}ms; raw audio sample-clock submitted={}ms pipe-written={}ms (not encoded audio PTS)",
+        queue.queued_frames,
+        queue.high_water_frames,
+        queue.dropped_frames,
+        queue.enqueued_frames.saturating_mul(1_000) / queue.sample_rate.max(1) as u64,
+        state.stats.audio_pipe_written_frames.saturating_mul(1_000)
+            / queue.sample_rate.max(1) as u64,
+    );
+    if interval_dropped > 0 {
+        log::warn!("{message}; dropped {interval_dropped} audio frames in this interval");
+    } else {
+        log::info!("{message}");
     }
 }
 
@@ -958,6 +1021,10 @@ struct FfmpegDiagnostics {
     rendered: String,
     pending: String,
     discarding_long_line: bool,
+    output_frames: Option<u64>,
+    output_time_us: Option<u64>,
+    progress_state: Option<String>,
+    progress_updated_at: Option<Instant>,
 }
 impl FfmpegDiagnostics {
     fn append(&mut self, text: &str) {
@@ -980,6 +1047,19 @@ impl FfmpegDiagnostics {
         }
     }
     fn push_sanitized(&mut self, text: &str) {
+        if let Some((key, value)) = text.trim().split_once('=') {
+            match key.trim() {
+                "frame" => self.output_frames = value.trim().parse().ok().or(self.output_frames),
+                "out_time_us" => {
+                    self.output_time_us = value.trim().parse().ok().or(self.output_time_us)
+                }
+                "progress" => {
+                    self.progress_state = Some(value.trim().to_owned());
+                    self.progress_updated_at = Some(Instant::now());
+                }
+                _ => {}
+            }
+        }
         let text = sanitized_ffmpeg_diagnostic(text);
         if text.is_empty() {
             return;
@@ -1003,6 +1083,16 @@ impl FfmpegDiagnostics {
             result.push_str(&sanitized_ffmpeg_diagnostic(&self.pending));
         }
         result.trim().to_string()
+    }
+
+    fn progress_snapshot(&self) -> (Option<u64>, Option<u64>, Option<String>, Option<u64>) {
+        (
+            self.output_frames,
+            self.output_time_us,
+            self.progress_state.clone(),
+            self.progress_updated_at
+                .map(|updated| updated.elapsed().as_millis() as u64),
+        )
     }
 }
 
@@ -1050,6 +1140,7 @@ fn set_srt_writer_error(state: &Mutex<SrtWriterState>, error: String) {
     if let Ok(mut state) = state.lock() {
         state.stats.failed_writes += 1;
         state.last_error = Some(sanitized_ffmpeg_diagnostic(&error));
+        state.audio_pipe_write_started_at = None;
     }
 }
 
@@ -1536,6 +1627,10 @@ struct SrtAudioQueue {
     queued_frames: usize,
     capacity_frames: usize,
     sample_rate: u32,
+    enqueued_frames: u64,
+    dequeued_frames: u64,
+    dropped_frames: u64,
+    high_water_frames: usize,
 }
 
 impl SrtAudioQueue {
@@ -1553,6 +1648,10 @@ impl SrtAudioQueue {
             queued_frames: 0,
             capacity_frames: capacity_frames.max(1),
             sample_rate,
+            enqueued_frames: 0,
+            dequeued_frames: 0,
+            dropped_frames: 0,
+            high_water_frames: 0,
         }
     }
 
@@ -1604,13 +1703,18 @@ impl SrtAudioQueue {
         }
 
         self.queued_frames += retained_frames;
+        self.enqueued_frames = self.enqueued_frames.saturating_add(frames as u64);
+        self.dropped_frames = self.dropped_frames.saturating_add(dropped_frames as u64);
+        self.high_water_frames = self.high_water_frames.max(self.queued_frames);
         self.packets.push_back(packet);
         Ok(dropped_frames)
     }
 
     fn pop(&mut self) -> Option<SrtAudioPacket> {
         let packet = self.packets.pop_front()?;
-        self.queued_frames = self.queued_frames.saturating_sub(packet.samples.len() / 2);
+        let frames = packet.samples.len() / 2;
+        self.queued_frames = self.queued_frames.saturating_sub(frames);
+        self.dequeued_frames = self.dequeued_frames.saturating_add(frames as u64);
         Some(packet)
     }
 
@@ -1665,6 +1769,10 @@ fn spawn_srt_audio_writer(
                     std::mem::size_of_val(packet.samples.as_slice()),
                 )
             };
+            let started = Instant::now();
+            if let Ok(mut writer_state) = state.lock() {
+                writer_state.audio_pipe_write_started_at = Some(started);
+            }
             if let Err(error) = input.write_all(bytes) {
                 let detail = diagnostic
                     .lock()
@@ -1681,6 +1789,17 @@ fn spawn_srt_audio_writer(
                     },
                 );
                 return;
+            }
+            if let Ok(mut writer_state) = state.lock() {
+                writer_state.audio_pipe_write_started_at = None;
+                writer_state.stats.audio_pipe_written_frames = writer_state
+                    .stats
+                    .audio_pipe_written_frames
+                    .saturating_add((packet.samples.len() / 2) as u64);
+                writer_state.stats.audio_pipe_write_blocked_ms = writer_state
+                    .stats
+                    .audio_pipe_write_blocked_ms
+                    .saturating_add(started.elapsed().as_millis() as u64);
             }
         }
     })
@@ -1758,7 +1877,16 @@ impl SrtFfmpegSender {
             }
             _ => None,
         };
-        command.args(["-hide_banner", "-loglevel", "warning", "-nostdin"]);
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nostdin",
+            "-progress",
+            "pipe:2",
+            "-stats_period",
+            "5",
+        ]);
         #[cfg(windows)]
         let pipe_cancellation = WindowsPipeCancellation::new()?;
         #[cfg(windows)]
@@ -1881,7 +2009,11 @@ impl SrtFfmpegSender {
             },
             last_error: None,
             pending_audio_drop_warning_frames: 0,
-            last_audio_drop_warning_at: None,
+            last_audio_report_at: None,
+            reported_enqueued_frames: 0,
+            reported_queue_pop_frames: 0,
+            reported_pipe_written_frames: 0,
+            audio_pipe_write_started_at: None,
         }));
         let diagnostic = Arc::new(Mutex::new(FfmpegDiagnostics::default()));
         let stderr_drain = spawn_stderr_drain(stderr, Arc::clone(&diagnostic));
@@ -2002,25 +2134,84 @@ impl SrtFfmpegSender {
                 return Err(error);
             }
             let (lock, signal) = self.audio_queue.as_ref();
-            let dropped_frames = lock
+            let mut queue = lock
                 .lock()
-                .map_err(|_| "SRT audio queue lock poisoned".to_string())?
-                .push(SrtAudioPacket {
+                .map_err(|_| "SRT audio queue lock poisoned".to_string())?;
+            let dropped_frames = queue.push(SrtAudioPacket {
                     sample_rate,
                     channels,
                     samples: samples.to_vec(),
                 })?;
-            report_srt_audio_drops(&self.writer_state, dropped_frames);
+            if let Ok(mut state) = self.writer_state.lock() {
+                state.stats.audio_enqueued_frames = queue.enqueued_frames;
+                state.stats.audio_dropped_frames = queue.dropped_frames;
+                state.stats.audio_queue_frames = queue.queued_frames as u64;
+                state.stats.audio_queue_high_water_frames = queue.high_water_frames as u64;
+            }
+            report_srt_audio_drops(
+                &self.writer_state,
+                &queue,
+                dropped_frames,
+                &self.diagnostic,
+            );
             signal.notify_one();
             Ok(())
         }
     }
 
     pub fn stats(&self) -> SrtSenderStats {
-        self.writer_state
+        let mut stats = self.writer_state
             .lock()
             .map(|state| state.stats.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Ok(queue) = self.audio_queue.0.lock() {
+            let elapsed_ms = unix_ms()
+                .saturating_sub(stats.started_at_unix_ms)
+                .max(1);
+            stats.audio_queue_frames = queue.queued_frames as u64;
+            stats.audio_queue_ms = queue
+                .queued_frames
+                .saturating_mul(1_000)
+                .checked_div(queue.sample_rate.max(1) as usize)
+                .unwrap_or(0) as u64;
+            stats.audio_queue_high_water_frames = queue.high_water_frames as u64;
+            stats.audio_dropped_frames = queue.dropped_frames;
+            stats.audio_enqueued_frames = queue.enqueued_frames;
+            stats.audio_enqueue_frames_per_second = queue
+                .enqueued_frames
+                .saturating_mul(1_000)
+                .checked_div(elapsed_ms)
+                .unwrap_or(0);
+            stats.audio_pipe_write_frames_per_second = stats
+                .audio_pipe_written_frames
+                .saturating_mul(1_000)
+                .checked_div(elapsed_ms)
+                .unwrap_or(0);
+            stats.audio_input_sample_time_ms = queue
+                .enqueued_frames
+                .saturating_mul(1_000)
+                .checked_div(queue.sample_rate.max(1) as u64)
+                .unwrap_or(0);
+            stats.audio_pipe_sample_time_ms = stats
+                .audio_pipe_written_frames
+                .saturating_mul(1_000)
+                .checked_div(queue.sample_rate.max(1) as u64)
+                .unwrap_or(0);
+        }
+        if let Ok(state) = self.writer_state.lock() {
+            stats.audio_pipe_write_current_blocked_ms = state
+                .audio_pipe_write_started_at
+                .map(|started| started.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+        }
+        if let Ok(diagnostic) = self.diagnostic.lock() {
+            let (frames, time_us, progress, age_ms) = diagnostic.progress_snapshot();
+            stats.ffmpeg_output_frames = frames;
+            stats.ffmpeg_output_time_us = time_us;
+            stats.ffmpeg_progress_state = progress;
+            stats.ffmpeg_progress_age_ms = age_ms;
+        }
+        stats
     }
 
     /// Stop the encoder deterministically before rebuilding/removing an output.
@@ -4904,6 +5095,17 @@ mod tests {
     }
 
     #[test]
+    fn ffmpeg_progress_tracks_mux_output_time_separately_from_raw_audio_samples() {
+        let mut diagnostic = FfmpegDiagnostics::default();
+        diagnostic.append("frame=125\nout_time_us=5000000\nprogress=continue\n");
+        let (frames, time_us, state, age_ms) = diagnostic.progress_snapshot();
+        assert_eq!(frames, Some(125));
+        assert_eq!(time_us, Some(5_000_000));
+        assert_eq!(state.as_deref(), Some("continue"));
+        assert!(age_ms.is_some());
+    }
+
+    #[test]
     fn diagnostics_redact_quoted_srt_passphrases() {
         let status = redact_srt_diagnostic(
             "mpv loadfile \"srt://host:9000?passphrase='camera secret'\" \
@@ -5341,6 +5543,314 @@ mod tests {
             "unified SRT worker did not receive both test streams; source_exit={source_exit:?}; \
              redacted_worker_status={last_status:?}"
         );
+    }
+
+    #[cfg(windows)]
+    fn start_srt_loopback_caller(
+        ffmpeg: &PathBuf,
+        url: &str,
+        progress: Arc<Mutex<(u64, u64)>>,
+        audio_samples_decoded: Arc<std::sync::atomic::AtomicU64>,
+        audio_end_pts_ms: Arc<std::sync::atomic::AtomicU64>,
+        stderr_tail: Arc<Mutex<VecDeque<String>>>,
+    ) -> Result<(ManagedFfmpegChild, JoinHandle<()>, JoinHandle<()>), String> {
+        use std::io::{BufRead, BufReader};
+        use std::os::windows::process::CommandExt;
+
+        let mut command = Command::new(ffmpeg);
+        command
+            .creation_flags(0x0800_0000)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "info",
+                "-nostdin",
+                "-i",
+                url,
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0",
+                "-af",
+                "ashowinfo",
+                "-progress",
+                "pipe:1",
+                "-stats_period",
+                "1",
+                "-f",
+                "null",
+                "NUL",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = spawn_managed_ffmpeg(&mut command).map_err(|error| error.to_string())?;
+        let output = child
+            .stdout
+            .take()
+            .ok_or_else(|| "receiver progress pipe missing".to_string())?;
+        let progress_reader = thread::spawn(move || {
+            for line in BufReader::new(output).lines().map_while(Result::ok) {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                let mut values = progress.lock().unwrap();
+                match key {
+                    "frame" => values.0 = value.parse().unwrap_or(values.0),
+                    // FFmpeg reports this in microseconds despite `_ms` in its
+                    // legacy key name.
+                    "out_time_us" => values.1 = value.parse().unwrap_or(values.1),
+                    _ => {}
+                }
+            }
+        });
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "receiver diagnostics pipe missing".to_string())?;
+        let stderr_reader = thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Ok(mut tail) = stderr_tail.lock() {
+                    tail.push_back(line.clone());
+                    while tail.len() > 80 {
+                        tail.pop_front();
+                    }
+                }
+                if let Some(value) = line.split("nb_samples:").nth(1) {
+                    let samples = value
+                        .split_whitespace()
+                        .next()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    audio_samples_decoded.fetch_add(samples, Ordering::Relaxed);
+                }
+                if let Some(value) = line.split("pts_time:").nth(1) {
+                    if let Some(pts_ms) = value
+                        .split_whitespace()
+                        .next()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .map(|value| (value * 1_000.0) as u64)
+                    {
+                        audio_end_pts_ms.fetch_max(pts_ms, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+        Ok((child, progress_reader, stderr_reader))
+    }
+
+    /// Runs the production SRT output sender against a real local FFmpeg
+    /// caller. Audio and video are submitted at live cadence. Receiver-side
+    /// `-progress` values are decoded output timestamps; sender pipe counters
+    /// alone must never be described as encoded output.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "real-time SRT output loopback; defaults to 30 minutes, override QLISA_SRT_AUDIO_TEST_SECS"]
+    fn srt_output_audio_remains_current_with_connected_ffmpeg_receiver() {
+        use std::sync::atomic::AtomicU64;
+
+        let port = unused_loopback_port();
+        let settings = listener_settings(port);
+        let caller = SrtSettings {
+            enabled: true,
+            mode: SrtMode::Caller,
+            host: "127.0.0.1".into(),
+            port,
+            ..Default::default()
+        };
+        let ffmpeg = find_ffmpeg_runtime().expect("bundled FFmpeg");
+        let mut sender = SrtFfmpegSender::start(&settings, 640, 360, 25, 48_000)
+            .expect("start production SRT output sender");
+        let mut audio_block = vec![0.0_f32; 960];
+        sender
+            .send_audio_interleaved(48_000, 2, &audio_block)
+            .expect("submit initial audio block");
+        sender
+            .send(
+                &BgraFrame {
+                    width: 640,
+                    height: 360,
+                    stride: 640 * 4,
+                    data: vec![0; 640 * 360 * 4],
+                },
+            )
+            .expect("submit initial video frame");
+        let progress = Arc::new(Mutex::new((0_u64, 0_u64)));
+        let audio_samples_decoded = Arc::new(AtomicU64::new(0));
+        let audio_end_pts_ms = Arc::new(AtomicU64::new(0));
+        let receiver_stderr = Arc::new(Mutex::new(VecDeque::new()));
+        let caller_url = caller.url().expect("caller URL");
+        let (mut receiver, mut progress_reader, mut stderr_reader) =
+            start_srt_loopback_caller(
+                &ffmpeg,
+                &caller_url,
+                Arc::clone(&progress),
+                Arc::clone(&audio_samples_decoded),
+                Arc::clone(&audio_end_pts_ms),
+                Arc::clone(&receiver_stderr),
+            )
+            .expect("start local FFmpeg caller");
+
+        let duration = std::env::var("QLISA_SRT_AUDIO_TEST_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1_800)
+            .max(10);
+        let startup_deadline = Instant::now() + Duration::from_secs(20);
+        let mut connected_at = None;
+        let mut preconnect_dropped_frames = 0_u64;
+        let mut receiver_retries = 0_u8;
+        let mut receiver_failed = false;
+        let mut sender_error = None;
+        let mut next_audio = Instant::now();
+        let mut next_video = Instant::now();
+        let mut phase = 0.0_f32;
+        let mut frame_number = 0_u64;
+        loop {
+            let now = Instant::now();
+            if connected_at.is_some_and(|connected| {
+                now.duration_since(connected) >= Duration::from_secs(duration)
+            }) {
+                break;
+            }
+            if connected_at.is_none() && now >= startup_deadline {
+                break;
+            }
+            let current_progress = *progress.lock().unwrap();
+            if connected_at.is_none() && current_progress.1 > 0 {
+                connected_at = Some(now);
+                preconnect_dropped_frames = sender.stats().audio_dropped_frames;
+            }
+            let receiver_exited = receiver.try_wait().expect("check receiver state").is_some();
+            // Keep a live FFmpeg caller through input probing/analyze. Five
+            // seconds without decoded progress is not evidence that SRT failed;
+            // killing it can repeatedly disconnect a valid startup attempt.
+            if receiver_exited {
+                if connected_at.is_some() {
+                    receiver_failed = true;
+                    break;
+                }
+                receiver_retries = receiver_retries.saturating_add(1);
+                if receiver_retries > 8 {
+                    break;
+                }
+                progress.lock().unwrap().0 = 0;
+                progress.lock().unwrap().1 = 0;
+                audio_samples_decoded.store(0, Ordering::Relaxed);
+                audio_end_pts_ms.store(0, Ordering::Relaxed);
+                if !receiver_exited {
+                    let _ = receiver.kill();
+                }
+                let _ = receiver.wait();
+                progress_reader.join().unwrap();
+                stderr_reader.join().unwrap();
+                receiver_stderr.lock().unwrap().clear();
+                thread::sleep(Duration::from_millis(250));
+                (receiver, progress_reader, stderr_reader) = start_srt_loopback_caller(
+                    &ffmpeg,
+                    &caller_url,
+                    Arc::clone(&progress),
+                    Arc::clone(&audio_samples_decoded),
+                    Arc::clone(&audio_end_pts_ms),
+                    Arc::clone(&receiver_stderr),
+                )
+                .expect("retry local FFmpeg caller");
+            }
+            let now = Instant::now();
+            if connected_at.is_some_and(|connected| {
+                now.duration_since(connected) >= Duration::from_secs(duration)
+            }) {
+                break;
+            }
+            thread::sleep(next_audio.saturating_duration_since(Instant::now()));
+            for sample in audio_block.chunks_exact_mut(2) {
+                let value = phase.sin() * 0.2;
+                sample[0] = value;
+                sample[1] = value;
+                phase = (phase + std::f32::consts::TAU * 440.0 / 48_000.0)
+                    % std::f32::consts::TAU;
+            }
+            if let Err(error) = sender.send_audio_interleaved(48_000, 2, &audio_block) {
+                sender_error = Some(error);
+                break;
+            }
+            next_audio += Duration::from_millis(10);
+            let now = Instant::now();
+            if now.saturating_duration_since(next_audio) > Duration::from_millis(100) {
+                // Keep at most 100 ms of schedule debt. Small timer overshoots
+                // catch up against the absolute cadence instead of reducing
+                // the offered sample rate over a long run.
+                next_audio = now - Duration::from_millis(100);
+            }
+            if now >= next_video {
+                let mut frame = BgraFrame {
+                    width: 640,
+                    height: 360,
+                    stride: 640 * 4,
+                    data: vec![0; 640 * 360 * 4],
+                };
+                frame.data[0] = frame_number as u8;
+                if let Err(error) = sender.send(&frame) {
+                    sender_error = Some(error);
+                    break;
+                }
+                frame_number += 1;
+                next_video += Duration::from_millis(40);
+                if now.saturating_duration_since(next_video) > Duration::from_millis(200) {
+                    next_video = now - Duration::from_millis(200);
+                }
+            }
+        }
+
+        let sender_stats = sender.stats();
+        let measurement_dropped_frames = sender_stats
+            .audio_dropped_frames
+            .saturating_sub(preconnect_dropped_frames);
+        let receiver_exit = receiver.try_wait().ok().flatten();
+        let _ = receiver.kill();
+        let _ = receiver.wait();
+        progress_reader.join().unwrap();
+        stderr_reader.join().unwrap();
+        let received_progress = *progress.lock().unwrap();
+        let decoded_samples = audio_samples_decoded.load(Ordering::Relaxed);
+        let decoded_audio_pts_ms = audio_end_pts_ms.load(Ordering::Relaxed);
+        let receiver_stderr = receiver_stderr
+            .lock()
+            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_else(|_| "<receiver stderr buffer poisoned>".into());
+        sender.stop().expect("stop production SRT sender");
+        eprintln!(
+            "[srt-output-test] target={duration}s connected={} sender-error={sender_error:?} receiver-retries={receiver_retries} receiver-failed={receiver_failed} receiver-exit={receiver_exit:?} queue={}frames/{}ms high-water={}frames drops-total={} drops-before-connected={} drops-connected={} enqueue={}fps pipe={}fps pipe-blocked={}ms submitted-audio={}ms pipe-audio={}ms sender-out-frame={:?} sender-out-time-us={:?} sender-progress-age-ms={:?} receiver-video-frames={} receiver-out-time={}ms receiver-audio-pts={}ms receiver-decoded-audio={}samples\n[srt-output-test] receiver-stderr:\n{receiver_stderr}",
+            connected_at.is_some(),
+            sender_stats.audio_queue_frames,
+            sender_stats.audio_queue_ms,
+            sender_stats.audio_queue_high_water_frames,
+            sender_stats.audio_dropped_frames,
+            preconnect_dropped_frames,
+            measurement_dropped_frames,
+            sender_stats.audio_enqueue_frames_per_second,
+            sender_stats.audio_pipe_write_frames_per_second,
+            sender_stats.audio_pipe_write_blocked_ms,
+            sender_stats.audio_input_sample_time_ms,
+            sender_stats.audio_pipe_sample_time_ms,
+            sender_stats.ffmpeg_output_frames,
+            sender_stats.ffmpeg_output_time_us,
+            sender_stats.ffmpeg_progress_age_ms,
+            received_progress.0,
+            received_progress.1 / 1_000,
+            decoded_audio_pts_ms,
+            decoded_samples,
+        );
+        assert!(sender_error.is_none(), "SRT sender failed: {:?}; receiver-exit={receiver_exit:?}; receiver-stderr:\n{receiver_stderr}", sender_error);
+        assert!(connected_at.is_some(), "receiver did not connect and decode before timeout; receiver-exit={receiver_exit:?}; receiver-stderr:\n{receiver_stderr}");
+        assert!(!receiver_failed, "receiver FFmpeg exited after connecting; exit={receiver_exit:?}; stderr:\n{receiver_stderr}");
+        assert!(received_progress.0 > duration * 20, "receiver did not decode video: {received_progress:?}");
+        assert!(received_progress.1 >= duration.saturating_sub(3) * 1_000_000, "receiver output PTS lagged wall time: {received_progress:?}");
+        assert!(decoded_audio_pts_ms >= duration.saturating_sub(3) * 1_000, "receiver audio PTS lagged wall time: {decoded_audio_pts_ms}ms");
+        assert!(decoded_samples >= duration.saturating_sub(3) * 48_000, "receiver did not decode real-time audio: {decoded_samples} samples");
+        assert_eq!(measurement_dropped_frames, 0, "sender audio queue dropped frames with a connected receiver");
+        assert!(sender_stats.audio_queue_ms < SRT_AUDIO_QUEUE_MAX_MS as u64);
     }
 
     #[test]
