@@ -2845,7 +2845,7 @@ fn fill_buffer(
                             .loops_remaining
                             .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     }
-                    frame_pos_f = 0.0;
+                    frame_pos_f = voice.loop_start_frame.load(std::sync::atomic::Ordering::Relaxed) as f64;
                 } else {
                     voice.set_stopped();
                     let _ = status_prod.try_push(AudioStatus::Completed { voice_id: voice.id });
@@ -3110,7 +3110,9 @@ fn mix_stream(
     let matrix_ptr = voice.inner.level_matrix.get();
     let fade_ptr = voice.inner.fade.get();
     let end = unsafe { *voice.inner.end_frame.get() }.unwrap_or(u64::MAX);
-    let loop_end = if source.is_seamless_looping() && source.has_exact_loop_length() {
+    let loop_end = if source.is_trimmed_looping() {
+        source.trim_loop_end()
+    } else if source.is_seamless_looping() && source.has_exact_loop_length() {
         source.total_frames()
     } else if source.is_seamless_looping() {
         u64::MAX
@@ -3684,9 +3686,34 @@ fn open_asio_host() -> Result<cpal::Host> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cue::traits::{Cue, CueFactory};
     use crate::cue::media_decode::StreamingAudioSource;
+    use crate::engine::output_engine::ContentRequest;
+    use anyhow::Result;
+    use crossbeam_channel::unbounded;
     use ringbuf::traits::{Producer, Split};
     use ringbuf::HeapRb;
+
+    struct NullOutput;
+    impl crate::engine::engine_traits::OutputEngineApi for NullOutput {
+        fn show_content(&self, _req: ContentRequest<'_>) -> Result<crate::engine::ring_command::VoiceId> { anyhow::bail!("unused") }
+        fn stop_content(&self, _voice_id: crate::engine::ring_command::VoiceId, _visual_fade_ms: u32, _audio_fade_ms: u32) {}
+        fn hard_stop_current(&self) {}
+        fn panic_stop(&self) {}
+        fn video_audio_voice(&self, _voice_id: crate::engine::ring_command::VoiceId) -> Option<crate::engine::ring_command::VoiceId> { None }
+        fn resync_audio_to_video(&self, _voice_id: crate::engine::ring_command::VoiceId) {}
+        fn get_voice_opacity(&self, _voice_id: crate::engine::ring_command::VoiceId) -> f32 { 1.0 }
+        fn set_voice_opacity(&self, _voice_id: crate::engine::ring_command::VoiceId, _opacity: f32) {}
+        fn stop_voice(&self, _voice_id: crate::engine::ring_command::VoiceId, _fade_ms: u32) -> Result<()> { Ok(()) }
+        fn pause_voice(&self, _voice_id: crate::engine::ring_command::VoiceId) -> Result<()> { Ok(()) }
+        fn resume_voice(&self, _voice_id: crate::engine::ring_command::VoiceId) -> Result<()> { Ok(()) }
+        fn seek_voice_ms(&self, _voice_id: crate::engine::ring_command::VoiceId, _position_ms: u64) {}
+        fn show_text_overlay(&self, _ass_text: &str, _screen_index: Option<u32>) {}
+        fn clear_text_overlay(&self) {}
+        fn begin_eof_fade_out(&self, _voice_id: crate::engine::ring_command::VoiceId, _fade_ms: u32) -> bool { false }
+        fn devamp_voice(&self, _voice_id: crate::engine::ring_command::VoiceId, _stop_at_end: bool) {}
+        fn start_preloaded(&self, _voice_id: crate::engine::ring_command::VoiceId) -> bool { false }
+    }
 
     /// Build a minimal Voice with `n_frames` of silence at the given sample rate.
     fn make_voice(n_frames: usize, channels: u16, sample_rate: u32, rate: f32) -> Arc<Voice> {
@@ -3704,6 +3731,34 @@ mod tests {
 
     fn empty_program_audio_taps() -> Arc<ArcSwap<Vec<Arc<ProgramAudioTap>>>> {
         Arc::new(ArcSwap::from_pointee(Vec::new()))
+    }
+
+    fn go_audio_cue(
+        path: &std::path::Path,
+        start_ms: Option<u64>,
+        end_ms: Option<u64>,
+        loop_count: u32,
+        slices: serde_json::Value,
+    ) -> Arc<Voice> {
+        let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
+        let (events, _receiver) = unbounded();
+        let context = crate::cue::context::CueContext::new(
+            engine.clone(), Arc::new(NullOutput), events, 0, Vec::new(), None, None,
+            Vec::new(), Arc::new(crate::engine::dmx_engine::DmxEngine::new()),
+            Vec::new(), Vec::new(), Vec::new(), 256,
+        );
+        let mut cue = crate::cue::audio_cue::AudioCueFactory.from_json(serde_json::json!({
+            "type": "audio",
+            "file_path": path.to_string_lossy().to_string(),
+            "start_time_ms": start_ms,
+            "end_time_ms": end_ms,
+            "loop_count": loop_count,
+            "slices": slices,
+        })).expect("deserialize AudioCue");
+        cue.load(&context).expect("load AudioCue");
+        cue.go(&context).expect("production AudioCue GO path");
+        engine.voices.with(|voices| voices.last().cloned()).flatten()
+            .expect("AudioCue submitted a voice")
     }
 
     /// Call fill_buffer for `output_frames` output frames and return the
@@ -3734,6 +3789,76 @@ mod tests {
         voice.frame_pos.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    #[test]
+    fn pcm_loop_wraps_to_effective_trim_start() {
+        let voice = Arc::new(Voice::new(
+            Arc::new((0..16).flat_map(|frame| [frame as f32, frame as f32]).collect()),
+            2,
+            48_000,
+            1.0,
+            0.0,
+        ));
+        voice.set_playing();
+        voice.frame_pos.store(2, Ordering::Relaxed);
+        voice.loop_start_frame.store(2, Ordering::Relaxed);
+        voice.inner.loops_remaining.store(2, Ordering::Relaxed);
+        unsafe { *voice.inner.end_frame.get() = Some(6); }
+
+        // Two complete callbacks cross a loop boundary. The cursor must remain
+        // in [2, 6), rather than silently restarting at physical frame zero.
+        let after_first = run_fill(Arc::clone(&voice), 5, 48_000);
+        assert_eq!(after_first, 3);
+        let after_second = run_fill(Arc::clone(&voice), 5, 48_000);
+        assert_eq!(after_second, 4);
+        assert_eq!(voice.inner.loops_remaining.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn audio_cue_go_wires_trim_ranges_for_wav_and_mp3_matrix() {
+        let path = std::env::temp_dir().join(format!("qlisa-audio-cue-trim-{}.wav", uuid::Uuid::new_v4()));
+        write_trim_loop_fixture(&path);
+        let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_slice.mp3");
+        let cases = [
+            ("no trim", None, None, 2, serde_json::Value::Null),
+            ("end only", None, Some(50), 2, serde_json::Value::Null),
+            ("start only", Some(25), None, 2, serde_json::Value::Null),
+            ("start only infinite", Some(25), None, u32::MAX, serde_json::Value::Null),
+            ("both", Some(25), Some(50), 2, serde_json::Value::Null),
+            ("slices", Some(25), Some(50), 0, serde_json::json!({"markers":[30],"play_counts":[1,2]})),
+        ];
+        for media in [&path, &mp3] {
+            let info = crate::cue::media_decode::probe_audio_track(media).unwrap().unwrap();
+            let total_frames = info.total_frames.expect("fixture duration");
+            for (name, start_ms, end_ms, loops, slices) in &cases {
+                let voice = go_audio_cue(media, *start_ms, *end_ms, *loops, slices.clone());
+                assert_eq!(
+                    voice.loop_start_frame.load(Ordering::Relaxed),
+                    start_ms.unwrap_or(0) * info.sample_rate as u64 / 1000,
+                    "{} {name}: Voice loop start",
+                    media.display(),
+                );
+                if *name == "slices" {
+                    let program = unsafe { &*voice.inner.slices.get() };
+                    assert!(program.is_some(), "{}: slices must retain their slice program", media.display());
+                    assert!(voice.stream.is_none() || !voice.stream.as_ref().unwrap().is_trimmed_looping());
+                } else if *loops > 0 && (start_ms.is_some() || end_ms.is_some()) {
+                    let stream = voice.stream.as_ref().expect("ordinary AudioCue stream");
+                    let expected_start = start_ms.unwrap_or(0) * info.sample_rate as u64 / 1000;
+                    let expected_end = end_ms.map(|ms| ms * info.sample_rate as u64 / 1000).unwrap_or(total_frames);
+                    assert!(stream.is_trimmed_looping(), "{} {name}: trim producer", media.display());
+                    assert_eq!(stream.trim_loop_start(), expected_start, "{} {name}", media.display());
+                    assert_eq!(stream.trim_loop_end(), expected_end, "{} {name}", media.display());
+                } else {
+                    let stream = voice.stream.as_ref().expect("full-file AudioCue stream");
+                    assert!(stream.is_seamless_looping(), "{} {name}: full-file loop", media.display());
+                    assert!(!stream.is_trimmed_looping());
+                }
+                if let Some(stream) = &voice.stream { stream.cancel(); }
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
     fn write_loop_stress_wav(path: &std::path::Path, seconds: usize) {
         use std::io::Write;
         let sample_rate = 48_000_u32;
@@ -3762,9 +3887,13 @@ mod tests {
     }
 
     fn write_trim_loop_fixture(path: &std::path::Path) {
+        write_trim_loop_fixture_ms(path, 1_000);
+    }
+
+    fn write_trim_loop_fixture_ms(path: &std::path::Path, duration_ms: u64) {
         use std::io::Write;
         let sr = 48_000_u32;
-        let frames = sr as usize;
+        let frames = (sr as u64 * duration_ms / 1000) as usize;
         let bytes = (frames * 4) as u32;
         let mut file = std::fs::File::create(path).expect("create trim WAV");
         file.write_all(b"RIFF").unwrap(); file.write_all(&(36 + bytes).to_le_bytes()).unwrap();
@@ -3802,30 +3931,47 @@ mod tests {
         println!("Optional rendered audio dump: {}", path.display());
     }
 
-    fn run_trimmed_loop_fixture(path: &std::path::Path, format: &str) -> (u64, u64, u64, u64, f32, f32, u64) {
+    fn run_trimmed_loop_fixture(
+        path: &std::path::Path,
+        format: &str,
+        start_ms: u64,
+        end_ms: Option<u64>,
+    ) -> (u64, u64, u64, u64, f32, f32, u64) {
         use ringbuf::traits::Consumer;
         use std::time::{Duration, Instant};
-        const START: u64 = 1_200;
-        const END: u64 = 2_400;
         const REPEATS: u32 = 100;
         const FRAMES: usize = 48;
         let info = crate::cue::media_decode::probe_audio_track(path).unwrap().unwrap();
-        let source = StreamingAudioSource::start(path.to_path_buf(), info).unwrap();
-        source.enable_seamless_loop();
-        let prebuffer_deadline = Instant::now() + Duration::from_secs(10);
-        while (!source.is_ready() || source.buffered_samples() <= (END as usize * 2))
-            && Instant::now() < prebuffer_deadline { std::thread::sleep(Duration::from_millis(2)); }
-        assert!(source.buffered_samples() > END as usize * 2, "{format}: fixture did not prebuffer stale post-trim PCM");
-        assert!(source.enable_trimmed_loop(START, END));
-        assert!(!source.is_seamless_looping(), "{format}: trimmed mode must replace full-file mode");
-        let voice = Arc::new(Voice::new_stream(Arc::clone(&source), 1.0, 0.0));
-        voice.set_playing();
-        voice.frame_pos.store(START, Ordering::Relaxed);
-        voice.inner.loops_remaining.store(REPEATS, Ordering::Relaxed);
-        unsafe { *voice.inner.end_frame.get() = Some(END); }
+        let start_frame = start_ms * info.sample_rate as u64 / 1000;
+        let end_frame = end_ms.map(|ms| ms * info.sample_rate as u64 / 1000)
+            .or(info.total_frames).expect("effective trim end");
+        assert!(end_frame > start_frame, "{format}: invalid loop range");
+        let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
+        let (cmd_prod, mut commands) = HeapRb::<AudioCommand>::new(RING_CAPACITY).split();
+        *engine.cmd_prod.lock().expect("audio command producer") = cmd_prod;
+        let (events, _receiver) = unbounded();
+        let context = crate::cue::context::CueContext::new(
+            engine.clone(), Arc::new(NullOutput), events, 0, Vec::new(), None, None,
+            Vec::new(), Arc::new(crate::engine::dmx_engine::DmxEngine::new()),
+            Vec::new(), Vec::new(), Vec::new(), 256,
+        );
+        let mut cue = crate::cue::audio_cue::AudioCueFactory.from_json(serde_json::json!({
+            "type": "audio",
+            "file_path": path.to_string_lossy().to_string(),
+            "start_time_ms": start_ms,
+            "end_time_ms": end_ms,
+            "loop_count": REPEATS,
+        })).expect("deserialize AudioCue");
+        cue.load(&context).expect("load trimmed AudioCue");
+        cue.go(&context).expect("run production AudioCue GO path");
+        let voice = engine.voices.with(|voices| voices.last().cloned()).flatten()
+            .expect("AudioCue submitted a voice");
+        let source = Arc::clone(voice.stream.as_ref().expect("streaming fixture"));
+        assert!(source.is_trimmed_looping(), "{format}: AudioCue must configure a bounded trim loop");
+        assert_eq!(source.trim_loop_start(), start_frame, "{format}: effective start");
+        assert_eq!(source.trim_loop_end(), end_frame, "{format}: effective end");
         let pool = rt_pool(vec![Arc::clone(&voice)]);
         let feeds: Arc<Mutex<Vec<InputFeed>>> = Arc::new(Mutex::new(Vec::new()));
-        let (_, mut commands) = HeapRb::<AudioCommand>::new(16).split();
         let (mut statuses, mut status_cons) = HeapRb::<AudioStatus>::new(4096).split();
         let master = Arc::new(std::sync::atomic::AtomicU32::new(f32::to_bits(1.0)));
         let period = Arc::new(std::sync::atomic::AtomicU32::new(FRAMES as u32));
@@ -3833,16 +3979,20 @@ mod tests {
         let mut program = vec![0.0_f32; FRAMES * 2];
         let taps = empty_program_audio_taps();
         let ready_deadline = Instant::now() + Duration::from_secs(10);
-        let target_samples = 4 * 48_000 * 2;
+        let target_samples = 4 * source.sample_rate as usize * source.channels.max(1) as usize;
         while (!source.is_ready() || source.buffered_samples() < target_samples)
             && Instant::now() < ready_deadline { std::thread::sleep(Duration::from_millis(2)); }
         assert!(source.is_ready() && source.buffered_samples() >= target_samples, "{format}: trimmed PCM target was not filled");
-        source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
+        let effective_end_frame = source.trim_loop_end();
+        assert!(effective_end_frame > start_frame, "{format}: EOF produced an empty trim range");
+        let pass_output_frames = ((effective_end_frame - start_frame) as f64 * 48_000.0 / info.sample_rate as f64).round() as usize;
+        cue.tick(&context).expect("AudioCue tick releases ready stream voice");
         let mut zero_frames = 0_u64;
         let mut callback_events = 0_u64;
         let mut passes = Vec::<Vec<f32>>::new();
         let mut current = Vec::<f32>::new();
-        let mut rendered_pcm = Vec::<f32>::with_capacity((END - START) as usize * (REPEATS as usize + 1) * 2);
+        let target_frames = pass_output_frames * (REPEATS as usize + 1);
+        let mut rendered_pcm = Vec::<f32>::with_capacity(target_frames * 2);
         let mut last: Option<f32> = None;
         let mut seam_delta = 0.0_f32;
         let mut pass_count = 1_u64;
@@ -3852,7 +4002,6 @@ mod tests {
             let before = voice.inner.loops_remaining.load(Ordering::Relaxed);
             fill_buffer(&mut output, &mut program, 2, 48_000, &pool, &feeds, &taps,
                 &mut commands, &mut statuses, &master, &period);
-            let target_frames = (END - START) as usize * (REPEATS as usize + 1);
             let captured_frames = rendered_pcm.len() / 2;
             let take_frames = target_frames.saturating_sub(captured_frames).min(FRAMES);
             rendered_pcm.extend_from_slice(&output[..take_frames * 2]);
@@ -3875,8 +4024,17 @@ mod tests {
         assert_eq!(voice.voice_state(), VoiceState::Stopped, "{format}: loop did not finish");
         let d = source.diagnostics();
         let repeats = REPEATS as u64 - voice.inner.loops_remaining.load(Ordering::Relaxed) as u64;
-        let difference = passes.get(1).map(|second| passes[0].iter().zip(second).take((END - START) as usize)
-            .map(|(a, b)| (a - b).abs()).sum::<f32>() / (END - START) as f32).unwrap_or(f32::INFINITY);
+        let difference = passes.get(1).map(|second| passes[0].iter().zip(second).take(pass_output_frames)
+            .map(|(a, b)| (a - b).abs()).sum::<f32>() / pass_output_frames as f32).unwrap_or(f32::INFINITY);
+        let (expected, _) = crate::cue::media_decode::decode_slice_ranges(path, info, &[(start_frame, effective_end_frame)])
+            .unwrap().expect("reference trimmed PCM");
+        let expected_first = expected[0] * std::f32::consts::FRAC_1_SQRT_2;
+        for pass in 0..=REPEATS as usize {
+            let sample_index = pass * pass_output_frames * 2;
+            assert!(sample_index < rendered_pcm.len(), "{format}: missing pass {pass}");
+            assert!((rendered_pcm[sample_index] - expected_first).abs() < 0.02,
+                "{format}: pass {pass} starts at {}, expected effective trim PCM {expected_first}", rendered_pcm[sample_index]);
+        }
         maybe_dump_loop_wav("trimmed", format, &rendered_pcm);
         source.cancel();
         println!("{format}: passes={pass_count} events={callback_events} source_underruns={} diag_silence={} rendered_zero={} seam_delta={} pass_difference={}",
@@ -4124,15 +4282,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let wav = dir.join("trim.wav");
         write_trim_loop_fixture(&wav);
+        let short_wav = dir.join("trim-start-only.wav");
+        write_trim_loop_fixture_ms(&short_wav, 100);
         let mut results = Vec::new();
         let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_slice.mp3");
-        let formats = [("WAV", wav.as_path()), ("MP3", mp3.as_path())];
-        for (name, path) in formats {
-            let result = run_trimmed_loop_fixture(path, name);
-            println!("TRIMMED {name}: repeats={} underruns={} silent_frames={} rendered_zero={} seam_delta={} pass_difference={}",
-                result.0, result.1, result.2, result.3, result.4, result.5);
-            results.push((name, result));
+        for (name, path) in [("WAV both", wav.as_path()), ("MP3 both", mp3.as_path())] {
+            results.push((name, run_trimmed_loop_fixture(path, name, 25, Some(50))));
         }
+        results.push(("WAV start-only", run_trimmed_loop_fixture(&short_wav, "WAV start-only", 25, None)));
+        let mp3_info = crate::cue::media_decode::probe_audio_track(&mp3).unwrap().unwrap();
+        let mp3_total = mp3_info.total_frames.unwrap();
+        let short_start_frame = mp3_total.saturating_sub(mp3_info.sample_rate as u64 * 75 / 1000);
+        let short_start_ms = short_start_frame * 1000 / mp3_info.sample_rate as u64;
+        results.push(("MP3 start-only", run_trimmed_loop_fixture(&mp3, "MP3 start-only", short_start_ms, None)));
         let _ = std::fs::remove_dir_all(dir);
         for (format, (repeats, underruns, silent, zeros, seam, difference, _)) in results {
             assert_eq!(repeats, 100, "{format}: repeat count");
@@ -4184,7 +4346,6 @@ mod tests {
             .unwrap().expect("first frame decode");
         let source = StreamingAudioSource::start_at(path.clone(), info, 0).unwrap();
         assert!(source.enable_trimmed_loop(0, 2_400)); // end_time only: trim start is zero
-        source.set_playback_state(crate::cue::media_decode::StreamPlaybackState::Playing);
         let deadline = Instant::now() + Duration::from_secs(10);
         while (!source.is_ready() || source.buffered_samples() < 800) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));

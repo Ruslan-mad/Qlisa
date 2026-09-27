@@ -330,12 +330,22 @@ impl VideoCue {
         };
         if self.loop_count > 0 || !self.slices.is_empty() {
             if let Some(stream) = &voice.stream {
-                if self.loop_count > 0
-                    && self.slices.is_empty()
-                    && self.start_time.is_none()
-                    && self.end_time.is_none()
-                {
-                    stream.enable_seamless_loop();
+                if self.loop_count > 0 && self.slices.is_empty() {
+                    if self.start_time.is_none() && self.end_time.is_none() {
+                        stream.enable_seamless_loop();
+                    } else {
+                        let start = self.start_time
+                            .map(|time| (time.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
+                            .unwrap_or(0);
+                        let end = self.end_time
+                            .map(|time| (time.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
+                            .or_else(|| self.cached_duration.map(|duration|
+                                (duration.as_secs_f64() * self.decoded_sample_rate as f64) as u64))
+                            .unwrap_or_else(|| stream.total_frames());
+                        if !stream.enable_trimmed_loop(start, end) {
+                            stream.keep_worker_for_loop();
+                        }
+                    }
                 } else {
                     stream.keep_worker_for_loop();
                 }
@@ -346,11 +356,23 @@ impl VideoCue {
             .inner
             .loops_remaining
             .store(self.loop_count, std::sync::atomic::Ordering::Relaxed);
+        let loop_start_frame = self.start_time
+            .map(|time| (time.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
+            .unwrap_or(0);
+        voice.loop_start_frame.store(loop_start_frame, std::sync::atomic::Ordering::Relaxed);
 
         // Rate defaults to 1.0; SR mismatch is corrected in fill_buffer.
 
-        if let Some(end) = self.end_time {
-            let end_frame = (end.as_secs_f64() * self.decoded_sample_rate as f64) as u64;
+        let end_frame = self.end_time
+            .map(|end| (end.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
+            .or_else(|| {
+                (self.loop_count > 0 && self.slices.is_empty() && self.start_time.is_some())
+                    .then(|| self.cached_duration
+                        .map(|duration| (duration.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
+                        .or_else(|| voice.stream.as_ref().map(|stream| stream.total_frames()))
+                        .unwrap_or_else(|| voice.total_frames()))
+            });
+        if let Some(end_frame) = end_frame {
             // SAFETY: written once before submission; the RT thread never sees
             // this voice until play_voice_paused pushes it.
             unsafe {
@@ -463,7 +485,11 @@ impl VideoCue {
 
     fn start_video_action(&mut self, context: &CueContext) -> Result<()> {
         let start_ms = self.start_time.map(|d| d.as_millis() as u64);
-        let end_ms = self.end_time.map(|d| d.as_millis() as u64);
+        let end_ms = self.end_time.map(|d| d.as_millis() as u64).or_else(|| {
+            (self.loop_count > 0 && self.slices.is_empty() && start_ms.is_some())
+                .then(|| self.cached_duration.map(|duration| duration.as_millis() as u64))
+                .flatten()
+        });
         let fade_in_ms = self
             .video_fade_in
             .as_ref()

@@ -445,6 +445,10 @@ impl AudioCue {
 
         voice.inner.loops_remaining.store(self.loop_count, std::sync::atomic::Ordering::Relaxed);
         voice.inner.set_rate(self.rate as f32);
+        let loop_start_frame = self.start_time
+            .map(|time| (time.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
+            .unwrap_or(0);
+        voice.loop_start_frame.store(loop_start_frame, std::sync::atomic::Ordering::Relaxed);
 
         // Apply start/end time markers (written before play_voice; no RT thread yet).
         if let Some(end) = self.end_time {

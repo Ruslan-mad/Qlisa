@@ -433,6 +433,10 @@ pub struct Voice {
     /// Current read position in frames (atomic).
     pub frame_pos: AtomicU64,
 
+    /// First source frame in the current loop window. Full-file loops use 0.
+    /// Written before voice submission and read by the audio callback.
+    pub loop_start_frame: AtomicU64,
+
     /// Number of callback blocks that encountered stream starvation in this
     /// voice's current run. Incremented only on the audio thread.
     pub underrun_events: AtomicU64,
@@ -493,6 +497,7 @@ impl Voice {
             channels,
             sample_rate,
             frame_pos: AtomicU64::new(0),
+            loop_start_frame: AtomicU64::new(0),
             underrun_events: AtomicU64::new(0),
             dropped_underrun_reports: AtomicU64::new(0),
             has_looped: AtomicBool::new(false),
@@ -534,6 +539,7 @@ impl Voice {
             channels: stream.channels,
             sample_rate: stream.sample_rate,
             frame_pos: AtomicU64::new(0),
+            loop_start_frame: AtomicU64::new(0),
             underrun_events: AtomicU64::new(0),
             dropped_underrun_reports: AtomicU64::new(0),
             has_looped: AtomicBool::new(false),
@@ -574,6 +580,7 @@ impl Voice {
             channels: 2,
             sample_rate,
             frame_pos: AtomicU64::new(0),
+            loop_start_frame: AtomicU64::new(0),
             underrun_events: AtomicU64::new(0),
             dropped_underrun_reports: AtomicU64::new(0),
             has_looped: AtomicBool::new(false),

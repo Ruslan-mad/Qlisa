@@ -1880,14 +1880,41 @@ fn run_stream_job(job: StreamJob) {
                         publish_stream_ready(&source, generation);
                         source.loop_rebuffer.store(false, Ordering::Release);
                     }
-                    if source.buffered_samples() >= target {
+                    // A decoded packet is already removed from the demuxer.
+                    // Keep its tail when a trimmed refill reaches the target,
+                    // or the next job starts at the following packet and drops
+                    // those frames permanently. Other modes retain the
+                    // existing target-boundary behavior.
+                    if source.buffered_samples() >= target && !source.is_trimmed_looping() {
                         break;
                     }
                 }
             }
             Ok(_) => {}
             Err(symphonia::core::errors::Error::IoError(_)) => {
-                if source.is_seamless_looping() && session.frame > 0 {
+                let trimmed_eof_loop = source.is_trimmed_looping()
+                    && session.frame > source.trim_loop_start.load(Ordering::Acquire)
+                    && source.trim_loop_end.load(Ordering::Acquire) >= session.frame;
+                if trimmed_eof_loop {
+                    // A start-only trim uses the probed duration as its end.
+                    // Some decoders report a duration a little past the last
+                    // decoded frame, so packet-based boundary detection never
+                    // fires. Treat physical EOF as the effective end and queue
+                    // the next bounded pass from the trim start.
+                    source.trim_loop_end.store(session.frame, Ordering::Release);
+                    source.total_frames.store(session.frame, Ordering::Release);
+                    match stream_decoder(&source.path, true)
+                        .or_else(|_| stream_decoder(&source.path, false))
+                    {
+                        Ok(Some(decoder)) => {
+                            session.decoder = decoder;
+                            session.frame = 0;
+                            session.seek_target_frame = source.trim_loop_start.load(Ordering::Acquire);
+                            continue;
+                        }
+                        _ => source.decode_failures.fetch_add(1, Ordering::Relaxed),
+                    };
+                } else if source.is_seamless_looping() && session.frame > 0 {
                     // Use the decoded sample count, not a possibly absent or
                     // approximate MP3 container duration, for loop boundaries.
                     source.total_frames.store(session.frame, Ordering::Release);
