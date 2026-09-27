@@ -163,6 +163,16 @@ pub enum AudioStatus {
         near_loop_boundary: bool,
         dropped_before: u64,
     },
+    /// Expected silence while an operator seek refills its source. This is
+    /// informational unless the source did not become ready before timeout.
+    ControlSeekRebuffer {
+        voice_id: VoiceId,
+        requests: u64,
+        silent_frames: u64,
+        duration_ms: u64,
+        timed_out: bool,
+        completed: bool,
+    },
     /// Current playback position of a voice in samples (for UI time display).
     Position {
         voice_id: VoiceId,

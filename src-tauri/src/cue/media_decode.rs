@@ -42,6 +42,29 @@ const STREAM_JOB_QUEUE: usize = 32;
 const STREAM_LOW_WATERMARK_NUMERATOR: usize = 1;
 const STREAM_LOW_WATERMARK_DENOMINATOR: usize = 2;
 const STREAM_REFILL_POLL_MILLIS: u64 = 5;
+const SEEK_REASON_MASK: u64 = 0b11;
+const SEEK_GENERATION_STEP: u64 = 4;
+pub const CONTROL_SEEK_TIMEOUT_MS: u64 = 3_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+enum SeekReason {
+    Ordinary = 0,
+    Control = 1,
+    LoopBoundary = 2,
+}
+
+fn next_seek_state(current: u64, reason: SeekReason) -> u64 {
+    (current & !SEEK_REASON_MASK).wrapping_add(SEEK_GENERATION_STEP) | reason as u64
+}
+
+fn seek_reason(state: u64) -> SeekReason {
+    match state & SEEK_REASON_MASK {
+        1 => SeekReason::Control,
+        2 => SeekReason::LoopBoundary,
+        _ => SeekReason::Ordinary,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioStreamInfo {
@@ -86,6 +109,10 @@ pub struct StreamingAudioSource {
     cancel: AtomicBool,
     seek_generation: AtomicU64,
     applied_generation: AtomicU64,
+    acknowledged_control_generation: AtomicU64,
+    timed_out_control_seek_generation: AtomicU64,
+    pending_seek_generation: AtomicU64,
+    ready_generation: AtomicU64,
     requested_frame: AtomicU64,
     decoded_frames: AtomicU64,
     total_frames: AtomicU64,
@@ -94,6 +121,7 @@ pub struct StreamingAudioSource {
     trim_loop_start: AtomicU64,
     trim_loop_end: AtomicU64,
     eof: AtomicBool,
+    eof_generation: AtomicU64,
     ready: AtomicBool,
     /// Loop seeks resume from a smaller watermark than initial GO.
     loop_rebuffer: AtomicBool,
@@ -112,6 +140,17 @@ pub struct StreamingAudioSource {
     silent_frames: AtomicU64,
     initial_underruns: AtomicU64,
     regular_underruns: AtomicU64,
+    control_seek_started_frames: AtomicU64,
+    control_seek_last_request_frames: AtomicU64,
+    control_seek_requests: AtomicU64,
+    control_seek_silent_frames: AtomicU64,
+    control_seek_wait_frames: AtomicU64,
+    control_seek_source_misses: AtomicU64,
+    pending_control_seek_requests: AtomicU64,
+    pending_control_seek_frames: AtomicU64,
+    pending_control_seek_duration_ms: AtomicU64,
+    pending_control_seek_timeout: AtomicBool,
+    pending_control_seek_completed: AtomicBool,
     min_buffered_frames: AtomicUsize,
     max_buffered_frames: AtomicUsize,
     requested_at_ms: AtomicU64,
@@ -223,6 +262,7 @@ impl StreamingAudioSource {
             .saturating_mul(STREAM_MAX_SECONDS)
             .max(1024);
         let ring = PcmRing::new(capacity, channels);
+        ring.reset(SEEK_GENERATION_STEP);
         let capacity_frames = capacity / channels.max(1);
         let source = Arc::new(Self {
             source_id: Uuid::new_v4(),
@@ -232,8 +272,12 @@ impl StreamingAudioSource {
             ring: Arc::clone(&ring),
             buffered_samples: AtomicUsize::new(0),
             cancel: AtomicBool::new(false),
-            seek_generation: AtomicU64::new(1),
-            applied_generation: AtomicU64::new(1),
+            seek_generation: AtomicU64::new(SEEK_GENERATION_STEP),
+            applied_generation: AtomicU64::new(SEEK_GENERATION_STEP),
+            acknowledged_control_generation: AtomicU64::new(0),
+            timed_out_control_seek_generation: AtomicU64::new(0),
+            pending_seek_generation: AtomicU64::new(0),
+            ready_generation: AtomicU64::new(SEEK_GENERATION_STEP),
             requested_frame: AtomicU64::new(initial_frame),
             decoded_frames: AtomicU64::new(0),
             total_frames: AtomicU64::new(info.total_frames.unwrap_or(0)),
@@ -242,6 +286,7 @@ impl StreamingAudioSource {
             trim_loop_start: AtomicU64::new(0),
             trim_loop_end: AtomicU64::new(0),
             eof: AtomicBool::new(false),
+            eof_generation: AtomicU64::new(SEEK_GENERATION_STEP),
             ready: AtomicBool::new(false),
             loop_rebuffer: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
@@ -260,6 +305,17 @@ impl StreamingAudioSource {
             silent_frames: AtomicU64::new(0),
             initial_underruns: AtomicU64::new(0),
             regular_underruns: AtomicU64::new(0),
+            control_seek_started_frames: AtomicU64::new(0),
+            control_seek_last_request_frames: AtomicU64::new(0),
+            control_seek_requests: AtomicU64::new(0),
+            control_seek_silent_frames: AtomicU64::new(0),
+            control_seek_wait_frames: AtomicU64::new(0),
+            control_seek_source_misses: AtomicU64::new(0),
+            pending_control_seek_requests: AtomicU64::new(0),
+            pending_control_seek_frames: AtomicU64::new(0),
+            pending_control_seek_duration_ms: AtomicU64::new(0),
+            pending_control_seek_timeout: AtomicBool::new(false),
+            pending_control_seek_completed: AtomicBool::new(false),
             min_buffered_frames: AtomicUsize::new(capacity_frames),
             max_buffered_frames: AtomicUsize::new(0),
             requested_at_ms: AtomicU64::new(0),
@@ -285,8 +341,9 @@ impl StreamingAudioSource {
     ) -> Arc<Self> {
         let capacity_frames = frames.len().max(2) + 1;
         let ring = PcmRing::new(capacity_frames * 2, 2);
+        ring.reset(SEEK_GENERATION_STEP);
         for frame in frames {
-            ring.push_frame(frame, 1)
+            ring.push_frame(frame, SEEK_GENERATION_STEP)
                 .expect("test PCM must fit in the source ring");
         }
         Arc::new(Self {
@@ -297,8 +354,12 @@ impl StreamingAudioSource {
             ring,
             buffered_samples: AtomicUsize::new(frames.len() * 2),
             cancel: AtomicBool::new(false),
-            seek_generation: AtomicU64::new(1),
-            applied_generation: AtomicU64::new(1),
+            seek_generation: AtomicU64::new(SEEK_GENERATION_STEP),
+            applied_generation: AtomicU64::new(SEEK_GENERATION_STEP),
+            acknowledged_control_generation: AtomicU64::new(0),
+            timed_out_control_seek_generation: AtomicU64::new(0),
+            pending_seek_generation: AtomicU64::new(0),
+            ready_generation: AtomicU64::new(SEEK_GENERATION_STEP),
             requested_frame: AtomicU64::new(0),
             decoded_frames: AtomicU64::new(frames.len() as u64),
             total_frames: AtomicU64::new(frames.len() as u64),
@@ -307,6 +368,7 @@ impl StreamingAudioSource {
             trim_loop_start: AtomicU64::new(0),
             trim_loop_end: AtomicU64::new(0),
             eof: AtomicBool::new(eof),
+            eof_generation: AtomicU64::new(SEEK_GENERATION_STEP),
             ready: AtomicBool::new(ready),
             loop_rebuffer: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
@@ -324,6 +386,17 @@ impl StreamingAudioSource {
             silent_frames: AtomicU64::new(0),
             initial_underruns: AtomicU64::new(0),
             regular_underruns: AtomicU64::new(0),
+            control_seek_started_frames: AtomicU64::new(0),
+            control_seek_last_request_frames: AtomicU64::new(0),
+            control_seek_requests: AtomicU64::new(0),
+            control_seek_silent_frames: AtomicU64::new(0),
+            control_seek_wait_frames: AtomicU64::new(0),
+            control_seek_source_misses: AtomicU64::new(0),
+            pending_control_seek_requests: AtomicU64::new(0),
+            pending_control_seek_frames: AtomicU64::new(0),
+            pending_control_seek_duration_ms: AtomicU64::new(0),
+            pending_control_seek_timeout: AtomicBool::new(false),
+            pending_control_seek_completed: AtomicBool::new(false),
             min_buffered_frames: AtomicUsize::new(frames.len()),
             max_buffered_frames: AtomicUsize::new(frames.len()),
             requested_at_ms: AtomicU64::new(0),
@@ -332,6 +405,21 @@ impl StreamingAudioSource {
             last_decode_us: AtomicU64::new(0),
             max_decode_us: AtomicU64::new(0),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_publish_ready_pcm(&self, frames: &[[f32; 2]]) {
+        let generation = self.seek_generation.load(Ordering::Acquire);
+        self.ring.reset(generation);
+        for frame in frames {
+            self.ring.push_frame(frame, generation).expect("test PCM must fit");
+        }
+        self.buffered_samples.store(frames.len() * self.channels as usize, Ordering::Release);
+        self.eof.store(false, Ordering::Release);
+        self.eof_generation.store(generation, Ordering::Release);
+        self.ready_generation.store(generation, Ordering::Release);
+        self.ready.store(true, Ordering::Release);
+        self.pending_seek_generation.store(0, Ordering::Release);
     }
 
     pub fn total_frames(&self) -> u64 {
@@ -359,6 +447,78 @@ impl StreamingAudioSource {
 
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+            && self.ready_generation.load(Ordering::Acquire)
+                == self.seek_generation.load(Ordering::Acquire)
+            && self.pending_seek_generation.load(Ordering::Acquire) == 0
+    }
+    pub fn is_control_seek_pending(&self) -> bool {
+        let state = self.seek_generation.load(Ordering::Acquire);
+        let pending = self.pending_seek_generation.load(Ordering::Acquire);
+        (seek_reason(state) == SeekReason::Control && !self.is_ready())
+            || (pending != 0 && seek_reason(pending) == SeekReason::Control)
+    }
+    pub fn note_control_seek_silence(&self, frames: usize) {
+        self.control_seek_silent_frames.fetch_add(frames as u64, Ordering::Relaxed);
+        self.control_seek_wait_frames.fetch_add(frames as u64, Ordering::Relaxed);
+    }
+    pub fn control_seek_source_misses(&self) -> u64 {
+        self.control_seek_source_misses.load(Ordering::Acquire)
+    }
+    pub fn take_control_seek_report(&self, output_sample_rate: u32, check_timeout: bool) -> Option<ControlSeekReport> {
+        let state = self.seek_generation.load(Ordering::Acquire);
+        if seek_reason(state) != SeekReason::Control { return None; }
+        let ready = self.is_ready();
+        let waited_frames = self.control_seek_wait_frames.load(Ordering::Acquire);
+        let last_request = self.control_seek_last_request_frames.load(Ordering::Acquire);
+        let timed_out = check_timeout
+            && !ready
+            && waited_frames.saturating_sub(last_request)
+                >= output_sample_rate.max(1) as u64 * CONTROL_SEEK_TIMEOUT_MS / 1000;
+        if !ready && timed_out
+            && self.timed_out_control_seek_generation.load(Ordering::Acquire) != state
+        {
+            self.timed_out_control_seek_generation.store(state, Ordering::Release);
+            return Some(ControlSeekReport { requests: 0, silent_frames: 0, duration_ms: 0, timed_out: true, completed: false });
+        }
+        if !ready || self.acknowledged_control_generation.load(Ordering::Acquire) == state { return None; }
+        let started = self.control_seek_started_frames.load(Ordering::Acquire);
+        let requests = self.control_seek_requests.load(Ordering::Acquire);
+        let silent_frames = self.control_seek_silent_frames.load(Ordering::Acquire);
+        self.acknowledged_control_generation.store(state, Ordering::Release);
+        Some(ControlSeekReport {
+            requests,
+            silent_frames,
+            duration_ms: waited_frames.saturating_sub(started) * 1000 / output_sample_rate.max(1) as u64,
+            timed_out: false,
+            completed: true,
+        })
+    }
+    pub fn accumulate_pending_control_seek_report(&self, report: ControlSeekReport) {
+        self.pending_control_seek_requests.fetch_add(report.requests, Ordering::Relaxed);
+        self.pending_control_seek_frames.fetch_add(report.silent_frames, Ordering::Relaxed);
+        self.pending_control_seek_duration_ms.fetch_add(report.duration_ms, Ordering::Relaxed);
+        if report.timed_out { self.pending_control_seek_timeout.store(true, Ordering::Release); }
+        if report.completed { self.pending_control_seek_completed.store(true, Ordering::Release); }
+    }
+    pub fn pending_control_seek_report(&self) -> Option<ControlSeekReport> {
+        let requests = self.pending_control_seek_requests.load(Ordering::Acquire);
+        let timed_out = self.pending_control_seek_timeout.load(Ordering::Acquire);
+        let completed = self.pending_control_seek_completed.load(Ordering::Acquire);
+        if requests == 0 && !timed_out && !completed { return None; }
+        Some(ControlSeekReport {
+            requests,
+            silent_frames: self.pending_control_seek_frames.load(Ordering::Acquire),
+            duration_ms: self.pending_control_seek_duration_ms.load(Ordering::Acquire),
+            timed_out,
+            completed,
+        })
+    }
+    pub fn acknowledge_control_seek_report(&self, report: ControlSeekReport) {
+        self.pending_control_seek_requests.fetch_sub(report.requests, Ordering::AcqRel);
+        self.pending_control_seek_frames.fetch_sub(report.silent_frames, Ordering::AcqRel);
+        self.pending_control_seek_duration_ms.fetch_sub(report.duration_ms, Ordering::AcqRel);
+        if report.timed_out { self.pending_control_seek_timeout.store(false, Ordering::Release); }
+        if report.completed { self.pending_control_seek_completed.store(false, Ordering::Release); }
     }
     pub fn is_loop_rebuffering(&self) -> bool {
         self.loop_rebuffer.load(Ordering::Acquire)
@@ -372,6 +532,9 @@ impl StreamingAudioSource {
     }
     pub fn is_eof(&self) -> bool {
         self.eof.load(Ordering::Acquire)
+            && self.eof_generation.load(Ordering::Acquire)
+                == self.seek_generation.load(Ordering::Acquire)
+            && self.pending_seek_generation.load(Ordering::Acquire) == 0
     }
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
@@ -508,12 +671,51 @@ impl StreamingAudioSource {
     /// Publish a new source generation. This is safe from a control thread and
     /// does not touch the callback-owned ring consumer index.
     pub fn request_seek(self: &Arc<Self>, frame: u64) {
+        self.publish_seek(frame, SeekReason::Ordinary);
+    }
+
+    /// Publish an operator seek as one tagged source generation. The reason
+    /// and generation share one atomic word so the callback cannot mistake
+    /// this rebuffer for decoder starvation.
+    pub fn request_control_seek(self: &Arc<Self>, frame: u64) {
+        let previous = self.seek_generation.load(Ordering::Acquire);
+        if seek_reason(previous) != SeekReason::Control
+            || self.acknowledged_control_generation.load(Ordering::Acquire) == previous
+        {
+            let waited_frames = self.control_seek_wait_frames.load(Ordering::Acquire);
+            self.control_seek_started_frames.store(waited_frames, Ordering::Relaxed);
+            self.control_seek_requests.store(0, Ordering::Relaxed);
+            self.control_seek_silent_frames.store(0, Ordering::Relaxed);
+        }
+        self.control_seek_requests.fetch_add(1, Ordering::Relaxed);
+        self.control_seek_last_request_frames.store(
+            self.control_seek_wait_frames.load(Ordering::Acquire), Ordering::Release,
+        );
+        self.publish_seek(frame, SeekReason::Control);
+    }
+
+    fn publish_seek(self: &Arc<Self>, frame: u64, reason: SeekReason) {
         self.loop_rebuffer.store(false, Ordering::Release);
-        self.requested_frame.store(frame, Ordering::Release);
-        self.seek_generation.fetch_add(1, Ordering::AcqRel);
-        self.eof.store(false, Ordering::Release);
-        self.ready.store(false, Ordering::Release);
-        self.decoded_frames.store(0, Ordering::Release);
+        loop {
+            let previous = self.seek_generation.load(Ordering::Acquire);
+            let next = next_seek_state(previous, reason);
+            self.pending_seek_generation.store(next, Ordering::Release);
+            self.requested_frame.store(frame, Ordering::Release);
+            self.eof.store(false, Ordering::Release);
+            self.ready.store(false, Ordering::Release);
+            self.decoded_frames.store(0, Ordering::Release);
+            if self.seek_generation.compare_exchange_weak(
+                previous, next, Ordering::AcqRel, Ordering::Acquire,
+            ).is_ok() {
+                let _ = self.pending_seek_generation.compare_exchange(
+                    next, 0, Ordering::AcqRel, Ordering::Acquire,
+                );
+                break;
+            }
+            let _ = self.pending_seek_generation.compare_exchange(
+                next, 0, Ordering::AcqRel, Ordering::Acquire,
+            );
+        }
         self.refill_requested.store(true, Ordering::Release);
     }
 
@@ -531,14 +733,14 @@ impl StreamingAudioSource {
 
     /// Seek used by loop/slice boundaries that are already executing on RT.
     pub fn request_seek_rt(self: &Arc<Self>, frame: u64) {
-        self.request_seek(frame);
+        self.publish_seek(frame, SeekReason::LoopBoundary);
         self.apply_seek_rt();
     }
 
     /// Rewind used by the ordinary Voice loop. Its decoder can restart at the
     /// beginning of the file, so it uses the shorter loop rebuffer watermark.
     pub fn request_loop_seek_rt(self: &Arc<Self>, frame: u64) {
-        self.request_seek(frame);
+        self.publish_seek(frame, SeekReason::LoopBoundary);
         self.loop_rebuffer.store(true, Ordering::Release);
         self.apply_seek_rt();
     }
@@ -547,7 +749,7 @@ impl StreamingAudioSource {
     /// a fresh bounded worker job; submission is try-send and never blocks the
     /// UI or the audio callback.
     pub fn prepare_seek(self: &Arc<Self>, frame: u64) -> Result<()> {
-        self.request_seek(frame);
+        self.publish_seek(frame, SeekReason::Ordinary);
         let generation = self.seek_generation.load(Ordering::Acquire);
         self.buffered_samples.store(0, Ordering::Release);
         self.ring.reset(generation);
@@ -557,13 +759,32 @@ impl StreamingAudioSource {
     }
 
     pub fn cancel(&self) {
+        let eof_generation = self.seek_generation.load(Ordering::Acquire);
+        let preserve_terminal_eof = self.eof.load(Ordering::Acquire)
+            && self.eof_generation.load(Ordering::Acquire) == eof_generation
+            && self.pending_seek_generation.load(Ordering::Acquire) == 0;
         if !self.cancel.swap(true, Ordering::Release) {
             self.account_playing(false);
         }
-        let generation = self.seek_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let (generation, preserve_terminal_eof) = loop {
+            let previous = self.seek_generation.load(Ordering::Acquire);
+            let next = next_seek_state(previous, SeekReason::Ordinary);
+            self.pending_seek_generation.store(next, Ordering::Release);
+            if self.seek_generation.compare_exchange_weak(
+                previous, next, Ordering::AcqRel, Ordering::Acquire,
+            ).is_ok() {
+                let _ = self.pending_seek_generation.compare_exchange(
+                    next, 0, Ordering::AcqRel, Ordering::Acquire,
+                );
+                break (next, preserve_terminal_eof && previous == eof_generation);
+            }
+        };
         self.buffered_samples.store(0, Ordering::Release);
         self.ring.reset(generation);
         self.applied_generation.store(generation, Ordering::Release);
+        if preserve_terminal_eof {
+            self.eof_generation.store(generation, Ordering::Release);
+        }
     }
 
     /// Pop one interleaved frame.  Missing data is intentional silence and is
@@ -586,11 +807,15 @@ impl StreamingAudioSource {
             // new generation, so a post-seek empty ring remains refillable.
             if !self.is_eof() && !self.is_cancelled() {
                 self.refill_requested.store(true, Ordering::Release);
-                self.underruns.fetch_add(1, Ordering::Relaxed);
-                if self.is_ready() {
-                    self.regular_underruns.fetch_add(1, Ordering::Relaxed);
+                if self.is_control_seek_pending() {
+                    self.control_seek_source_misses.fetch_add(1, Ordering::Relaxed);
                 } else {
-                    self.initial_underruns.fetch_add(1, Ordering::Relaxed);
+                    self.underruns.fetch_add(1, Ordering::Relaxed);
+                    if self.is_ready() {
+                        self.regular_underruns.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        self.initial_underruns.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -835,6 +1060,15 @@ pub struct StreamDiagnosticEvent {
     pub source_label: String,
     pub kind: String,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlSeekReport {
+    pub requests: u64,
+    pub silent_frames: u64,
+    pub duration_ms: u64,
+    pub timed_out: bool,
+    pub completed: bool,
 }
 
 struct PendingStreamJob {
@@ -1487,6 +1721,24 @@ pub fn decode_slice_ranges(
     Ok(Some((compact, offsets)))
 }
 
+fn publish_stream_ready(source: &StreamingAudioSource, generation: u64) {
+    if source.seek_generation.load(Ordering::Acquire) == generation
+        && source.pending_seek_generation.load(Ordering::Acquire) == 0
+    {
+        source.ready_generation.store(generation, Ordering::Release);
+        source.ready.store(true, Ordering::Release);
+    }
+}
+
+fn publish_stream_eof(source: &StreamingAudioSource, generation: u64, eof: bool) {
+    if source.seek_generation.load(Ordering::Acquire) == generation
+        && source.pending_seek_generation.load(Ordering::Acquire) == 0
+    {
+        source.eof_generation.store(generation, Ordering::Release);
+        source.eof.store(eof, Ordering::Release);
+    }
+}
+
 fn push_stream_frame(
     source: &StreamingAudioSource,
     ring: &PcmRing,
@@ -1539,20 +1791,20 @@ fn run_stream_job(job: StreamJob) {
                 generation,
             },
             Ok(None) => {
-                source.eof.store(true, Ordering::Release);
+                publish_stream_eof(&source, generation, true);
                 source.refill_requested.store(false, Ordering::Release);
                 return;
             }
             Err(_) => {
                 source.decode_failures.fetch_add(1, Ordering::Relaxed);
-                source.ready.store(true, Ordering::Release);
-                source.eof.store(true, Ordering::Release);
+                publish_stream_ready(&source, generation);
+                publish_stream_eof(&source, generation, true);
                 source.refill_requested.store(false, Ordering::Release);
                 return;
             }
         },
     };
-    source.eof.store(false, Ordering::Release);
+    publish_stream_eof(&source, generation, false);
     let reported_frames = session.decoder.total_frames.unwrap_or(0);
     if !source.is_seamless_looping() || source.total_frames() == 0 {
         source.total_frames.store(reported_frames, Ordering::Release);
@@ -1571,15 +1823,15 @@ fn run_stream_job(job: StreamJob) {
                     Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
                     Err(_) => {
                         source.decode_failures.fetch_add(1, Ordering::Relaxed);
-                        source.eof.store(true, Ordering::Release);
+                        publish_stream_eof(&source, generation, true);
                         break;
                     }
                 };
                 let channels = decoded.spec().channels.count().max(1);
                 if channels != source.channels.max(1) as usize {
                     source.decode_failures.fetch_add(1, Ordering::Relaxed);
-                    source.ready.store(true, Ordering::Release);
-                    source.eof.store(true, Ordering::Release);
+                    publish_stream_ready(&source, generation);
+                    publish_stream_eof(&source, generation, true);
                     break;
                 }
                 let pcm = interleaved(decoded);
@@ -1603,8 +1855,8 @@ fn run_stream_job(job: StreamJob) {
                             }
                             _ => {
                                 source.decode_failures.fetch_add(1, Ordering::Relaxed);
-                                source.ready.store(true, Ordering::Release);
-                                source.eof.store(true, Ordering::Release);
+                                publish_stream_ready(&source, generation);
+                                publish_stream_eof(&source, generation, true);
                                 break 'fill;
                             }
                         }
@@ -1625,7 +1877,7 @@ fn run_stream_job(job: StreamJob) {
                         .store(session.frame, Ordering::Release);
                     let ready_threshold = source.ready_threshold();
                     if source.buffered_samples() >= ready_threshold {
-                        source.ready.store(true, Ordering::Release);
+                        publish_stream_ready(&source, generation);
                         source.loop_rebuffer.store(false, Ordering::Release);
                     }
                     if source.buffered_samples() >= target {
@@ -1653,16 +1905,16 @@ fn run_stream_job(job: StreamJob) {
                     };
                 }
                 if source.buffered_samples() > 0 {
-                    source.ready.store(true, Ordering::Release);
+                    publish_stream_ready(&source, generation);
                 }
-                source.eof.store(true, Ordering::Release);
+                publish_stream_eof(&source, generation, true);
                 break;
             }
             Err(symphonia::core::errors::Error::ResetRequired) => session.decoder.decoder.reset(),
             Err(_) => {
                 source.decode_failures.fetch_add(1, Ordering::Relaxed);
-                source.ready.store(true, Ordering::Release);
-                source.eof.store(true, Ordering::Release);
+                publish_stream_ready(&source, generation);
+                publish_stream_eof(&source, generation, true);
                 break;
             }
         }
@@ -2071,8 +2323,12 @@ mod streaming_tests {
             ring: PcmRing::new(48_000 * 2 * STREAM_MAX_SECONDS, 2),
             buffered_samples: AtomicUsize::new(buffered_samples),
             cancel: AtomicBool::new(false),
-            seek_generation: AtomicU64::new(1),
-            applied_generation: AtomicU64::new(1),
+            seek_generation: AtomicU64::new(SEEK_GENERATION_STEP),
+            applied_generation: AtomicU64::new(SEEK_GENERATION_STEP),
+            acknowledged_control_generation: AtomicU64::new(0),
+            timed_out_control_seek_generation: AtomicU64::new(0),
+            pending_seek_generation: AtomicU64::new(0),
+            ready_generation: AtomicU64::new(SEEK_GENERATION_STEP),
             requested_frame: AtomicU64::new(0),
             decoded_frames: AtomicU64::new(0),
             total_frames: AtomicU64::new(0),
@@ -2081,6 +2337,7 @@ mod streaming_tests {
             trim_loop_start: AtomicU64::new(0),
             trim_loop_end: AtomicU64::new(0),
             eof: AtomicBool::new(false),
+            eof_generation: AtomicU64::new(SEEK_GENERATION_STEP),
             ready: AtomicBool::new(ready),
             loop_rebuffer: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
@@ -2098,6 +2355,17 @@ mod streaming_tests {
             silent_frames: AtomicU64::new(0),
             initial_underruns: AtomicU64::new(0),
             regular_underruns: AtomicU64::new(0),
+            control_seek_started_frames: AtomicU64::new(0),
+            control_seek_last_request_frames: AtomicU64::new(0),
+            control_seek_requests: AtomicU64::new(0),
+            control_seek_silent_frames: AtomicU64::new(0),
+            control_seek_wait_frames: AtomicU64::new(0),
+            control_seek_source_misses: AtomicU64::new(0),
+            pending_control_seek_requests: AtomicU64::new(0),
+            pending_control_seek_frames: AtomicU64::new(0),
+            pending_control_seek_duration_ms: AtomicU64::new(0),
+            pending_control_seek_timeout: AtomicBool::new(false),
+            pending_control_seek_completed: AtomicBool::new(false),
             min_buffered_frames: AtomicUsize::new(buffered_samples / 2),
             max_buffered_frames: AtomicUsize::new(buffered_samples / 2),
             requested_at_ms: AtomicU64::new(0),
@@ -2127,6 +2395,21 @@ mod streaming_tests {
         );
         assert!(ring.pop_frame(&mut frame));
         assert_eq!(frame, [4.0, 40.0]);
+    }
+
+    #[test]
+    fn control_seek_classifies_only_misses_after_its_generation_is_published() {
+        let source = StreamingAudioSource::test_from_pcm(&[], true, false);
+        let mut frame = [0.0; 2];
+        assert!(!source.pop_frame(&mut frame));
+        assert_eq!(source.underruns(), 1, "pre-seek starvation remains counted");
+
+        source.request_control_seek(12);
+        source.apply_seek_rt();
+        assert!(!source.pop_frame(&mut frame));
+        assert_eq!(source.underruns(), 1, "control-seek silence is not starvation");
+        assert_eq!(source.control_seek_source_misses(), 1);
+        assert_eq!(source.initial_underruns.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -2229,6 +2512,22 @@ mod streaming_tests {
         assert_eq!(source.underruns(), 0);
         assert!(!source.refill_requested.load(Ordering::Acquire));
         assert!(!source.needs_refill());
+    }
+
+    #[test]
+    fn cancel_preserves_only_an_already_published_terminal_eof() {
+        let completed = StreamingAudioSource::test_from_pcm(&[], true, true);
+        completed.cancel();
+        assert!(completed.is_eof());
+
+        let stopped_early = StreamingAudioSource::test_from_pcm(&[], false, false);
+        stopped_early.cancel();
+        assert!(!stopped_early.is_eof());
+
+        let stale_eof = StreamingAudioSource::test_from_pcm(&[], true, true);
+        stale_eof.request_seek(1);
+        stale_eof.cancel();
+        assert!(!stale_eof.is_eof(), "EOF from an older seek generation is not terminal now");
     }
 
     #[test]

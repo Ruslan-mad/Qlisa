@@ -1976,7 +1976,7 @@ impl AudioEngine {
                 // Publish the generation now so the producer invalidates stale
                 // PCM. The callback applies the ring reset with the Seek
                 // command below; it owns the consumer index.
-                stream.request_seek(frame_pos);
+                stream.request_control_seek(frame_pos);
             }
         });
         self.broadcast_command(AudioCommand::Seek {
@@ -2663,6 +2663,9 @@ fn fill_buffer(
     let mut patch_peaks = [0.0_f32; PATCH_VU_SLOTS * 2];
 
     for voice in voices_guard.iter() {
+        if let Some(source) = voice.stream.as_ref() {
+            flush_control_seek_report(source, voice.id, status_prod);
+        }
         let state = voice.voice_state();
         if state != VoiceState::Playing && state != VoiceState::FadingOut {
             continue;
@@ -3007,6 +3010,24 @@ fn complete_stream_at_eof(
     }
 }
 
+fn flush_control_seek_report(
+    source: &crate::cue::media_decode::StreamingAudioSource,
+    voice_id: VoiceId,
+    status_prod: &mut ringbuf::HeapProd<AudioStatus>,
+) {
+    let Some(report) = source.pending_control_seek_report() else { return; };
+    if status_prod.try_push(AudioStatus::ControlSeekRebuffer {
+        voice_id,
+        requests: report.requests,
+        silent_frames: report.silent_frames,
+        duration_ms: report.duration_ms,
+        timed_out: report.timed_out,
+        completed: report.completed,
+    }).is_ok() {
+        source.acknowledge_control_seek_report(report);
+    }
+}
+
 fn mix_stream(
     output: &mut [f32],
     mut program_stereo: Option<&mut [f32]>,
@@ -3028,6 +3049,10 @@ fn mix_stream(
             .frame_pos
             .store(source.requested_frame(), Ordering::Relaxed);
     }
+    if let Some(report) = source.take_control_seek_report(output_sample_rate, false) {
+        source.accumulate_pending_control_seek_report(report);
+    }
+    flush_control_seek_report(source, voice.id, status_prod);
     // Do not start consuming until the decoder has built its ready watermark:
     // 750 ms for GO and 100 ms after a loop seek. This keeps GO deterministic
     // while limiting the gap at a repeated boundary, without waiting in RT.
@@ -3040,6 +3065,17 @@ fn mix_stream(
             return;
         }
         let silent_frames = output.len() / channels.max(1);
+        if source.is_control_seek_pending() {
+            if let Some(report) = source.take_control_seek_report(output_sample_rate, true) {
+                source.accumulate_pending_control_seek_report(report);
+                flush_control_seek_report(source, voice.id, status_prod);
+            }
+            if source.is_control_seek_pending() {
+                source.note_control_seek_silence(silent_frames);
+                flush_control_seek_report(source, voice.id, status_prod);
+                return;
+            }
+        }
         source.note_underrun_frames(silent_frames);
         let count = voice.underrun_events.fetch_add(1, Ordering::Relaxed) + 1;
         let frame_pos = voice.current_frame();
@@ -3088,6 +3124,7 @@ fn mix_stream(
         .max(0.001);
     let cursor_ptr = voice.inner.stream_cursor.get();
     let underruns_before = source.underruns();
+    let control_seek_misses_before = source.control_seek_source_misses();
 
     for frame in 0..frames {
         let fade_gain = if let Some(fade) = unsafe { &mut *fade_ptr } {
@@ -3269,6 +3306,18 @@ fn mix_stream(
     }
     voice.frame_pos.store(frame_pos, Ordering::Relaxed);
     let underruns_after = source.underruns();
+    let control_seek_misses_after = source.control_seek_source_misses();
+    if control_seek_misses_after > control_seek_misses_before {
+        let missed_source_frames = control_seek_misses_after - control_seek_misses_before;
+        let silent_output_frames = ((missed_source_frames as f64 / ratio).ceil() as usize)
+            .max(1)
+            .min(frames);
+        source.note_control_seek_silence(silent_output_frames);
+        if let Some(report) = source.take_control_seek_report(output_sample_rate, true) {
+            source.accumulate_pending_control_seek_report(report);
+        }
+        flush_control_seek_report(source, voice.id, status_prod);
+    }
     if underruns_after > underruns_before {
         let count = voice.underrun_events.fetch_add(1, Ordering::Relaxed) + 1;
         let boundary_window = (source.sample_rate as u64 / 10).max(1);
@@ -5271,6 +5320,112 @@ mod tests {
         assert_eq!(voice.voice_state(), VoiceState::Playing);
         assert_eq!(completed_count(&statuses, id), 0);
         assert!(source.underruns() > 0);
+    }
+
+    #[test]
+    fn control_seek_rebuffer_is_reported_separately_then_real_starvation_remains_visible() {
+        let initial = vec![[0.25, -0.25]; 1024];
+        let (voice, source) = make_stream_voice(&initial, true, false);
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        source.request_control_seek(100);
+        source.request_control_seek(200);
+        source.request_control_seek(300);
+
+        let waiting = run_block(&pool, None);
+        assert!(!waiting.iter().any(|status| matches!(status, AudioStatus::Underrun { .. })));
+        assert_eq!(source.underruns(), 0);
+
+        source.test_publish_ready_pcm(&vec![[0.5, -0.5]; 512]);
+        let recovered = run_block(&pool, None);
+        assert!(!recovered.iter().any(|status| matches!(status, AudioStatus::Underrun { .. })));
+        assert!(recovered.iter().any(|status| matches!(status,
+            AudioStatus::ControlSeekRebuffer { requests: 3, completed: true, silent_frames: 256, .. }
+        )));
+
+        let _ = run_block(&pool, None);
+        let starved = run_block(&pool, None);
+        assert!(starved.iter().any(|status| matches!(status, AudioStatus::Underrun { .. })));
+    }
+
+    #[test]
+    fn paused_control_seek_does_not_accumulate_timeout_frames() {
+        let initial = vec![[0.25, -0.25]; 1024];
+        let (voice, source) = make_stream_voice(&initial, true, false);
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        source.request_control_seek(400);
+        voice.set_paused();
+        for _ in 0..8 {
+            let statuses = run_block(&pool, None);
+            assert!(!statuses.iter().any(|status| matches!(status,
+                AudioStatus::ControlSeekRebuffer { timed_out: true, .. }
+            )));
+        }
+        source.test_publish_ready_pcm(&vec![[0.5, -0.5]; 512]);
+        voice.set_playing();
+        let statuses = run_block(&pool, None);
+        assert!(statuses.iter().any(|status| matches!(status,
+            AudioStatus::ControlSeekRebuffer { completed: true, timed_out: false, .. }
+        )));
+    }
+
+    #[test]
+    fn timed_out_seek_stays_classified_until_recovery_without_underrun_flood() {
+        let initial = vec![[0.25, -0.25]; 1024];
+        let (voice, source) = make_stream_voice(&initial, true, false);
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        source.request_control_seek(400);
+
+        let mut timeout_reports = 0;
+        let mut underruns = 0;
+        for _ in 0..600 {
+            for status in run_block(&pool, None) {
+                match status {
+                    AudioStatus::ControlSeekRebuffer { timed_out: true, .. } => timeout_reports += 1,
+                    AudioStatus::Underrun { .. } => underruns += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(timeout_reports, 1);
+        assert_eq!(underruns, 0);
+        assert!(source.is_control_seek_pending(), "timeout does not reclassify a stalled seek as starvation");
+
+        source.test_publish_ready_pcm(&vec![[0.5, -0.5]; 512]);
+        let recovered = run_block(&pool, None);
+        assert!(recovered.iter().any(|status| matches!(status,
+            AudioStatus::ControlSeekRebuffer { completed: true, .. }
+        )));
+        assert!(!recovered.iter().any(|status| matches!(status, AudioStatus::Underrun { .. })));
+    }
+
+    #[test]
+    fn pending_control_seek_summary_retries_after_status_ring_is_full() {
+        use ringbuf::traits::{Consumer, Producer};
+
+        let source = StreamingAudioSource::test_from_pcm(&[], false, false);
+        source.accumulate_pending_control_seek_report(
+            crate::cue::media_decode::ControlSeekReport {
+                requests: 2,
+                silent_frames: 256,
+                duration_ms: 5,
+                timed_out: false,
+                completed: true,
+            },
+        );
+        let (mut producer, mut consumer) = HeapRb::<AudioStatus>::new(1).split();
+        let first_id = Uuid::from_u128(1);
+        let voice_id = Uuid::from_u128(7);
+        producer.try_push(AudioStatus::Completed { voice_id: first_id }).unwrap();
+
+        flush_control_seek_report(&source, voice_id, &mut producer);
+        assert!(source.pending_control_seek_report().is_some(), "full status ring must retain summary");
+        assert!(matches!(consumer.try_pop(), Some(AudioStatus::Completed { .. })));
+        flush_control_seek_report(&source, voice_id, &mut producer);
+
+        assert!(matches!(consumer.try_pop(), Some(AudioStatus::ControlSeekRebuffer {
+            requests: 2, silent_frames: 256, completed: true, ..
+        })));
+        assert!(source.pending_control_seek_report().is_none());
     }
 
     #[test]

@@ -223,6 +223,11 @@ streaming seek fallback and logs a warning with the cue and reason. GO waits up
 to three seconds for a pending slice preload, then returns a retryable error
 instead of silently starting the seek fallback. Control seeks and initial
 streaming playback keep the 750 ms watermark.
+Interactive control seeks report expected refill silence separately from
+stream starvation. The callback counts only active playback frames toward the
+three-second seek timeout; paused seeks do not time out. Recovery logs one
+aggregate INFO report and clears that voice's timeout alert. Starvation after
+readiness and loop-boundary rebuffering remain underrun warnings.
 Run the ignored 30-minute callback/decoder loop stress test with
 `cd src-tauri && cargo test streaming_audio_loop_wall_clock_30m -- --ignored --nocapture`.
 Set `QLISA_AUDIO_STRESS_SECONDS` to a smaller number for a smoke run. The test

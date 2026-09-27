@@ -675,6 +675,38 @@ fn tick(
                     "Audio streaming underrun detected. See diagnostic log for details.",
                 ));
             }
+            AudioStatus::ControlSeekRebuffer {
+                voice_id,
+                requests,
+                silent_frames,
+                duration_ms,
+                timed_out,
+                completed,
+            } => {
+                let cue_info = workspace
+                    .lock()
+                    .ok()
+                    .and_then(|ws| find_audio_cue_info(&ws.cue_lists, voice_id, output_engine));
+                let cue_id = cue_info.as_ref().map(|(id, _, _)| id.to_string());
+                let label = cue_info.map(|(_, number, name)| {
+                    if number.is_empty() { name } else { format!("#{number} {name}") }
+                }).filter(|label| !label.is_empty()).unwrap_or_else(|| format!("voice {voice_id}"));
+                let message = format!(
+                    "Control seek rebuffer: Cue {label} ({requests} seek requests, {silent_frames} expected silent output frames, {duration_ms} ms)"
+                );
+                if timed_out {
+                    log::warn!(target: "audio::seek", "Control seek timeout: Cue {label} did not become ready after three seconds of active playback; voice_id={voice_id}; cue_id={}", cue_id.as_deref().unwrap_or("unknown"));
+                    crate::health::set(crate::health::HealthAlert::new(
+                        &format!("audio-control-seek-timeout-{voice_id}"),
+                        crate::health::HealthLevel::Warning,
+                        "Audio seek did not refill its stream within three seconds of active playback.",
+                    ));
+                }
+                if completed {
+                    log::info!(target: "audio::seek", "{message}; voice_id={voice_id}; cue_id={}", cue_id.as_deref().unwrap_or("unknown"));
+                    crate::health::clear(&format!("audio-control-seek-timeout-{voice_id}"));
+                }
+            }
             _ => {}
         }
     }
