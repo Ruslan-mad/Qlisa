@@ -2,6 +2,7 @@
 
 ## Project and contribution
 
+- [Release notes for 1.5.9](RELEASE_NOTES_1.5.9.md) — changes in this release.
 - [Project guide](PROJECT_GUIDE.md) — architecture, cue lifecycle, data flow,
   build and test commands, platform prerequisites, and compatibility rules.
 - [Release notes for 1.5.6](RELEASE_NOTES_1.5.6.md) — changes recorded for that

@@ -17,8 +17,10 @@ Save As offers `.qlisa` by default and preserves an explicitly chosen `.inkue`
 suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
-extension changes are included in Qlisa 1.5.8, the latest release. The `.qlisa`
-Windows file association is included in that release. This is not an official
+extension changes and the `.qlisa` Windows file association shipped in Qlisa
+1.5.8. This source tree targets Qlisa 1.5.9; see [its release notes](RELEASE_NOTES_1.5.9.md)
+and the [Releases page](https://github.com/Ruslan-mad/Qlisa/releases) for binary
+availability. This is not an official
 upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
 downloads. The Tauri updater is configured for signed GitHub Releases. The
@@ -54,6 +56,23 @@ Features represented in the current tree include:
 - Global physical fullscreen controls can show or hide physical display outputs
   and assign monitors. Qlisa enforces one running instance; reopening the app
   focuses the existing instance.
+- Streaming audio waits for source readiness before a new Audio Cue starts its
+  playback clock. Audio trim and loop regression details, including WAV/MP3
+  full-file, trimmed, and sliced cases, are in
+  [audio trim loop regression](audio-trim-loop-regression.md).
+- Startup holds the main App mount until backend setup reports ready. The
+  readiness flag is registered before engine startup and set at the end of
+  setup; the existing pending initial-project queue remains in use. This is a
+  separate gate from Audio Cue stream readiness. If readiness takes over 60
+  seconds, the bootstrap screen offers Retry. Cold launch and second-instance
+  project-open checks during setup passed without a `state-not-managed` error.
+  The second process started 500 ms after the first and opened its project
+  through the existing single-instance forwarding path.
+- A connected local SRT receiver stability run lasted 30 minutes with concurrent
+  audio and video and recorded zero new queue drops. The app used virtual
+  Windows WASAPI CABLE-A at 48 kHz; this does not validate physical hardware.
+  See [SRT audio queue diagnostics](srt-audio-queue-diagnostics.md). The test
+  harness startup fix does not establish a production sender pacing fix.
 - Named display outputs and separate Mixer, Output Monitor, and floating timer
   windows. The main app can also degrade to an audio-only/headless-output
   session when an output engine dependency cannot be started.

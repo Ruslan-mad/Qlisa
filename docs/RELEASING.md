@@ -42,22 +42,23 @@ key.
 Create and review the release notes, then run from the repository root:
 
 ```powershell
-.\scripts\publish.ps1 -Version 1.5.5
+.\scripts\publish.ps1 -Version 1.5.9
 ```
 
 The script checks the repository, runtime manifest pins, and signing setup. It runs
 frontend tests/build and Rust metadata/check/test/clippy checks. Then
 `scripts/release.mjs` updates and commits the local version files and builds
-the NSIS installer and Tauri updater artifact. The script creates the
-installer, its `.sig`, and `latest.json` under
-`src-tauri/target/release/prepared/vX.Y.Z/`. It prints the artifact paths and
-SHA-256 values. It does not tag, push, or publish anything.
+the NSIS installer and Tauri updater artifact. The installer and its `.exe.sig`
+are under `src-tauri/target/release/bundle/nsis/`. The generated
+`latest.json` is under `src-tauri/target/release/prepared/vX.Y.Z/`. The script
+prints the artifact paths and SHA-256 values. It does not tag, push, or publish
+anything.
 
 `-DryRun` checks prerequisites without changing
 version files or building artifacts:
 
 ```powershell
-.\scripts\publish.ps1 -Version 1.5.5 -DryRun
+.\scripts\publish.ps1 -Version 1.5.9 -DryRun
 ```
 
 Clippy warnings do not fail this check; a non-zero Clippy exit does. The

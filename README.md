@@ -23,7 +23,7 @@
 
 Qlisa is cue-based playback software for live shows and stage production on Windows. Build a cue list, select the next cue with the Playhead, and start it with **GO**. Audio, video, images, groups, timing, and output routing share one show workspace.
 
-Qlisa is a community-maintained derivative of [Inkue by FonograF](https://github.com/FonograF/Inkue). New projects use `.qlisa`; legacy `.inkue` projects remain supported, and both extensions use the same JSON workspace format. Qlisa 1.5.8 includes the `.qlisa` Windows file association and is the latest release.
+Qlisa is a community-maintained derivative of [Inkue by FonograF](https://github.com/FonograF/Inkue). New projects use `.qlisa`; legacy `.inkue` projects remain supported, and both extensions use the same JSON workspace format. The `.qlisa` Windows file association was added in 1.5.8. This source tree targets Qlisa 1.5.9; see [Releases](https://github.com/Ruslan-mad/Qlisa/releases) for binary availability.
 
 ## About
 
@@ -78,5 +78,6 @@ Qlisa is licensed under [GPL-3.0-or-later](LICENSE). Third-party software has se
 - [Documentation index](docs/README.md)
 - [Project guide](docs/PROJECT_GUIDE.md)
 - [Release preparation](docs/RELEASING.md)
+- [Release notes for 1.5.9](docs/RELEASE_NOTES_1.5.9.md)
 - [Release notes for 1.5.6](docs/RELEASE_NOTES_1.5.6.md)
 - [License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)
