@@ -10,6 +10,9 @@ use uuid::Uuid;
 /// A unique identifier for an audio voice (a single playing stream).
 pub type VoiceId = Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportCommandKind { Play, Stop, Pause, Resume, Seek }
+
 /// Number of samples in a baked [`CurveTable`].
 ///
 /// 32 segments. The audio callback interpolates between samples, so the error
@@ -146,12 +149,16 @@ pub enum AudioCommand {
 /// Status updates sent *from* the audio thread to the application layer.
 #[derive(Debug, Clone)]
 pub enum AudioStatus {
+    /// Transport command observed by the audio callback. Fixed-size so the
+    /// show thread can retain a short history without callback allocation.
+    TransportMarker { voice_id: VoiceId, command: TransportCommandKind, frame: u64 },
     /// A voice has naturally reached the end of its audio data and stopped.
     Completed { voice_id: VoiceId },
     /// A streaming source had no decoded frame ready. Emitted once per callback
     /// block with starvation, so the log keeps each event without flooding the UI.
     Underrun {
         voice_id: VoiceId,
+        stream_id: Uuid,
         count: u64,
         silent_frames: u64,
         /// Source rate used by the decoder.
@@ -159,7 +166,22 @@ pub enum AudioStatus {
         /// Device rate used for duration conversion.
         output_sample_rate: u32,
         buffered_frames: usize,
+        buffered_frames_at_block_start: usize,
         capacity_frames: usize,
+        playback_frame: u64,
+        seek_generation: u64,
+        decoder_session_generation: u64,
+        decoder_session_state: u8,
+        playback_state: u8,
+        source_ready: bool,
+        source_eof: bool,
+        refill_job_requested: bool,
+        refill_job_running: bool,
+        refill_requested: bool,
+        last_refill_at_ms: u64,
+        last_refill_wait_us: u64,
+        worker_pool_pending_jobs: usize,
+        worker_pool_active_workers: usize,
         near_loop_boundary: bool,
         dropped_before: u64,
     },

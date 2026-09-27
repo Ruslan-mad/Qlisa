@@ -10,7 +10,7 @@
 //!   Tauri events so the UI stays in sync without polling.
 //! - Calls [`AudioEngine::gc_voices`] to release stopped audio voice memory.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,7 +23,7 @@ use crate::{
     },
     engine::{
         output_engine::{OutputEngine, OutputStatus},
-        ring_command::AudioStatus,
+        ring_command::{AudioStatus, TransportCommandKind, VoiceId},
         timecode_types::TcEvent,
         AudioEngine, DmxEngine,
     },
@@ -58,6 +58,17 @@ enum PendingContinuationStatus {
 }
 
 type ReadyContinuation = (uuid::Uuid, CueId, u64);
+
+#[derive(Clone)]
+struct RecentAudioTransport {
+    at: Instant,
+    voice_id: VoiceId,
+    command: TransportCommandKind,
+    frame: u64,
+    cue_id: Option<CueId>,
+    cue_number: String,
+    cue_name: String,
+}
 
 /// HashSet is useful for deduplicating same-tick triggers, but its iteration
 /// order is unspecified. Dispatch by cue-list ID, then continuation token, and
@@ -136,6 +147,7 @@ pub fn run(
 
     // Maps a completed cue's ID to the deadline and the ID of its cue list.
     let mut pending_continuations: HashMap<CueId, PendingContinuation> = HashMap::new();
+    let mut recent_audio_transport: VecDeque<RecentAudioTransport> = VecDeque::with_capacity(32);
     // Last TC position seen — for the TC dispatcher monotone guard.
     let mut prev_tc_frame: Option<u64> = None;
     // Per-group snapshot: (active_child_id, any_child_running).
@@ -168,6 +180,7 @@ pub fn run(
             &midi_listener,
             &mut prev_tc_frame,
             &mut pending_continuations,
+            &mut recent_audio_transport,
             &mut prev_group_state,
             &mut prev_running_cues,
             &mut prev_playhead_cue,
@@ -483,6 +496,7 @@ fn tick(
     midi_listener: &Arc<Mutex<Option<Arc<crate::engine::midi_trigger::MidiTriggerListener>>>>,
     prev_tc_frame: &mut Option<u64>,
     pending_continuations: &mut HashMap<CueId, PendingContinuation>,
+    recent_audio_transport: &mut VecDeque<RecentAudioTransport>,
     prev_group_state: &mut HashMap<CueId, (Option<CueId>, bool)>,
     prev_running_cues: &mut Vec<CueId>,
     prev_playhead_cue: &mut Option<CueId>,
@@ -615,6 +629,23 @@ fn tick(
 
     for s in audio_statuses {
         match s {
+            AudioStatus::TransportMarker { voice_id, command, frame } => {
+                let label = workspace.lock().ok()
+                    .and_then(|ws| find_audio_cue_info(&ws.cue_lists, voice_id, output_engine));
+                let previous = recent_audio_transport.iter().rev()
+                    .find(|item| item.voice_id == voice_id && item.cue_id.is_some())
+                    .map(|item| (item.cue_id, item.cue_number.clone(), item.cue_name.clone()));
+                if recent_audio_transport.len() == 32 {
+                    recent_audio_transport.pop_front();
+                }
+                let (cue_id, cue_number, cue_name) = label
+                    .map(|(id, number, name)| (Some(id), number, name))
+                    .or(previous)
+                    .unwrap_or((None, String::new(), String::new()));
+                recent_audio_transport.push_back(RecentAudioTransport {
+                    at: Instant::now(), voice_id, command, frame, cue_id, cue_number, cue_name,
+                });
+            }
             AudioStatus::Completed { voice_id } => {
                 // An EOF queued before a seek must not complete a voice that
                 // has since resumed from the requested position.
@@ -640,34 +671,83 @@ fn tick(
             }
             AudioStatus::Underrun {
                 voice_id,
+                stream_id,
                 count,
                 silent_frames,
                 sample_rate,
                 output_sample_rate,
                 buffered_frames,
+                buffered_frames_at_block_start,
                 capacity_frames,
+                playback_frame,
+                seek_generation,
+                decoder_session_generation,
+                decoder_session_state,
+                playback_state,
+                source_ready,
+                source_eof,
+                refill_job_requested,
+                refill_job_running,
+                refill_requested,
+                last_refill_at_ms,
+                last_refill_wait_us,
+                worker_pool_pending_jobs,
+                worker_pool_active_workers,
                 near_loop_boundary,
                 dropped_before,
             } => {
-                let cue_info = workspace
-                    .lock()
-                    .ok()
+                let ws_guard = workspace.lock().ok();
+                let cue_info = ws_guard.as_ref()
                     .and_then(|ws| find_audio_cue_info(&ws.cue_lists, voice_id, output_engine));
+                drop(ws_guard);
                 let cue_id = cue_info.as_ref().map(|(id, _, _)| id.to_string());
                 let duration_ms = silent_frames as f64 * 1000.0 / output_sample_rate.max(1) as f64;
+                let now = Instant::now();
+                let recent_transport = recent_audio_transport.iter()
+                    .filter(|item| now.duration_since(item.at) <= Duration::from_secs(10))
+                    .map(|item| {
+                        let action = match item.command {
+                            TransportCommandKind::Play => "start",
+                            TransportCommandKind::Stop => "stop",
+                            TransportCommandKind::Pause => "pause",
+                            TransportCommandKind::Resume => {
+                                if recent_audio_transport.iter().any(|previous| {
+                                    previous.voice_id == item.voice_id
+                                        && previous.at < item.at
+                                        && matches!(previous.command, TransportCommandKind::Play | TransportCommandKind::Resume)
+                                }) { "resume" } else { "start" }
+                            }
+                            TransportCommandKind::Seek => "seek",
+                        };
+                        let label = if item.cue_number.is_empty() {
+                            item.cue_name.clone()
+                        } else {
+                            format!("#{} {}", item.cue_number, item.cue_name)
+                        };
+                        let cue_id = item.cue_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".into());
+                        let age_ms = now.duration_since(item.at).as_millis();
+                        format!("{action}:{label}[cue={cue_id},voice={}]@{} age={}ms", item.voice_id, item.frame, age_ms)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let refill_age_ms = if last_refill_at_ms == 0 { None } else {
+                    let wall_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                    Some(wall_ms.saturating_sub(last_refill_at_ms))
+                };
                 let message = match cue_info {
                     Some((_, number, name)) if !number.is_empty() => {
-                        format!("Streaming audio underrun: Cue #{number} \u{201c}{name}\u{201d} ({silent_frames} output frames, {duration_ms:.1} ms, source {sample_rate} Hz / output {output_sample_rate} Hz, buffer {buffered_frames}/{capacity_frames} frames, near loop boundary: {near_loop_boundary}, cue underrun events: {count}, earlier diagnostic reports dropped: {dropped_before})")
+                        format!("Streaming audio underrun: Cue #{number} \u{201c}{name}\u{201d} ({silent_frames} output frames, {duration_ms:.1} ms, source {sample_rate} Hz / output {output_sample_rate} Hz, ring fill at block start/current {buffered_frames_at_block_start}/{buffered_frames} of {capacity_frames} frames, ready={source_ready} eof={source_eof} state={playback_state}, frame={playback_frame}, stream={stream_id}, seek/session generation={seek_generation}/{decoder_session_generation}, decoder session state={decoder_session_state}, refill requested/job queued/job active={refill_requested}/{refill_job_requested}/{refill_job_running}, pool pending/active={worker_pool_pending_jobs}/{worker_pool_active_workers}, refill age ms/wait us={refill_age_ms:?}/{last_refill_wait_us}, near loop boundary: {near_loop_boundary}, cue underrun events: {count}, earlier diagnostic reports dropped: {dropped_before})")
                     }
                     Some((_, _, name)) if !name.is_empty() => {
-                        format!("Streaming audio underrun: Cue \u{201c}{name}\u{201d} ({silent_frames} output frames, {duration_ms:.1} ms, source {sample_rate} Hz / output {output_sample_rate} Hz, buffer {buffered_frames}/{capacity_frames} frames, near loop boundary: {near_loop_boundary}, cue underrun events: {count}, earlier diagnostic reports dropped: {dropped_before})")
+                        format!("Streaming audio underrun: Cue \u{201c}{name}\u{201d} ({silent_frames} output frames, {duration_ms:.1} ms, source {sample_rate} Hz / output {output_sample_rate} Hz, ring fill at block start/current {buffered_frames_at_block_start}/{buffered_frames} of {capacity_frames} frames, ready={source_ready} eof={source_eof} state={playback_state}, frame={playback_frame}, stream={stream_id}, seek/session generation={seek_generation}/{decoder_session_generation}, decoder session state={decoder_session_state}, refill requested/job queued/job active={refill_requested}/{refill_job_requested}/{refill_job_running}, pool pending/active={worker_pool_pending_jobs}/{worker_pool_active_workers}, refill age ms/wait us={refill_age_ms:?}/{last_refill_wait_us}, near loop boundary: {near_loop_boundary}, cue underrun events: {count}, earlier diagnostic reports dropped: {dropped_before})")
                     }
-                    _ => format!("Streaming audio underrun on voice {voice_id} ({silent_frames} output frames, {duration_ms:.1} ms, source {sample_rate} Hz / output {output_sample_rate} Hz, buffer {buffered_frames}/{capacity_frames} frames, near loop boundary: {near_loop_boundary}, cue underrun events: {count}, earlier diagnostic reports dropped: {dropped_before})"),
+                    _ => format!("Streaming audio underrun on voice {voice_id} ({silent_frames} output frames, {duration_ms:.1} ms, source {sample_rate} Hz / output {output_sample_rate} Hz, ring fill at block start/current {buffered_frames_at_block_start}/{buffered_frames} of {capacity_frames} frames, ready={source_ready} eof={source_eof} state={playback_state}, frame={playback_frame}, stream={stream_id}, seek/session generation={seek_generation}/{decoder_session_generation}, decoder session state={decoder_session_state}, refill requested/job queued/job active={refill_requested}/{refill_job_requested}/{refill_job_running}, pool pending/active={worker_pool_pending_jobs}/{worker_pool_active_workers}, refill age ms/wait us={refill_age_ms:?}/{last_refill_wait_us}, near loop boundary: {near_loop_boundary}, cue underrun events: {count}, earlier diagnostic reports dropped: {dropped_before})"),
                 };
                 log::warn!(
                     target: "audio::underrun",
-                    "{message}; voice_id={voice_id}; cue_id={}",
-                    cue_id.as_deref().unwrap_or("unknown")
+                    "{message}; voice_id={voice_id}; cue_id={}; preceding_audio_transport=[{}]",
+                    cue_id.as_deref().unwrap_or("unknown"), recent_transport
                 );
                 crate::health::set(crate::health::HealthAlert::new(
                     "audio-stream-underrun",

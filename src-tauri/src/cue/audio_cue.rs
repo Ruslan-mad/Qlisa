@@ -166,6 +166,8 @@ pub struct AudioCue {
     /// `true` between `go()` and the moment the audio action actually starts
     /// (i.e. while waiting for `pre_wait` to expire).
     in_pre_wait: bool,
+    /// Streaming voice submitted paused until the decoder publishes readiness.
+    waiting_for_stream_ready: bool,
     /// Incremented on every `go()` call.  Kept for diagnostics / future use.
     play_generation: u64,
     /// Set to `true` by [`Transport::go`] immediately after firing the
@@ -184,6 +186,19 @@ pub struct AudioCue {
 }
 
 impl AudioCue {
+    #[cfg(test)]
+    pub(crate) fn set_stream_source_for_test(
+        &mut self,
+        source: Arc<crate::cue::media_decode::StreamingAudioSource>,
+        duration: Duration,
+    ) {
+        self.stream_path = Some(PathBuf::from("audio-cue-readiness-test.wav"));
+        self.stream_source = Some(source.clone());
+        self.decoded_channels = source.channels;
+        self.decoded_sample_rate = source.sample_rate;
+        self.cached_duration = Some(duration);
+    }
+
     fn load_legacy_audio(&mut self, path: &Path) -> Result<()> {
         let (samples, channels, sample_rate) = crate::cue::media_decode::decode_audio_track_legacy(path)?
             .ok_or_else(|| anyhow!("No audio track in file: {}", path.display()))?;
@@ -257,6 +272,7 @@ impl AudioCue {
             active_voice_id: None,
             cached_duration: None,
             in_pre_wait: false,
+            waiting_for_stream_ready: false,
             play_generation: 0,
             auto_continue_fired: false,
             elapsed_before_pause: Duration::ZERO,
@@ -320,7 +336,7 @@ impl AudioCue {
     /// playback, which have no fixed natural end (`duration()` is `None`, or
     /// ignores the slice program).
     fn tick_eof_fade(&mut self, context: &CueContext) {
-        if self.eof_fade_started || self.in_pre_wait || !self.slices.is_empty() {
+        if self.eof_fade_started || self.in_pre_wait || self.waiting_for_stream_ready || !self.slices.is_empty() {
             return;
         }
         let (Some(voice_id), Some(fade), Some(total)) =
@@ -546,15 +562,30 @@ impl AudioCue {
             }
         }
 
-        let voice_id = context.audio_engine.play_voice_routed(voice, patch_device.as_deref())?;
+        let waiting_for_stream_ready = voice.stream.as_ref().is_some_and(|stream| {
+            !stream.is_ready() && !(stream.is_eof() && stream.buffered_samples() > 0)
+        });
+        let voice_id = if waiting_for_stream_ready {
+            context.audio_engine.play_voice_paused_routed(voice, patch_device.as_deref())?
+        } else {
+            context.audio_engine.play_voice_routed(voice, patch_device.as_deref())?
+        };
         self.active_voice_id = Some(voice_id);
-        self.action_started_at = Some(Instant::now());
-        self.continue_started_at = self.action_started_at;
-        self.continue_elapsed_before_pause = Duration::ZERO;
+        self.waiting_for_stream_ready = waiting_for_stream_ready;
+        if waiting_for_stream_ready {
+            self.action_started_at = None;
+            self.continue_started_at = None;
+        } else {
+            self.action_started_at = Some(Instant::now());
+            self.continue_started_at = self.action_started_at;
+            self.continue_elapsed_before_pause = Duration::ZERO;
+        }
         self.in_pre_wait = false;
         self.eof_fade_started = false;
 
-        context.emit(CueEvent::ActionStarted { cue_id: self.id });
+        if !waiting_for_stream_ready {
+            context.emit(CueEvent::ActionStarted { cue_id: self.id });
+        }
         Ok(())
     }
 
@@ -771,6 +802,8 @@ impl Cue for AudioCue {
         self.auto_continue_fired = false;
         self.continue_started_at = None;
         self.continue_elapsed_before_pause = Duration::ZERO;
+        self.action_elapsed_before_pause = Duration::ZERO;
+        self.waiting_for_stream_ready = false;
 
         self.state = CueState::Running;
         self.started_at = Some(Instant::now());
@@ -789,6 +822,7 @@ impl Cue for AudioCue {
             self.state = CueState::Standby;
             self.started_at = None;
             self.in_pre_wait = false;
+            self.waiting_for_stream_ready = false;
             return Err(e);
         }
         Ok(())
@@ -796,6 +830,7 @@ impl Cue for AudioCue {
 
     fn stop(&mut self, context: &CueContext) -> Result<()> {
         self.in_pre_wait = false; // Cancel any pending pre-wait.
+        self.waiting_for_stream_ready = false;
         if let Some(vid) = self.active_voice_id.take() {
             let (fade_ms, fade_curve) = self.fade_out
                 .as_ref()
@@ -845,13 +880,18 @@ impl Cue for AudioCue {
         if self.state != CueState::Running {
             return Ok(());
         }
-        if !self.in_pre_wait {
+        if !self.in_pre_wait && !self.waiting_for_stream_ready {
             if let Some(vid) = self.active_voice_id {
                 context.audio_engine.pause_voice(vid)?;
             }
         }
         if let Some(t) = self.started_at.take() {
-            self.elapsed_before_pause = t.elapsed();
+            let elapsed = t.elapsed();
+            self.elapsed_before_pause = if self.waiting_for_stream_ready {
+                elapsed.min(self.pre_wait)
+            } else {
+                elapsed
+            };
         }
         if let Some(t) = self.action_started_at.take() {
             self.action_elapsed_before_pause = t.elapsed();
@@ -867,14 +907,14 @@ impl Cue for AudioCue {
         if self.state != CueState::Paused {
             return Ok(());
         }
-        if !self.in_pre_wait {
+        if !self.in_pre_wait && !self.waiting_for_stream_ready {
             if let Some(vid) = self.active_voice_id {
                 context.audio_engine.resume_voice(vid)?;
             }
         }
         let now = Instant::now();
         self.started_at = Some(now - self.elapsed_before_pause);
-        if !self.in_pre_wait {
+        if !self.in_pre_wait && !self.waiting_for_stream_ready {
             self.action_started_at = Some(now - self.action_elapsed_before_pause);
             self.continue_started_at = Some(now - self.continue_elapsed_before_pause);
         }
@@ -956,6 +996,7 @@ impl Cue for AudioCue {
 
     fn hard_stop(&mut self, context: &CueContext) -> Result<()> {
         self.in_pre_wait = false;
+        self.waiting_for_stream_ready = false;
         if let Some(vid) = self.active_voice_id.take() {
             context.audio_engine.stop_voice(vid, 0, EngineFadeCurve::Linear)?;
         }
@@ -983,6 +1024,7 @@ impl Cue for AudioCue {
         self.continue_started_at = None;
         self.continue_elapsed_before_pause = Duration::ZERO;
         self.in_pre_wait = false;
+        self.waiting_for_stream_ready = false;
         self.auto_continue_fired = false;
         self.eof_fade_started = false;
         Ok(())
@@ -995,7 +1037,26 @@ impl Cue for AudioCue {
                 self.started_at = None;
                 self.action_started_at = None;
                 self.in_pre_wait = false;
+                self.waiting_for_stream_ready = false;
                 return Err(error);
+            }
+        }
+        if self.waiting_for_stream_ready && !self.in_pre_wait && self.state == CueState::Running {
+            let ready = self.stream_source.as_ref().is_some_and(|stream| {
+                stream.is_ready() || (stream.is_eof() && stream.buffered_samples() > 0)
+            });
+            if ready {
+                if let Some(voice_id) = self.active_voice_id {
+                    context.audio_engine.resume_voice(voice_id)?;
+                    let elapsed_before_action = self.elapsed();
+                    self.waiting_for_stream_ready = false;
+                    let now = Instant::now();
+                    self.started_at = Some(now - elapsed_before_action);
+                    self.action_started_at = Some(now - self.action_elapsed_before_pause);
+                    self.continue_started_at = Some(now - self.continue_elapsed_before_pause);
+                    self.continue_elapsed_before_pause = Duration::ZERO;
+                    context.emit(CueEvent::ActionStarted { cue_id: self.id });
+                }
             }
         }
         self.tick_eof_fade(context);
@@ -1003,7 +1064,7 @@ impl Cue for AudioCue {
     }
 
     fn is_action_started(&self) -> bool {
-        !self.in_pre_wait
+        !self.in_pre_wait && !self.waiting_for_stream_ready
     }
 
     fn play_generation(&self) -> u64 {
@@ -1053,10 +1114,19 @@ impl Cue for AudioCue {
     }
 
     fn elapsed(&self) -> Duration {
-        if self.state == CueState::Paused {
-            return self.elapsed_before_pause;
+        if self.waiting_for_stream_ready {
+            return if self.state == CueState::Paused {
+                self.elapsed_before_pause
+            } else {
+                self.pre_wait.saturating_add(self.action_elapsed_before_pause)
+            };
         }
-        self.started_at.map(|t| t.elapsed()).unwrap_or(Duration::ZERO)
+        let elapsed = if self.state == CueState::Paused {
+            self.elapsed_before_pause
+        } else {
+            self.started_at.map(|t| t.elapsed()).unwrap_or(Duration::ZERO)
+        };
+        elapsed
     }
 
     fn action_elapsed(&self) -> Duration {
@@ -1160,8 +1230,13 @@ impl Cue for AudioCue {
         self.active_voice_id = snap.voice_id;
         self.started_at = snap.started_at;
         self.action_started_at = snap.action_started_at;
-        // Infer pre-wait: Running but action not yet started.
-        self.in_pre_wait = snap.state == CueState::Running && snap.action_started_at.is_none();
+        // Runtime snapshots preserve the active voice and its stream is
+        // restored separately. A voice with no action clock is still waiting
+        // for decoder readiness; without a voice, the cue is in pre-wait.
+        let action_pending = snap.action_started_at.is_none();
+        self.in_pre_wait = action_pending && snap.voice_id.is_none()
+            && matches!(snap.state, CueState::Running | CueState::Paused);
+        self.waiting_for_stream_ready = action_pending && snap.voice_id.is_some();
     }
 
     fn live_audio_params(&self) -> Option<crate::cue::traits::LiveAudioParams> {
@@ -1482,6 +1557,78 @@ mod sliced_cache_go_tests {
         assert!(cue.voice_id().is_some(), "GO submitted an audio voice");
         assert!(cue.stream_source.is_none(), "GO selected the preloaded PCM cache and retired its stream");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn go_holds_stream_voice_until_ready_and_starts_action_clock_then() {
+        use std::thread;
+
+        let audio = crate::engine::audio_engine::AudioEngine::new_silent(
+            &crate::preferences::MachineAudioConfig::default(),
+        );
+        let (events, event_rx) = unbounded();
+        let context = CueContext::new(
+            audio,
+            Arc::new(NullOutput),
+            events,
+            0,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Arc::new(DmxEngine::new()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            256,
+        );
+        let mut cue = AudioCue::new();
+        cue.pre_wait = Duration::from_millis(2);
+        let duration = Duration::from_millis(10);
+        let make_source = || {
+            let source = crate::cue::media_decode::streaming_tests::test_source(
+                crate::cue::media_decode::StreamPlaybackState::Preload,
+                false,
+                0,
+            );
+            source.seed_test_pcm(48_000);
+            source
+        };
+
+        cue.set_stream_source_for_test(make_source(), duration);
+        cue.go(&context).expect("GO enters pre-wait");
+        thread::sleep(Duration::from_millis(4));
+        cue.tick(&context).expect("pre-wait submits a held stream voice");
+        assert!(cue.waiting_for_stream_ready);
+        assert!(!cue.is_action_started());
+        assert_eq!(cue.action_elapsed(), Duration::ZERO);
+        assert!(cue.elapsed() <= cue.pre_wait, "decoder wait must not advance cue elapsed time");
+
+        thread::sleep(Duration::from_millis(15));
+        cue.tick(&context).expect("unready stream remains held");
+        assert_eq!(cue.action_elapsed(), Duration::ZERO, "short finite cue must not complete while held");
+        assert!(cue.waiting_for_stream_ready);
+
+        cue.pause(&context).unwrap();
+        let source = cue.stream_source.as_ref().unwrap();
+        source.publish_test_ready();
+        cue.tick(&context).expect("paused held voice stays paused");
+        assert!(cue.waiting_for_stream_ready);
+        assert_eq!(cue.action_started_at, None);
+        cue.resume(&context).unwrap();
+        assert!(cue.waiting_for_stream_ready, "resume must not bypass decoder readiness");
+        cue.tick(&context).expect("ready stream begins through normal tick path");
+        assert!(!cue.waiting_for_stream_ready);
+        assert!(cue.is_action_started());
+        assert!(cue.action_elapsed() < duration);
+        assert!(matches!(event_rx.try_recv(), Ok(CueEvent::ActionStarted { cue_id }) if cue_id == cue.id));
+
+        cue.hard_stop(&context).unwrap();
+        cue.set_stream_source_for_test(make_source(), duration);
+        cue.pre_wait = Duration::ZERO;
+        cue.go(&context).expect("repeated GO starts another held voice");
+        assert!(cue.waiting_for_stream_ready);
+        assert!(!cue.is_action_started());
     }
 
     #[test]

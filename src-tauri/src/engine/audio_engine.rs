@@ -3053,6 +3053,7 @@ fn mix_stream(
         source.accumulate_pending_control_seek_report(report);
     }
     flush_control_seek_report(source, voice.id, status_prod);
+    let buffered_frames_at_block_start = source.buffered_samples() / source.channels.max(1) as usize;
     // Do not start consuming until the decoder has built its ready watermark:
     // 750 ms for GO and 100 ms after a loop seek. This keeps GO deterministic
     // while limiting the gap at a repeated boundary, without waiting in RT.
@@ -3076,6 +3077,7 @@ fn mix_stream(
                 return;
             }
         }
+        let stream_snapshot = source.underrun_snapshot();
         source.note_underrun_frames(silent_frames);
         let count = voice.underrun_events.fetch_add(1, Ordering::Relaxed) + 1;
         let frame_pos = voice.current_frame();
@@ -3088,12 +3090,28 @@ fn mix_stream(
         let dropped_before = voice.dropped_underrun_reports.swap(0, Ordering::Relaxed);
         if status_prod.try_push(AudioStatus::Underrun {
             voice_id: voice.id,
+            stream_id: stream_snapshot.stream_id,
             count,
             silent_frames: silent_frames as u64,
             sample_rate: source.sample_rate,
             output_sample_rate,
-            buffered_frames: source.buffered_samples() / source.channels.max(1) as usize,
-            capacity_frames: source.capacity_frames(),
+            buffered_frames: stream_snapshot.buffered_frames,
+            buffered_frames_at_block_start,
+            capacity_frames: stream_snapshot.capacity_frames,
+            playback_frame: frame_pos,
+            seek_generation: stream_snapshot.seek_generation,
+            decoder_session_generation: stream_snapshot.decoder_session_generation,
+            decoder_session_state: stream_snapshot.decoder_session_state,
+            playback_state: stream_snapshot.playback_state,
+            source_ready: stream_snapshot.ready,
+            source_eof: stream_snapshot.eof,
+            refill_job_requested: stream_snapshot.job_requested,
+            refill_job_running: stream_snapshot.job_running,
+            refill_requested: stream_snapshot.refill_requested,
+            last_refill_at_ms: stream_snapshot.last_refill_at_ms,
+            last_refill_wait_us: stream_snapshot.last_refill_wait_us,
+            worker_pool_pending_jobs: stream_snapshot.worker_pool_pending_jobs,
+            worker_pool_active_workers: stream_snapshot.worker_pool_active_workers,
             near_loop_boundary,
             dropped_before,
         }).is_err() {
@@ -3321,6 +3339,7 @@ fn mix_stream(
         flush_control_seek_report(source, voice.id, status_prod);
     }
     if underruns_after > underruns_before {
+        let stream_snapshot = source.underrun_snapshot();
         let count = voice.underrun_events.fetch_add(1, Ordering::Relaxed) + 1;
         let boundary_window = (source.sample_rate as u64 / 10).max(1);
         let near_loop_boundary = source.is_loop_rebuffering()
@@ -3335,12 +3354,28 @@ fn mix_stream(
         let dropped_before = voice.dropped_underrun_reports.swap(0, Ordering::Relaxed);
         if status_prod.try_push(AudioStatus::Underrun {
             voice_id: voice.id,
+            stream_id: stream_snapshot.stream_id,
             count,
             silent_frames,
             sample_rate: source.sample_rate,
             output_sample_rate,
-            buffered_frames: source.buffered_samples() / source.channels.max(1) as usize,
-            capacity_frames: source.capacity_frames(),
+            buffered_frames: stream_snapshot.buffered_frames,
+            buffered_frames_at_block_start,
+            capacity_frames: stream_snapshot.capacity_frames,
+            playback_frame: frame_pos,
+            seek_generation: stream_snapshot.seek_generation,
+            decoder_session_generation: stream_snapshot.decoder_session_generation,
+            decoder_session_state: stream_snapshot.decoder_session_state,
+            playback_state: stream_snapshot.playback_state,
+            source_ready: stream_snapshot.ready,
+            source_eof: stream_snapshot.eof,
+            refill_job_requested: stream_snapshot.job_requested,
+            refill_job_running: stream_snapshot.job_running,
+            refill_requested: stream_snapshot.refill_requested,
+            last_refill_at_ms: stream_snapshot.last_refill_at_ms,
+            last_refill_wait_us: stream_snapshot.last_refill_wait_us,
+            worker_pool_pending_jobs: stream_snapshot.worker_pool_pending_jobs,
+            worker_pool_active_workers: stream_snapshot.worker_pool_active_workers,
             near_loop_boundary,
             dropped_before,
         }).is_err() {
@@ -3532,11 +3567,12 @@ fn mix_live(
 fn apply_command(
     voices: &[Arc<Voice>],
     cmd: AudioCommand,
-    _status_prod: &mut ringbuf::HeapProd<AudioStatus>,
+    status_prod: &mut ringbuf::HeapProd<AudioStatus>,
 ) {
     match cmd {
         AudioCommand::Play { voice_id } => {
             if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
+                let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id, command: crate::engine::ring_command::TransportCommandKind::Play, frame: v.current_frame() });
                 v.set_playing();
             }
         }
@@ -3546,6 +3582,7 @@ fn apply_command(
             fade_curve,
         } => {
             if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
+                let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id, command: crate::engine::ring_command::TransportCommandKind::Stop, frame: v.current_frame() });
                 // A paused voice (e.g. a video's audio that was never resumed
                 // because the video was replaced before its first frame) must
                 // hard-stop: fading it would set it Playing and make it audible.
@@ -3600,11 +3637,13 @@ fn apply_command(
         }
         AudioCommand::Pause { voice_id } => {
             if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
+                let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id, command: crate::engine::ring_command::TransportCommandKind::Pause, frame: v.current_frame() });
                 v.set_paused();
             }
         }
         AudioCommand::Resume { voice_id } => {
             if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
+                let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id, command: crate::engine::ring_command::TransportCommandKind::Resume, frame: v.current_frame() });
                 v.set_playing();
             }
         }
@@ -3626,6 +3665,7 @@ fn apply_command(
         }
         AudioCommand::StopAll => {
             for v in voices {
+                let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id: v.id, command: crate::engine::ring_command::TransportCommandKind::Stop, frame: v.current_frame() });
                 v.set_stopped();
             }
         }
@@ -3634,6 +3674,7 @@ fn apply_command(
             frame_pos,
         } => {
             if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
+                let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id, command: crate::engine::ring_command::TransportCommandKind::Seek, frame: frame_pos });
                 if let Some(stream) = v.stream.as_ref() {
                     stream.apply_seek_rt();
                 }
@@ -6123,5 +6164,101 @@ mod tests {
         assert!(error.contains("system-default fallback"));
         assert_eq!(engine.voices.with(|voices| voices.len()), Some(0));
         assert_eq!(engine.aux_streams.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn audio_cue_go_waits_for_decoder_ready_before_callback_playback() {
+        use crate::cue::audio_cue::AudioCue;
+        use crate::cue::context::{CueContext, CueEvent};
+        use crate::cue::media_decode::{streaming_tests::test_source, StreamPlaybackState};
+        use std::time::Duration;
+
+        fn callback(engine: &AudioEngine, commands: &mut ringbuf::HeapCons<AudioCommand>) -> Vec<f32> {
+            let frames = 256;
+            let mut output = vec![0.0; frames * 2];
+            let mut program = vec![0.0; frames * 2];
+            let (mut status_prod, _) = HeapRb::<AudioStatus>::new(32).split();
+            fill_buffer(
+                &mut output,
+                &mut program,
+                2,
+                48_000,
+                &engine.voices.rt_handle(),
+                &engine.input_feeds,
+                &empty_program_audio_taps(),
+                commands,
+                &mut status_prod,
+                &engine.master_gain,
+                &engine.output_period,
+            );
+            output
+        }
+
+        fn unready_source() -> Arc<StreamingAudioSource> {
+            let source = test_source(StreamPlaybackState::Preload, false, 0);
+            source.seed_test_pcm(48_000);
+            source
+        }
+
+        let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
+        let (test_prod, mut test_cons) = HeapRb::<AudioCommand>::new(32).split();
+        *engine.cmd_prod.lock().unwrap() = test_prod;
+        let (events, _event_rx) = unbounded();
+        let context = CueContext::new(
+            engine.clone(),
+            Arc::new(NullOutput),
+            events,
+            0,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Arc::new(crate::engine::dmx_engine::DmxEngine::new()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            256,
+        );
+        let mut cue = AudioCue::new();
+        let first_source = unready_source();
+        cue.set_stream_source_for_test(Arc::clone(&first_source), Duration::from_secs(2));
+
+        // Submit the real AudioCue voice before readiness. The callback must
+        // keep it paused and must not report an underrun or move its cursor.
+        cue.go(&context).unwrap();
+        let first_voice = engine.voices.with(|voices| voices.last().cloned()).flatten().unwrap();
+        assert_eq!(first_voice.voice_state(), VoiceState::Paused);
+        let before = first_voice.current_frame();
+        assert!(callback(&engine, &mut test_cons).iter().all(|sample| *sample == 0.0));
+        assert_eq!(first_voice.current_frame(), before);
+        assert_eq!(first_source.underruns(), 0);
+        assert!(!cue.is_action_started());
+        assert_eq!(cue.action_elapsed(), Duration::ZERO);
+
+        // A pause during the hold remains a hold even if the worker becomes
+        // ready. Resume goes through the normal Cue tick and callback command.
+        cue.pause(&context).unwrap();
+        first_source.publish_test_ready();
+        cue.tick(&context).unwrap();
+        assert_eq!(first_voice.voice_state(), VoiceState::Paused);
+        cue.resume(&context).unwrap();
+        assert!(!cue.is_action_started(), "resume must not bypass readiness");
+        cue.tick(&context).unwrap();
+        assert!(matches!(_event_rx.try_recv(), Ok(CueEvent::ActionStarted { cue_id }) if cue_id == cue.id()));
+        let output = callback(&engine, &mut test_cons);
+        assert_eq!(first_voice.voice_state(), VoiceState::Playing);
+        assert!(first_voice.current_frame() > before);
+        assert!(output.iter().any(|sample| *sample != 0.0));
+        assert_eq!(first_source.underruns(), 0);
+
+        cue.hard_stop(&context).unwrap();
+        let _ = callback(&engine, &mut test_cons);
+        let second_source = unready_source();
+        cue.set_stream_source_for_test(Arc::clone(&second_source), Duration::from_secs(2));
+        cue.go(&context).unwrap();
+        let second_voice = engine.voices.with(|voices| voices.iter().find(|voice| voice.id == cue.voice_id().unwrap()).cloned()).flatten().unwrap();
+        assert_eq!(second_voice.voice_state(), VoiceState::Paused);
+        assert!(!cue.is_action_started(), "repeated GO also waits for its new stream generation");
+        assert_eq!(second_source.underruns(), 0);
     }
 }

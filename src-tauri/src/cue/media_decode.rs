@@ -42,6 +42,7 @@ const STREAM_JOB_QUEUE: usize = 32;
 const STREAM_LOW_WATERMARK_NUMERATOR: usize = 1;
 const STREAM_LOW_WATERMARK_DENOMINATOR: usize = 2;
 const STREAM_REFILL_POLL_MILLIS: u64 = 5;
+static STREAM_WORKER_POOL: OnceLock<StreamWorkerPool> = OnceLock::new();
 const SEEK_REASON_MASK: u64 = 0b11;
 const SEEK_GENERATION_STEP: u64 = 4;
 pub const CONTROL_SEEK_TIMEOUT_MS: u64 = 3_000;
@@ -132,6 +133,11 @@ pub struct StreamingAudioSource {
     underrun_reported: AtomicU64,
     refill_requested: AtomicBool,
     playback_state: AtomicU8,
+    /// Decoder-session state mirrored atomically for real-time diagnostics:
+    /// 0 = absent, 1 = open, 2 = decoder open failed or no audio track.
+    decoder_session_state: AtomicU8,
+    decoder_session_generation: AtomicU64,
+    last_refill_at_ms: AtomicU64,
     decoder_session: Mutex<Option<DecoderSession>>,
     job_requested: AtomicBool,
     job_running: AtomicBool,
@@ -297,6 +303,9 @@ impl StreamingAudioSource {
             refill_requested: AtomicBool::new(true),
             // 0 = paused, 1 = preload/idle, 2 = playing normal.
             playback_state: AtomicU8::new(1),
+            decoder_session_state: AtomicU8::new(0),
+            decoder_session_generation: AtomicU64::new(0),
+            last_refill_at_ms: AtomicU64::new(0),
             decoder_session: Mutex::new(None),
             job_requested: AtomicBool::new(false),
             job_running: AtomicBool::new(false),
@@ -378,6 +387,9 @@ impl StreamingAudioSource {
             underrun_reported: AtomicU64::new(0),
             refill_requested: AtomicBool::new(!eof),
             playback_state: AtomicU8::new(StreamPlaybackState::Playing as u8),
+            decoder_session_state: AtomicU8::new(0),
+            decoder_session_generation: AtomicU64::new(0),
+            last_refill_at_ms: AtomicU64::new(0),
             decoder_session: Mutex::new(None),
             job_requested: AtomicBool::new(false),
             job_running: AtomicBool::new(false),
@@ -436,6 +448,30 @@ impl StreamingAudioSource {
 
     pub fn capacity_frames(&self) -> usize { self.ring.capacity_frames }
 
+    /// Read callback-safe source state before reporting a starvation event.
+    pub fn underrun_snapshot(&self) -> StreamUnderrunSnapshot {
+        StreamUnderrunSnapshot {
+            stream_id: self.source_id,
+            buffered_frames: self.buffered_samples() / self.channels.max(1) as usize,
+            capacity_frames: self.capacity_frames(),
+            seek_generation: self.seek_generation.load(Ordering::Acquire),
+            decoder_session_generation: self.decoder_session_generation.load(Ordering::Acquire),
+            decoder_session_state: self.decoder_session_state.load(Ordering::Acquire),
+            playback_state: self.playback_state.load(Ordering::Acquire),
+            ready: self.is_ready(),
+            eof: self.is_eof(),
+            job_requested: self.job_requested.load(Ordering::Acquire),
+            job_running: self.job_running.load(Ordering::Acquire),
+            refill_requested: self.refill_requested.load(Ordering::Acquire),
+            last_refill_at_ms: self.last_refill_at_ms.load(Ordering::Relaxed),
+            last_refill_wait_us: self.last_refill_wait_us.load(Ordering::Relaxed),
+            worker_pool_pending_jobs: STREAM_WORKER_POOL.get()
+                .map(|pool| pool.pending_jobs.load(Ordering::Relaxed)).unwrap_or(0),
+            worker_pool_active_workers: STREAM_WORKER_POOL.get()
+                .map(|pool| pool.active_workers.load(Ordering::Relaxed)).unwrap_or(0),
+        }
+    }
+
     pub fn capacity_mib(&self) -> f64 {
         (self.ring.capacity_frames * self.channels.max(1) as usize * std::mem::size_of::<f32>()) as f64
             / (1024.0 * 1024.0)
@@ -450,6 +486,20 @@ impl StreamingAudioSource {
             && self.ready_generation.load(Ordering::Acquire)
                 == self.seek_generation.load(Ordering::Acquire)
             && self.pending_seek_generation.load(Ordering::Acquire) == 0
+    }
+    #[cfg(test)]
+    pub(crate) fn seed_test_pcm(self: &Arc<Self>, frames: usize) {
+        let generation = self.seek_generation.load(Ordering::Acquire);
+        self.ring.reset(generation);
+        for _ in 0..frames {
+            self.ring.push_frame(&[0.125, 0.125], generation)
+                .expect("test PCM should fit in the streaming ring");
+            self.buffered_samples.fetch_add(2, Ordering::Release);
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn publish_test_ready(&self) {
+        publish_stream_ready(self, self.seek_generation.load(Ordering::Acquire));
     }
     pub fn is_control_seek_pending(&self) -> bool {
         let state = self.seek_generation.load(Ordering::Acquire);
@@ -1001,6 +1051,26 @@ pub enum StreamPlaybackState {
     Playing = 2,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct StreamUnderrunSnapshot {
+    pub stream_id: Uuid,
+    pub buffered_frames: usize,
+    pub capacity_frames: usize,
+    pub seek_generation: u64,
+    pub decoder_session_generation: u64,
+    pub decoder_session_state: u8,
+    pub playback_state: u8,
+    pub ready: bool,
+    pub eof: bool,
+    pub job_requested: bool,
+    pub job_running: bool,
+    pub refill_requested: bool,
+    pub last_refill_at_ms: u64,
+    pub last_refill_wait_us: u64,
+    pub worker_pool_pending_jobs: usize,
+    pub worker_pool_active_workers: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamSourceDiagnostics {
     pub source_id: Uuid,
@@ -1171,8 +1241,7 @@ fn update_min(target: &AtomicUsize, value: usize) {
 }
 
 fn stream_pool() -> &'static StreamWorkerPool {
-    static POOL: OnceLock<StreamWorkerPool> = OnceLock::new();
-    POOL.get_or_init(|| {
+    STREAM_WORKER_POOL.get_or_init(|| {
         let (request_tx, request_rx) = mpsc::channel::<Arc<StreamingAudioSource>>();
         let (tx, rx) = mpsc::sync_channel::<StreamJob>(STREAM_JOB_QUEUE);
         let rx = Arc::new(std::sync::Mutex::new(rx));
@@ -1767,6 +1836,7 @@ fn run_stream_job(job: StreamJob) {
     if source.cancel.load(Ordering::Acquire) {
         return;
     }
+    let mut produced_pcm = false;
     let generation = source.seek_generation.load(Ordering::Acquire);
     let mut session = source
         .decoder_session
@@ -1791,11 +1861,15 @@ fn run_stream_job(job: StreamJob) {
                 generation,
             },
             Ok(None) => {
+                source.decoder_session_state.store(2, Ordering::Release);
+                source.decoder_session_generation.store(generation, Ordering::Release);
                 publish_stream_eof(&source, generation, true);
                 source.refill_requested.store(false, Ordering::Release);
                 return;
             }
             Err(_) => {
+                source.decoder_session_state.store(2, Ordering::Release);
+                source.decoder_session_generation.store(generation, Ordering::Release);
                 source.decode_failures.fetch_add(1, Ordering::Relaxed);
                 publish_stream_ready(&source, generation);
                 publish_stream_eof(&source, generation, true);
@@ -1804,6 +1878,8 @@ fn run_stream_job(job: StreamJob) {
             }
         },
     };
+    source.decoder_session_state.store(1, Ordering::Release);
+    source.decoder_session_generation.store(session.generation, Ordering::Release);
     publish_stream_eof(&source, generation, false);
     let reported_frames = session.decoder.total_frames.unwrap_or(0);
     if !source.is_seamless_looping() || source.total_frames() == 0 {
@@ -1835,6 +1911,7 @@ fn run_stream_job(job: StreamJob) {
                     break;
                 }
                 let pcm = interleaved(decoded);
+                let mut packet_produced_pcm = false;
                 for sample_frame in pcm.chunks(channels) {
                     if source.cancel.load(Ordering::Acquire)
                         || source.seek_generation.load(Ordering::Acquire) != generation
@@ -1871,6 +1948,8 @@ fn run_stream_job(job: StreamJob) {
                     if !push_stream_frame(&source, &ring, sample_frame, generation) {
                         return;
                     }
+                    produced_pcm = true;
+                    packet_produced_pcm = true;
                     session.frame += 1;
                     source
                         .decoded_frames
@@ -1888,6 +1967,9 @@ fn run_stream_job(job: StreamJob) {
                     if source.buffered_samples() >= target && !source.is_trimmed_looping() {
                         break;
                     }
+                }
+                if packet_produced_pcm {
+                    source.last_refill_at_ms.store(now_millis(), Ordering::Release);
                 }
             }
             Ok(_) => {}
@@ -1951,8 +2033,13 @@ fn run_stream_job(job: StreamJob) {
         Ordering::Release,
     );
     if let Ok(mut stored) = source.decoder_session.lock() {
+        source.decoder_session_state.store(1, Ordering::Release);
+        source.decoder_session_generation.store(session.generation, Ordering::Release);
         *stored = Some(session);
     };
+    if produced_pcm {
+        source.last_refill_at_ms.store(now_millis(), Ordering::Release);
+    }
 }
 
 /// Keep the format attached to the PCM buffer in sync with what the decoder
@@ -2334,10 +2421,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod streaming_tests {
+pub(crate) mod streaming_tests {
     use super::*;
 
-    fn test_source(
+    pub(crate) fn test_source(
         state: StreamPlaybackState,
         ready: bool,
         buffered_samples: usize,
@@ -2374,6 +2461,9 @@ mod streaming_tests {
             underrun_reported: AtomicU64::new(0),
             refill_requested: AtomicBool::new(true),
             playback_state: AtomicU8::new(state as u8),
+            decoder_session_state: AtomicU8::new(0),
+            decoder_session_generation: AtomicU64::new(0),
+            last_refill_at_ms: AtomicU64::new(0),
             decoder_session: Mutex::new(None),
             job_requested: AtomicBool::new(false),
             job_running: AtomicBool::new(false),
@@ -2401,6 +2491,20 @@ mod streaming_tests {
             last_decode_us: AtomicU64::new(0),
             max_decode_us: AtomicU64::new(0),
         })
+    }
+
+    #[test]
+    fn underrun_snapshot_preserves_empty_ring_readiness_and_generation() {
+        let source = test_source(StreamPlaybackState::Playing, false, 0);
+        let mut frame = [0.0; 2];
+        assert!(!source.pop_frame(&mut frame));
+        let snapshot = source.underrun_snapshot();
+        assert_eq!(snapshot.buffered_frames, 0);
+        assert_eq!(snapshot.capacity_frames, source.capacity_frames());
+        assert_eq!(snapshot.seek_generation, SEEK_GENERATION_STEP);
+        assert!(!snapshot.ready, "cold start must remain distinguishable from starvation after readiness");
+        assert_eq!(snapshot.playback_state, StreamPlaybackState::Playing as u8);
+        assert!(!snapshot.job_running);
     }
 
     #[test]
