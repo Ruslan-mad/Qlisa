@@ -1230,6 +1230,8 @@ export interface DisplayPreferences {
   /** Named destinations; omitted by legacy workspaces and normalised to Main. */
   output_destinations?: OutputDestination[];
   default_output_id?: string;
+  /** Machine-global display output IDs assigned to newly created visual cues. */
+  new_cue_output_ids?: string[] | null;
   /** Machine-global Clip Editor dock visibility, mirrored in workspaces for compatibility. */
   show_live_panel?: boolean;
   show_slice_panel?: boolean;

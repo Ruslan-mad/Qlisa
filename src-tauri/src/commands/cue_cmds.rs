@@ -2707,8 +2707,11 @@ pub fn add_cue(
     app_handle: tauri::AppHandle,
 ) -> Result<String, String> {
     super::undo_cmds::push_current_snapshot(&state)?;
+    let preferences = state.global_preferences_snapshot()?;
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let cue = registry.create(&cue_type).map_err(|e| e.to_string())?;
+    let cue = apply_new_cue_output_defaults(cue, &preferences.display, &registry)
+        .map_err(|error| error.to_string())?;
     let id = cue.id().to_string();
     drop(registry);
 
@@ -2735,6 +2738,58 @@ pub fn add_cue(
 
     let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
     Ok(id)
+}
+
+fn apply_new_cue_output_defaults(
+    cue: Box<dyn Cue>,
+    display: &crate::preferences::DisplayPreferences,
+    registry: &crate::cue::registry::CueRegistry,
+) -> anyhow::Result<Box<dyn Cue>> {
+    let Some(output_ids) = new_cue_output_ids_for_type(&cue.cue_type(), display) else {
+        return Ok(cue);
+    };
+    if output_ids.is_empty() {
+        return Ok(cue);
+    }
+    let mut serialized = cue.serialize();
+    serialized["output_id"] = serde_json::Value::String(output_ids[0].clone());
+    serialized["output_ids"] = serde_json::json!(output_ids);
+    registry.from_json(serialized)
+}
+
+/// Return enabled physical display destinations selected for new visual cues.
+/// An empty result preserves the cue's normal empty-output/default routing.
+fn new_cue_output_ids_for_type(
+    cue_type: &CueType,
+    display: &crate::preferences::DisplayPreferences,
+) -> Option<Vec<String>> {
+    if !matches!(
+        cue_type,
+        CueType::Video | CueType::Image | CueType::Camera | CueType::Browser | CueType::Text
+    ) {
+        return None;
+    }
+    let selected = display
+        .new_cue_output_ids
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| vec![display.default_output_id.clone()]);
+    let selected: std::collections::HashSet<&str> = selected.iter().map(String::as_str).collect();
+    let mut output_ids = display
+            .output_destinations
+            .iter()
+            .filter(|output| {
+                output.enabled
+                    && output.sink_kind == crate::preferences::OutputSinkKind::Display
+                    && selected.contains(output.id.as_str())
+            })
+            .map(|output| output.id.clone())
+            .collect::<Vec<_>>();
+    // Browser owns one exclusive WebView and can only target one output.
+    if cue_type == &CueType::Browser {
+        output_ids.truncate(1);
+    }
+    Some(output_ids)
 }
 
 /// The cue kinds whose action is explicitly directed at one or more other
@@ -5166,8 +5221,11 @@ pub fn add_number_action(
     }
     super::undo_cmds::push_current_snapshot(&state)?;
     let number_uuid: Uuid = number_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+    let preferences = state.global_preferences_snapshot()?;
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let child = registry.create(&cue_type).map_err(|e| e.to_string())?;
+    let child = apply_new_cue_output_defaults(child, &preferences.display, &registry)
+        .map_err(|error| error.to_string())?;
     let child_id = child.id();
     drop(registry);
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
@@ -5428,6 +5486,7 @@ mod tests {
         compute_waveform_bins,
         finish_context_target,
         generated_media_cue_name, index_cue_targets, number_audio_should_be_master,
+        apply_new_cue_output_defaults, new_cue_output_ids_for_type,
         number_preview_child_is_active, number_source_elapsed_ms,
         preview_request_is_current,
         probe_media_metadata_file, set_file_path_resetting_clip, should_replace_generated_name,
@@ -5442,6 +5501,7 @@ mod tests {
         devamp_cue::DevampCueFactory,
         fade_cue::FadeCueFactory,
         registry::CueRegistry,
+        video_cue::{VideoCue, VideoCueFactory},
         stop_cue::StopCue,
         stop_cue::StopCueFactory,
         traits::Cue,
@@ -5451,7 +5511,7 @@ mod tests {
         MediaMetadata, MediaMetadataFailure, MediaMetadataKey, MediaMetadataReservation,
     };
     use crate::show::cue_list::CueList;
-    use crate::preferences::GeneralPreferences;
+    use crate::preferences::{DisplayPreferences, GeneralPreferences, OutputSinkKind};
     use uuid::Uuid;
 
     fn targeted_test_registry() -> CueRegistry {
@@ -5463,6 +5523,61 @@ mod tests {
             registry.register(action.cue_type(), Box::new(ControlCueFactory(action)));
         }
         registry
+    }
+
+    #[test]
+    fn new_cue_output_defaults_select_enabled_physical_outputs_only() {
+        let mut display = DisplayPreferences::default();
+        let mut led = display.output_destinations[0].clone();
+        led.id = "led".into();
+        led.name = "LED".into();
+        let mut disabled = led.clone();
+        disabled.id = "disabled".into();
+        disabled.enabled = false;
+        let mut ndi = led.clone();
+        ndi.id = "ndi".into();
+        ndi.sink_kind = OutputSinkKind::Ndi;
+        display.output_destinations.extend([led, disabled, ndi]);
+        display.new_cue_output_ids = Some(vec!["ndi".into(), "led".into(), "disabled".into(), "missing".into(), "default".into()]);
+
+        assert_eq!(new_cue_output_ids_for_type(&CueType::Video, &display), Some(vec!["default".into(), "led".into()]));
+        assert_eq!(new_cue_output_ids_for_type(&CueType::Image, &display), Some(vec!["default".into(), "led".into()]));
+        assert_eq!(new_cue_output_ids_for_type(&CueType::Camera, &display), Some(vec!["default".into(), "led".into()]));
+        assert_eq!(new_cue_output_ids_for_type(&CueType::Text, &display), Some(vec!["default".into(), "led".into()]));
+        assert_eq!(new_cue_output_ids_for_type(&CueType::Browser, &display), Some(vec!["default".into()]));
+        assert_eq!(new_cue_output_ids_for_type(&CueType::Audio, &display), None);
+    }
+
+    #[test]
+    fn no_enabled_selected_new_cue_output_keeps_regular_default_routing() {
+        let mut display = DisplayPreferences::default();
+        display.output_destinations[0].enabled = false;
+        display.new_cue_output_ids = Some(vec!["default".into(), "deleted".into()]);
+        assert_eq!(new_cue_output_ids_for_type(&CueType::Video, &display), Some(vec![]));
+        display.new_cue_output_ids = Some(vec![]);
+        assert_eq!(new_cue_output_ids_for_type(&CueType::Video, &display), Some(vec![]));
+    }
+
+    #[test]
+    fn a_new_video_cue_serializes_every_selected_output_and_empty_keeps_legacy_routing() {
+        let mut registry = CueRegistry::new();
+        registry.register(CueType::Video, Box::new(VideoCueFactory));
+        let mut display = DisplayPreferences::default();
+        let mut tv = display.output_destinations[0].clone();
+        tv.id = "tv".into();
+        tv.name = "TV".into();
+        display.output_destinations.push(tv);
+        display.new_cue_output_ids = Some(vec!["default".into(), "tv".into()]);
+
+        let cue = apply_new_cue_output_defaults(Box::new(VideoCue::new()), &display, &registry).unwrap();
+        let serialized = cue.serialize();
+        assert_eq!(serialized["output_id"], "default");
+        assert_eq!(serialized["output_ids"], serde_json::json!(["default", "tv"]));
+
+        display.new_cue_output_ids = Some(vec![]);
+        let cue = apply_new_cue_output_defaults(Box::new(VideoCue::new()), &display, &registry).unwrap();
+        assert_eq!(cue.serialize()["output_ids"], serde_json::json!([]));
+        assert!(cue.serialize()["output_id"].is_null());
     }
 
     #[test]

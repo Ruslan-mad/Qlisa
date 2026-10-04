@@ -531,6 +531,11 @@ pub struct DisplayPreferences {
     /// Destination used when a cue does not select an output explicitly.
     #[serde(default = "DisplayPreferences::default_output_id")]
     pub default_output_id: String,
+    /// Physical display outputs selected automatically for newly created
+    /// visual cues. `None` migrates legacy preferences from `default_output_id`;
+    /// `Some([])` is an explicit choice to use the regular default routing.
+    #[serde(default)]
+    pub new_cue_output_ids: Option<Vec<String>>,
 }
 
 /// Output sink kind.  `Display` is intentionally an extensible enum: network
@@ -708,6 +713,7 @@ impl Default for DisplayPreferences {
                 hide_cursor: false,
             }],
             default_output_id: Self::default_output_id(),
+            new_cue_output_ids: Some(vec![Self::default_output_id()]),
         }
     }
 }
@@ -768,6 +774,10 @@ pub fn normalize_global_preferences(preferences: &mut AppPreferences) -> bool {
         .any(|destination| destination.id == preferences.display.default_output_id)
     {
         preferences.display.default_output_id = preferences.display.output_destinations[0].id.clone();
+    }
+    if preferences.display.new_cue_output_ids.is_none() {
+        preferences.display.new_cue_output_ids =
+            Some(vec![preferences.display.default_output_id.clone()]);
     }
     match (before, serde_json::to_value(&*preferences).ok()) {
         (Some(before), Some(after)) => before != after,
@@ -1023,9 +1033,29 @@ mod tests {
         assert_eq!(p.output_destinations.len(), 1);
         assert_eq!(p.output_destinations[0].monitor, Some(2));
         assert_eq!(p.output_destinations[0].transform.scale, 1.25);
+        assert_eq!(p.new_cue_output_ids, None);
+        let mut normalized = AppPreferences { display: p.clone(), ..AppPreferences::default() };
+        normalize_global_preferences(&mut normalized);
+        assert_eq!(normalized.display.new_cue_output_ids, Some(vec!["default".into()]));
         let saved = serde_json::to_value(&p).unwrap();
         assert_eq!(saved["output_screen"], 2);
         assert!(saved["output_destinations"].is_array());
+    }
+
+    #[test]
+    fn explicit_empty_new_cue_output_selection_survives_normalization() {
+        let mut preferences = AppPreferences::default();
+        preferences.display.new_cue_output_ids = Some(vec![]);
+        normalize_global_preferences(&mut preferences);
+        assert_eq!(preferences.display.new_cue_output_ids, Some(vec![]));
+    }
+
+    #[test]
+    fn multiple_new_cue_output_defaults_roundtrip_in_preferences() {
+        let mut preferences = AppPreferences::default();
+        preferences.display.new_cue_output_ids = Some(vec!["default".into(), "tv".into()]);
+        let restored: AppPreferences = serde_json::from_value(serde_json::to_value(&preferences).unwrap()).unwrap();
+        assert_eq!(restored.display.new_cue_output_ids, Some(vec!["default".into(), "tv".into()]));
     }
 
     #[test]

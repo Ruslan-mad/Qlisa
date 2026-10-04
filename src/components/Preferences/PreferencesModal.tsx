@@ -44,6 +44,7 @@ import { TcPreferences } from "../Timecode/TcPreferences";
 import { MidiTriggerPreferences } from "./MidiTriggerPreferences";
 import { NetworkInterfaceSection } from "./NetworkInterfaceSection";
 import { ProjectorToolsSection } from "./ProjectorToolsSection";
+import { reconcileNewCueOutputIds, toggleNewCueOutputId } from "./newCueOutputs";
 import { listInputDevices } from "../../lib/commands";
 import { DragNumber } from "../common/DragNumber";
 import { useLocale } from "../../i18n";
@@ -781,6 +782,7 @@ function DisplayContent({
   committedTimerStyle,
   outputs, onOutputsChange,
   defaultOutputId, onDefaultOutputChange,
+  newCueOutputIds, onNewCueOutputIdsChange,
 }: {
   showOutputTimer: boolean;
   onTimerChange: (v: boolean) => void;
@@ -806,6 +808,8 @@ function DisplayContent({
   onOutputsChange: (outputs: OutputDestination[]) => void;
   defaultOutputId: string;
   onDefaultOutputChange: (id: string) => void;
+  newCueOutputIds: string[];
+  onNewCueOutputIdsChange: (ids: string[]) => void;
 }) {
   const { t } = useLocale();
   const [screens, setScreens] = useState<ScreenInfo[]>([]);
@@ -855,6 +859,8 @@ function DisplayContent({
           onSelectedOutputChange={setSelectedOutputId}
           defaultOutputId={defaultOutputId}
           onDefaultOutputChange={onDefaultOutputChange}
+          newCueOutputIds={newCueOutputIds}
+          onNewCueOutputIdsChange={onNewCueOutputIdsChange}
         />
         <Row label={t("preferences.outputTimer")}>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
@@ -993,7 +999,7 @@ function DisplayContent({
   );
 }
 
-function OutputManager({ outputs, onChange, screens, selectedOutputId, onSelectedOutputChange, defaultOutputId, onDefaultOutputChange }: { outputs: OutputDestination[]; onChange: (v: OutputDestination[]) => void; screens: ScreenInfo[]; selectedOutputId: string; onSelectedOutputChange: (id: string) => void; defaultOutputId: string; onDefaultOutputChange: (id: string) => void }) {
+function OutputManager({ outputs, onChange, screens, selectedOutputId, onSelectedOutputChange, defaultOutputId, onDefaultOutputChange, newCueOutputIds, onNewCueOutputIdsChange }: { outputs: OutputDestination[]; onChange: (v: OutputDestination[]) => void; screens: ScreenInfo[]; selectedOutputId: string; onSelectedOutputChange: (id: string) => void; defaultOutputId: string; onDefaultOutputChange: (id: string) => void; newCueOutputIds: string[]; onNewCueOutputIdsChange: (ids: string[]) => void }) {
   const { t } = useLocale();
   // Display tabs deliberately do not include network destinations: a network
   // stream has no monitor, native window, or projector calibration surface.
@@ -1102,6 +1108,13 @@ function OutputManager({ outputs, onChange, screens, selectedOutputId, onSelecte
       patch({ enabled });
       if (!enabled && current.id === defaultOutputId) onDefaultOutputChange(outputs.find((output) => output.id !== current.id && output.enabled)?.id ?? "");
     }} /></Row>
+    <Row label=""><label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+      <input type="checkbox" checked={newCueOutputIds.includes(current.id)} onChange={(e) => {
+        onNewCueOutputIdsChange(toggleNewCueOutputId(newCueOutputIds, current.id, e.target.checked));
+      }} />
+      <span>{t("outputScreenUi.newCueDefault")}</span>
+    </label></Row>
+    <Row label=""><span style={{ fontSize: 11, color: "var(--wc-text-faint)" }}>{t("outputScreenUi.newCueRoutingHint")}</span></Row>
     <Row label={t("preferences.monitor")}>
       <Select style={{ ...selectStyle, ...(currentMonitorOwner ? { borderColor: "#ef4444", color: "#fca5a5", background: "rgba(239,68,68,0.14)" } : {}) }} value={current.monitor ?? "floating"} onChange={(e) => patch({ monitor: e.target.value === "floating" ? null : Number(e.target.value) })}>
         <option value="floating">{t("preferencesExtra.floatingWindow")}</option>
@@ -1503,6 +1516,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
   const [draftOutputScreen, setDraftOutputScreen] = useState<number | null>(null);
   const [draftOutputs, setDraftOutputs] = useState<OutputDestination[]>([]);
   const [draftDefaultOutputId, setDraftDefaultOutputId] = useState("default");
+  const [draftNewCueOutputIds, setDraftNewCueOutputIds] = useState<string[]>(["default"]);
   const [showOutputTimer, setShowOutputTimer] = useState(false);
   const [draftShowOutputTimer, setDraftShowOutputTimer] = useState(false);
   const [timerCountDown, setTimerCountDown] = useState(false);
@@ -1543,6 +1557,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
     const normalizedOutputs = normalizeOutputDestinations(p.display.output_destinations, p.display.default_output_id, p.display.output_screen);
     setDraftOutputs(normalizedOutputs.destinations);
     setDraftDefaultOutputId(normalizedOutputs.defaultOutputId);
+    setDraftNewCueOutputIds(p.display.new_cue_output_ids ?? [normalizedOutputs.defaultOutputId]);
     const normalizedDefault = normalizedOutputs.destinations.find((output) => output.id === normalizedOutputs.defaultOutputId);
     setOutputScreen_(normalizedDefault?.monitor ?? null);
     setDraftOutputScreen(normalizedDefault?.monitor ?? null);
@@ -1755,6 +1770,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
       output_transform: cloneOutputTransform(committedDefault.transform),
       output_destinations: normalizedOutputs.destinations,
       default_output_id: normalizedOutputs.defaultOutputId,
+      new_cue_output_ids: draftNewCueOutputIds,
       show_output_timer: draftShowOutputTimer,
       timer_floating: draftTimerFloating,
       timer_count_down: draftTimerCountDown,
@@ -1786,7 +1802,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
         updateGeneralPreferences(draft.general),
         outputScreenUpdate,
         updateDisplayPreferences(displayPayload),
-        updateOutputDestinations(normalizedOutputs.destinations, normalizedOutputs.defaultOutputId),
+        updateOutputDestinations(normalizedOutputs.destinations, normalizedOutputs.defaultOutputId, draftNewCueOutputIds),
       ]);
       if (standalone) {
         await emit("preferences-applied");
@@ -1798,6 +1814,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
       setDraft({ ...draft, display: committedDisplay });
       setDraftOutputs(normalizedOutputs.destinations);
       setDraftDefaultOutputId(normalizedOutputs.defaultOutputId);
+      setDraftNewCueOutputIds(draftNewCueOutputIds);
       setMachineConfig(draftMachineConfig);
       setOutputScreen_(committedDefault.monitor);
       setShowOutputTimer(draftShowOutputTimer);
@@ -1835,6 +1852,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
   const handleDraftOutputsChange = (outputs: OutputDestination[]) => {
     const normalized = normalizeOutputDestinations(outputs, draftDefaultOutputId, draftOutputScreen);
     setDraftOutputs(normalized.destinations);
+    setDraftNewCueOutputIds((ids) => reconcileNewCueOutputIds(ids, normalized.destinations));
     setDraftDefaultOutputId(normalized.defaultOutputId);
     const defaultOutput = normalized.destinations.find((output) => output.id === normalized.defaultOutputId);
     setDraftOutputScreen(defaultOutput?.monitor ?? null);
@@ -1863,6 +1881,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
     );
     setDraftOutputs(normalizedCommitted.destinations);
     setDraftDefaultOutputId(normalizedCommitted.defaultOutputId);
+    setDraftNewCueOutputIds(prefs.display.new_cue_output_ids ?? [normalizedCommitted.defaultOutputId]);
     setDraftShowOutputTimer(showOutputTimer);
     setDraftTimerCountDown(timerCountDown);
     setDraftTimerFont(timerFont);
@@ -2010,6 +2029,8 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
                     onOutputsChange={handleDraftOutputsChange}
                     defaultOutputId={draftDefaultOutputId}
                     onDefaultOutputChange={handleDraftDefaultOutputChange}
+                    newCueOutputIds={draftNewCueOutputIds}
+                    onNewCueOutputIdsChange={setDraftNewCueOutputIds}
                   />
                 )}
                 {category === "personalization" && (

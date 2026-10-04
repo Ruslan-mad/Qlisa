@@ -438,8 +438,8 @@ export const getOutputControlStatuses = () =>
   invoke<import("./types").OutputControlStatus[]>("get_output_control_statuses");
 export const toggleOutputFtb = (outputId: string) =>
   invoke<boolean>("toggle_output_ftb", { outputId });
-export const updateOutputDestinations = (destinations: OutputDestination[], defaultOutputId: string) =>
-  invoke<void>("update_output_destinations", { destinations, defaultOutputId });
+export const updateOutputDestinations = (destinations: OutputDestination[], defaultOutputId: string, newCueOutputIds: string[]) =>
+  invoke<void>("update_output_destinations", { destinations, defaultOutputId, newCueOutputIds });
 export const getNetworkIoStatus = () =>
   invoke<import("./types").NetworkIoStatus>("get_network_io_status");
 export const getNetworkOutputStatuses = () =>

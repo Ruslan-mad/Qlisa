@@ -350,6 +350,13 @@ runtime discovery, NDI dynamic loading, NDI sender/receiver workers, SRT FFmpeg
 sender/input workers, queues, and live status. `output_engine/mod.rs` connects
 composited frames and program-audio taps to those workers.
 
+Preferences → Display stores `new_cue_output_ids` in machine-global
+`AppPreferences`; each enabled physical display can be selected for newly
+created Video, Image, Camera, and Text cues. Browser cues use only the first
+selected display because they own one exclusive WebView. If no selected display
+is enabled, new cues keep the regular `default_output_id` routing. Older
+preferences migrate that regular default into the new selection once.
+
 - Windows builds do not stage or bundle FFmpeg, ffprobe, or libmpv. On first
   launch, a preparation window downloads the pinned FFmpeg pair and libmpv
   directly from their upstream URLs, checks their SHA256 hashes, and installs

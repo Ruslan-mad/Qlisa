@@ -422,11 +422,12 @@ pub async fn get_output_monitor_frame(
 pub async fn update_output_destinations(
     destinations: Vec<OutputDestination>,
     default_output_id: String,
+    new_cue_output_ids: Vec<String>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle.state::<AppState>();
-        apply_output_destinations(destinations, default_output_id, state.inner(), &app_handle)
+        apply_output_destinations(destinations, default_output_id, new_cue_output_ids, state.inner(), &app_handle)
     })
     .await
     .map_err(|error| format!("Could not apply output destinations: {error}"))?
@@ -438,6 +439,7 @@ pub async fn update_output_destinations(
 fn apply_output_destinations(
     mut destinations: Vec<OutputDestination>,
     default_output_id: String,
+    new_cue_output_ids: Vec<String>,
     state: &AppState,
     app_handle: &AppHandle,
 ) -> Result<(), String> {
@@ -461,6 +463,16 @@ fn apply_output_destinations(
         return Err("Default output destination is not configured".into());
     }
     let selected_id = default_output_id;
+    let configured_new_cue_ids: std::collections::HashSet<&str> = destinations
+        .iter()
+        .filter(|destination| destination.sink_kind == OutputSinkKind::Display)
+        .map(|destination| destination.id.as_str())
+        .collect();
+    let mut seen_new_cue_ids = std::collections::HashSet::new();
+    let new_cue_output_ids = new_cue_output_ids
+        .into_iter()
+        .filter(|id| configured_new_cue_ids.contains(id.as_str()) && seen_new_cue_ids.insert(id.clone()))
+        .collect::<Vec<_>>();
     if destinations
         .iter()
         .any(|o| o.id.trim().is_empty() || o.name.trim().is_empty())
@@ -532,6 +544,7 @@ fn apply_output_destinations(
     let mut next_preferences = previous_preferences.clone();
     next_preferences.display.output_destinations = destinations;
     next_preferences.display.default_output_id = selected_id.clone();
+    next_preferences.display.new_cue_output_ids = Some(new_cue_output_ids);
     // Keep old clients and old engines pointed at the default output.
     next_preferences.display.output_screen = selected_monitor;
     next_preferences.display.output_transform = selected_transform;
