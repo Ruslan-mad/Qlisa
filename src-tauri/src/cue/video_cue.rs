@@ -5,6 +5,7 @@
 //! The lifecycle (go / stop / pause / resume / pre-wait) mirrors [`AudioCue`]
 //! exactly, so the Transport and event loop need no special-casing.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -86,6 +87,7 @@ pub struct VideoCue {
     pub hold_last_frame: bool,
     /// Visual geometry (fit / position / scale / rotation / crop).
     pub geometry: VideoGeometry,
+    pub geometry_by_output: HashMap<String, VideoGeometry>,
     /// Compositing (stacking layer, base opacity, blend mode).
     pub layer_style: LayerStyle,
     /// QLab-style slices (markers + per-segment play counts).  Empty = plain
@@ -185,6 +187,7 @@ impl VideoCue {
             output_patch_id: None,
             hold_last_frame: false,
             geometry: VideoGeometry::default(),
+            geometry_by_output: HashMap::new(),
             layer_style: LayerStyle::default(),
             slices: crate::cue::types::SliceList::default(),
             is_disabled: false,
@@ -515,7 +518,7 @@ impl VideoCue {
             .map(|(s, e, count)| (s as f64 / 1000.0, e as f64 / 1000.0, count))
             .collect();
 
-        let voice_id = match context.output_engine.show_content_multi(ContentRequest {
+        let voice_id = match context.output_engine.show_content_multi_with_geometry(ContentRequest {
             file_path: &path,
             is_image: false,
             fade_in_ms,
@@ -537,7 +540,7 @@ impl VideoCue {
             layer_style: self.layer_style,
             slices,
             preload: self.preloading,
-        }, &self.output_ids) {
+        }, &self.output_ids, &self.geometry_by_output) {
             Ok(voice_id) => voice_id,
             Err(error) => {
                 // The audio voice is submitted before the visual pipeline so
@@ -1218,6 +1221,11 @@ impl Cue for VideoCue {
         Some(self.geometry)
     }
 
+    fn visual_geometry_by_output(&self) -> Option<HashMap<String, VideoGeometry>> {
+        Some(self.geometry_by_output.clone())
+    }
+
+
     fn layer_style(&self) -> Option<LayerStyle> {
         Some(self.layer_style)
     }
@@ -1225,6 +1233,9 @@ impl Cue for VideoCue {
     fn apply_live_visual_patch(&mut self, patch: crate::cue::traits::LiveVisualPatch) {
         if let Some(geometry) = patch.geometry {
             self.geometry = geometry;
+        }
+        if let Some(overrides) = patch.geometry_by_output {
+            self.geometry_by_output = overrides;
         }
         if let Some(layer_style) = patch.layer_style {
             self.layer_style = layer_style;
@@ -1274,6 +1285,7 @@ impl Cue for VideoCue {
             "output_patch_id": self.output_patch_id,
             "hold_last_frame": self.hold_last_frame,
             "geometry": self.geometry,
+            "geometry_by_output": self.geometry_by_output,
             "layer_style": self.layer_style,
             "slices": self.slices,
             "level_matrix": self.level_matrix,
@@ -1403,6 +1415,11 @@ impl CueFactory for VideoCueFactory {
                 cue.geometry = geometry;
             }
         }
+        if let Some(g) = value.get("geometry_by_output") {
+            if let Ok(overrides) = serde_json::from_value::<HashMap<String, VideoGeometry>>(g.clone()) {
+                cue.geometry_by_output = overrides;
+            }
+        }
         if let Some(ls) = value.get("layer_style") {
             if let Ok(style) = serde_json::from_value::<LayerStyle>(ls.clone()) {
                 cue.layer_style = style;
@@ -1456,13 +1473,16 @@ mod tests {
             crop_top: 0.1,
             crop_bottom: 0.0,
         };
+        cue.geometry_by_output.insert("tv".into(), VideoGeometry { fit_mode: FitMode::Stretch, ..VideoGeometry::default() });
 
         let json = cue.serialize();
         assert_eq!(json["hold_last_frame"], true);
         assert_eq!(json["geometry"]["fit_mode"], "fill");
+        assert_eq!(json["geometry_by_output"]["tv"]["fit_mode"], "stretch");
 
         let rebuilt = VideoCueFactory.from_json(json).expect("roundtrip");
         assert_eq!(rebuilt.visual_geometry().unwrap(), cue.geometry);
+        assert_eq!(rebuilt.serialize()["geometry_by_output"]["tv"]["fit_mode"], "stretch");
         let rebuilt_json = rebuilt.serialize();
         assert_eq!(rebuilt_json["hold_last_frame"], true);
     }

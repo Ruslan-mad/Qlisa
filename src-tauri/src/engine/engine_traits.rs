@@ -277,6 +277,34 @@ pub trait OutputEngineApi: Send + Sync {
             ..req
         })
     }
+    /// Fan out content with geometry overrides keyed by stable output ID.
+    /// Engines which only implement the compatibility fallback can route the
+    /// first output, as `show_content_multi` already does. They must reject a
+    /// request whose later selected outputs have overrides they cannot apply.
+    fn show_content_multi_with_geometry(
+        &self,
+        req: ContentRequest<'_>,
+        output_ids: &[String],
+        geometry_by_output: &std::collections::HashMap<String, super::output_engine::VideoGeometry>,
+    ) -> Result<VoiceId> {
+        let first_id = output_ids.first().map(String::as_str).or(req.output_id);
+        if output_ids.iter().skip(1).any(|id| geometry_by_output.contains_key(id)) {
+            anyhow::bail!("This output engine cannot route per-output geometry to multiple destinations");
+        }
+        if first_id.is_none() && !geometry_by_output.is_empty() {
+            anyhow::bail!("This output engine cannot resolve per-output geometry for the implicit destination");
+        }
+        let Some(geometry) = first_id.and_then(|id| geometry_by_output.get(id)).copied() else {
+            return self.show_content_multi(req, output_ids);
+        };
+        let output_id = output_ids.first().map(String::as_str).or(req.output_id);
+        self.show_content_multi(ContentRequest {
+            geometry,
+            output_id,
+            screen_index: if output_ids.is_empty() { req.screen_index } else { None },
+            ..req
+        }, output_ids)
+    }
     /// Show a live, receiver-owned BGRA mailbox. Test doubles may leave this
     /// unsupported; production OutputEngine uploads the latest frame on its
     /// render thread.
@@ -317,6 +345,36 @@ pub trait OutputEngineApi: Send + Sync {
                 geometry,
                 layer_style,
                 fade_in_ms,
+            )?;
+            first.get_or_insert(voice);
+        }
+        first.ok_or_else(|| anyhow::anyhow!("No output destinations selected"))
+    }
+    /// External BGRA equivalent of `show_content_multi_with_geometry`.
+    /// Compatibility engines apply the override independently to each
+    /// destination through their existing single-output method.
+    fn show_external_bgra_source_multi_with_geometry(
+        &self,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        source: Arc<super::network_io::BgraFrameMailbox>,
+        geometry: super::output_engine::VideoGeometry,
+        layer_style: super::output_engine::LayerStyle,
+        fade_in_ms: u32,
+        geometry_by_output: &std::collections::HashMap<String, super::output_engine::VideoGeometry>,
+    ) -> Result<VoiceId> {
+        if output_ids.is_empty() {
+            if output_id.is_none() && !geometry_by_output.is_empty() {
+                anyhow::bail!("This output engine cannot resolve per-output geometry for the implicit destination");
+            }
+            let geometry = output_id.and_then(|id| geometry_by_output.get(id)).copied().unwrap_or(geometry);
+            return self.show_external_bgra_source(output_id, source, geometry, layer_style, fade_in_ms);
+        }
+        let mut first = None;
+        for id in output_ids {
+            let output_geometry = geometry_by_output.get(id).copied().unwrap_or(geometry);
+            let voice = self.show_external_bgra_source(
+                Some(id.as_str()), Arc::clone(&source), output_geometry, layer_style, fade_in_ms,
             )?;
             first.get_or_insert(voice);
         }
@@ -435,6 +493,14 @@ impl OutputEngineApi for OutputEngine {
     ) -> Result<VoiceId> {
         OutputEngine::show_content_multi(self, req, output_ids)
     }
+    fn show_content_multi_with_geometry(
+        &self,
+        req: ContentRequest<'_>,
+        output_ids: &[String],
+        geometry_by_output: &std::collections::HashMap<String, super::output_engine::VideoGeometry>,
+    ) -> Result<VoiceId> {
+        OutputEngine::show_content_multi_with_geometry(self, req, output_ids, geometry_by_output)
+    }
     fn show_external_bgra_source(
         &self,
         output_id: Option<&str>,
@@ -469,6 +535,20 @@ impl OutputEngineApi for OutputEngine {
             geometry,
             layer_style,
             fade_in_ms,
+        )
+    }
+    fn show_external_bgra_source_multi_with_geometry(
+        &self,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        source: Arc<super::network_io::BgraFrameMailbox>,
+        geometry: super::output_engine::VideoGeometry,
+        layer_style: super::output_engine::LayerStyle,
+        fade_in_ms: u32,
+        geometry_by_output: &std::collections::HashMap<String, super::output_engine::VideoGeometry>,
+    ) -> Result<VoiceId> {
+        OutputEngine::show_external_bgra_source_multi_with_geometry(
+            self, output_id, output_ids, source, geometry, layer_style, fade_in_ms, geometry_by_output,
         )
     }
     fn attach_cue_audio_voice(&self, visual_voice_id: VoiceId, audio_voice_id: VoiceId) {

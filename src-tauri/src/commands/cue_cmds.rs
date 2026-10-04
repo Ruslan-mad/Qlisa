@@ -1414,6 +1414,12 @@ fn classify_live_in_place_patch(
                 );
                 has_live_field = true;
             }
+            "geometry_by_output" if matches!(cue_type, CueType::Video | CueType::Image | CueType::Camera) => {
+                let overrides = serde_json::from_value(value.clone())
+                    .map_err(|_| "geometry_by_output must map output IDs to valid geometry".to_string())?;
+                patch.visual.get_or_insert_with(Default::default).geometry_by_output = Some(overrides);
+                has_live_field = true;
+            }
             "layer_style"
                 if matches!(cue_type, CueType::Video | CueType::Image | CueType::Camera) =>
             {
@@ -1486,7 +1492,8 @@ fn apply_existing_cue_live_side_effects(
         .filter(|voice_id| state.output_engine.is_current_voice(*voice_id))
     {
         if let Some(geometry) = cue.visual_geometry() {
-            state.output_engine.apply_geometry(voice_id, &geometry);
+            let overrides = cue.visual_geometry_by_output().unwrap_or_default();
+            state.output_engine.apply_geometry_by_output(voice_id, &geometry, &overrides);
         }
         if let Some(layer_style) = cue.layer_style() {
             state.output_engine.set_layer_props(voice_id, &layer_style);
@@ -2592,6 +2599,7 @@ mod bulk_update_tests {
             &serde_json::json!({
                 "volume_db": -4.0, "level_matrix": [[0.0]],
                 "geometry": { "fit_mode": "fit", "pan_x": 0.2, "pan_y": 0.0, "scale": 1.0, "rotation": 0, "crop_left": 0.0, "crop_right": 0.0, "crop_top": 0.0, "crop_bottom": 0.0 },
+                "geometry_by_output": { "led": { "fit_mode": "fill", "pan_x": 0.0, "pan_y": 0.0, "scale": 1.0, "rotation": 0, "crop_left": 0.0, "crop_right": 0.0, "crop_top": 0.0, "crop_bottom": 0.0 } },
                 "layer_style": { "layer": 4, "opacity": 0.5, "blend_mode": "normal" },
             }),
             CueType::Video,
@@ -2600,6 +2608,7 @@ mod bulk_update_tests {
         assert_eq!(video.serialize()["volume_db"], -4.0);
         assert_eq!(video.serialize()["level_matrix"][0][0], 0.0);
         assert_eq!(video.serialize()["geometry"]["pan_x"], 0.2);
+        assert_eq!(video.serialize()["geometry_by_output"]["led"]["fit_mode"], "fill");
         assert_eq!(video.serialize()["layer_style"]["layer"], 4);
 
         let mut mic = MicCue::new();

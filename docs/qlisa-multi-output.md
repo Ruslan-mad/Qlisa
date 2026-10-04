@@ -51,6 +51,15 @@ renders a hidden destination pipeline and submits its **final composited BGRA
 frames**: cue geometry/crop, layer order/blend/opacity, fades, and output
 transform are already applied.
 
+Video, Image, and Camera cues may store `geometry_by_output`, keyed by stable
+destination ID. The Inspector shows one Fit row per selected destination and
+per-output tabs for Position and Crop. A missing override inherits the legacy
+cue-level `geometry`, so existing projects keep their appearance. Overrides
+remain saved when a destination is unchecked. A newly selected destination
+uses the cue-level geometry until the operator edits that destination. This
+routing applies to physical outputs and selected NDI/SRT destinations, including
+Camera NDI and SRT input paths.
+
 - NDI has stream name/group and quality options. `LowBandwidth` caps submitted
   raster size at 1280×720 while preserving aspect ratio; `Highest` preserves the
   compositor raster dimensions.

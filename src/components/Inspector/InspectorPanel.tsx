@@ -37,7 +37,7 @@ import { TriggersTab } from "./TriggersTab";
 import { CameraTab } from "./CameraTab";
 import { BrowserTab } from "./BrowserTab";
 import { MultiCueInspector } from "./MultiCueInspector";
-import { OutputSelector } from "./OutputSelector";
+import { displayedOutputIds, OutputSelector, type OutputSelectableCue } from "./OutputSelector";
 import { NumberPreview } from "./NumberPreview";
 import { formatInspectorSaveError, isCurrentCueRequest, isFadeEdit, persistCurrentThenCommit } from "./singleCueSave";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
@@ -416,7 +416,16 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
           <LayerTab cue={cueData as VideoCueData | ImageCueData | CameraCueData} onSave={save} />
         )}
         {activeTab === "geometry" && (isVideo || isImage || isCamera) && (
-          <GeometryTab cue={cueData as VideoCueData | ImageCueData | CameraCueData} onSave={save} />
+          <GeometryTab
+            cue={cueData as VideoCueData | ImageCueData | CameraCueData}
+            outputs={displayPrefs.output_destinations ?? []}
+            outputIds={displayedOutputIds(
+              cueData as OutputSelectableCue,
+              new Set((displayPrefs.output_destinations ?? []).map((output) => output.id)),
+              displayPrefs.default_output_id,
+            )}
+            onSave={save}
+          />
         )}
         {activeTab === "camera" && isCamera && (
           <CameraTab cue={cueData as CameraCueData} onSave={save} />

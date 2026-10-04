@@ -327,6 +327,30 @@ fn image_cue_go_shows_content_as_image() {
 }
 
 #[test]
+fn video_cue_routes_geometry_override_through_output_engine_trait() {
+    let reg = full_registry();
+    let (ctx, _rx, log) = recording_context();
+    let mut json = reg.create(&CueType::Video).unwrap().serialize();
+    json["file_path"] = serde_json::json!("videos/test.mp4");
+    json["output_id"] = serde_json::json!("led");
+    json["output_ids"] = serde_json::json!(["led"]);
+    json["geometry_by_output"] = serde_json::json!({
+        "led": { "fit_mode": "fill", "pan_x": 0.35, "pan_y": 0.0, "scale": 1.0, "rotation": 0, "crop_left": 0.0, "crop_right": 0.0, "crop_top": 0.0, "crop_bottom": 0.0 }
+    });
+    let mut cue = reg.from_json(json).unwrap();
+    preload_silent_video_audio(cue.as_mut());
+
+    cue.go(&ctx).unwrap();
+
+    let geometry = log.lock().unwrap().iter().find_map(|call| match call {
+        EngineCall::OutputShowContent { geometry, .. } => Some(*geometry),
+        _ => None,
+    }).expect("Video GO must send content through OutputEngineApi");
+    assert_eq!(geometry.fit_mode, inkue_lib::engine::output_engine::FitMode::Fill);
+    assert_eq!(geometry.pan_x, 0.35);
+}
+
+#[test]
 fn image_cue_go_without_a_file_completes_instantly() {
     // No file assigned → no engine call, cue completes so the sequence advances.
     let reg = full_registry();

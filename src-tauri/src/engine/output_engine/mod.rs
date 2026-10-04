@@ -858,6 +858,10 @@ pub struct OutputEngine {
     browser_surface: BrowserSurfaceManager,
 }
 
+fn geometry_for_output<'a>(output_id: &str, fallback: &'a VideoGeometry, overrides: &'a HashMap<String, VideoGeometry>) -> &'a VideoGeometry {
+    overrides.get(output_id).unwrap_or(fallback)
+}
+
 impl OutputEngine {
     fn resolve_browser_output_id(
         registry: &OutputRegistry,
@@ -1988,8 +1992,28 @@ impl OutputEngine {
     /// Display one cue on several destinations. The first voice is canonical;
     /// lifecycle operations on it are fanned out by the engine.
     pub fn show_content_multi(&self, req: ContentRequest<'_>, output_ids: &[String]) -> Result<VoiceId> {
+        self.show_content_multi_with_geometry(req, output_ids, &std::collections::HashMap::new())
+    }
+
+    pub fn show_content_multi_with_geometry(
+        &self, req: ContentRequest<'_>, output_ids: &[String],
+        geometry_by_output: &std::collections::HashMap<String, VideoGeometry>,
+    ) -> Result<VoiceId> {
         let ids: Vec<&str> = output_ids.iter().map(String::as_str).filter(|id| !id.trim().is_empty()).fold(Vec::new(), |mut ids, id| { if !ids.contains(&id) { ids.push(id); } ids });
-        if ids.is_empty() { return self.show_content(req); }
+        if ids.is_empty() {
+            let resolved_geometry = self.pipeline_for_output(req.output_id)
+                .map(|(id, _)| *geometry_for_output(&id, &req.geometry, geometry_by_output))
+                .unwrap_or(req.geometry);
+            return self.show_content(ContentRequest {
+                file_path: req.file_path, is_image: req.is_image, fade_in_ms: req.fade_in_ms,
+                loop_count: req.loop_count, initial_seek_action_ms: req.initial_seek_action_ms,
+                start_ms: req.start_ms, end_ms: req.end_ms, screen_index: req.screen_index,
+                output_id: req.output_id, audio_voice_id: req.audio_voice_id,
+                display_duration_ms: req.display_duration_ms, hold_last_frame: req.hold_last_frame,
+                geometry: resolved_geometry, live_source: req.live_source, layer_style: req.layer_style,
+                slices: req.slices, preload: req.preload,
+            });
+        }
         let mut voices = Vec::with_capacity(ids.len());
         for id in ids {
             let audio_voice_id = if voices.is_empty() { req.audio_voice_id } else { None };
@@ -1999,7 +2023,7 @@ impl OutputEngine {
                 initial_seek_action_ms: req.initial_seek_action_ms,
                 screen_index: None, output_id: Some(id), audio_voice_id,
                 display_duration_ms: req.display_duration_ms, hold_last_frame: req.hold_last_frame,
-                geometry: req.geometry, live_source: req.live_source, layer_style: req.layer_style,
+                geometry: *geometry_for_output(id, &req.geometry, geometry_by_output), live_source: req.live_source, layer_style: req.layer_style,
                 slices: req.slices.clone(), preload: req.preload,
             }) {
                 Ok(voice) => voice,
@@ -2060,11 +2084,28 @@ impl OutputEngine {
         &self, output_id: Option<&str>, output_ids: &[String], source: Arc<crate::engine::network_io::BgraFrameMailbox>,
         geometry: VideoGeometry, layer_style: LayerStyle, fade_in_ms: u32,
     ) -> Result<VoiceId> {
+        self.show_external_bgra_source_multi_with_geometry(
+            output_id, output_ids, source, geometry, layer_style, fade_in_ms,
+            &std::collections::HashMap::new(),
+        )
+    }
+
+    pub fn show_external_bgra_source_multi_with_geometry(
+        &self, output_id: Option<&str>, output_ids: &[String], source: Arc<crate::engine::network_io::BgraFrameMailbox>,
+        geometry: VideoGeometry, layer_style: LayerStyle, fade_in_ms: u32,
+        geometry_by_output: &std::collections::HashMap<String, VideoGeometry>,
+    ) -> Result<VoiceId> {
         let ids: Vec<&str> = output_ids.iter().map(String::as_str).filter(|id| !id.trim().is_empty()).fold(Vec::new(), |mut ids, id| { if !ids.contains(&id) { ids.push(id); } ids });
-        if ids.is_empty() { return self.show_external_bgra_source(output_id, source, geometry, layer_style, fade_in_ms); }
+        if ids.is_empty() {
+            let resolved_geometry = self.pipeline_for_output(output_id)
+                .map(|(id, _)| *geometry_for_output(&id, &geometry, geometry_by_output))
+                .unwrap_or(geometry);
+            return self.show_external_bgra_source(output_id, source, resolved_geometry, layer_style, fade_in_ms);
+        }
         let mut voices = Vec::with_capacity(ids.len());
         for id in ids {
-            match self.show_external_bgra_source(Some(id), Arc::clone(&source), geometry, layer_style, fade_in_ms) {
+            let output_geometry = *geometry_for_output(id, &geometry, geometry_by_output);
+            match self.show_external_bgra_source(Some(id), Arc::clone(&source), output_geometry, layer_style, fade_in_ms) {
                 Ok(voice) => voices.push(voice),
                 Err(error) => {
                     for previous in voices { self.stop_content(previous, 0, 0); }
@@ -2212,6 +2253,26 @@ impl OutputEngine {
             for member in members { self.apply_geometry_single(member, geometry); }
             return;
         }
+        self.apply_geometry_single(voice_id, geometry);
+    }
+
+    pub fn apply_geometry_by_output(
+        &self, voice_id: VoiceId, fallback: &VideoGeometry,
+        overrides: &std::collections::HashMap<String, VideoGeometry>,
+    ) {
+        let members = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned());
+        if let Some(members) = members {
+            for member in members {
+                let geometry = self.output_id_for_voice(member)
+                    .map(|id| geometry_for_output(&id, fallback, overrides))
+                    .unwrap_or(fallback);
+                self.apply_geometry_single(member, geometry);
+            }
+            return;
+        }
+        let geometry = self.output_id_for_voice(voice_id)
+            .map(|id| geometry_for_output(&id, fallback, overrides))
+            .unwrap_or(fallback);
         self.apply_geometry_single(voice_id, geometry);
     }
 
@@ -3515,6 +3576,17 @@ unsafe fn command_node_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geometry_resolves_by_stable_output_id_with_legacy_fallback() {
+        let fallback = VideoGeometry::default();
+        let led = VideoGeometry { fit_mode: FitMode::Fill, ..VideoGeometry::default() };
+        let tv = VideoGeometry { pan_x: 0.25, ..VideoGeometry::default() };
+        let overrides = HashMap::from([("led".to_string(), led), ("tv".to_string(), tv)]);
+        assert_eq!(*geometry_for_output("led", &fallback, &overrides), led);
+        assert_eq!(*geometry_for_output("tv", &fallback, &overrides), tv);
+        assert_eq!(*geometry_for_output("ndi-program", &fallback, &overrides), fallback);
+    }
 
     fn screens(n: u32) -> Vec<ScreenInfo> {
         (0..n)

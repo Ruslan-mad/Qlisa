@@ -250,6 +250,7 @@ pub struct LiveAudioPatch {
 #[derive(Debug, Clone, Default)]
 pub struct LiveVisualPatch {
     pub geometry: Option<crate::engine::output_engine::VideoGeometry>,
+    pub geometry_by_output: Option<std::collections::HashMap<String, crate::engine::output_engine::VideoGeometry>>,
     pub layer_style: Option<crate::engine::output_engine::LayerStyle>,
 }
 
@@ -847,6 +848,12 @@ pub trait Cue: Send {
     fn visual_geometry(&self) -> Option<crate::engine::output_engine::VideoGeometry> {
         None
     }
+
+    /// Stable output ID to geometry overrides. Missing entries use legacy geometry.
+    fn visual_geometry_by_output(&self) -> Option<std::collections::HashMap<String, crate::engine::output_engine::VideoGeometry>> {
+        None
+    }
+
 
     /// Compositing properties (layer / opacity / blend mode) for visual cues.
     /// Used by `update_cue` to live-apply Compositing edits to the cue's slot.

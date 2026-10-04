@@ -533,6 +533,8 @@ export interface VideoCueData extends CueSummary {
   /** Freeze on the last frame at natural EOF instead of cutting to black. */
   hold_last_frame: boolean;
   geometry: VideoGeometry;
+  /** Geometry overrides keyed by stable output destination ID. */
+  geometry_by_output?: Record<string, VideoGeometry>;
   layer_style: LayerStyle;
   slices: SliceList;
   /** Full media duration (serialized form only — summaries carry
@@ -578,6 +580,8 @@ export interface ImageCueData extends CueSummary {
   /** How long the image stays on screen in ms. null = infinite (hold until stopped). */
   display_duration_ms: number | null;
   geometry: VideoGeometry;
+  /** Geometry overrides keyed by stable output destination ID. */
+  geometry_by_output?: Record<string, VideoGeometry>;
   layer_style: LayerStyle;
   output_id?: string | null;
   output_ids?: string[];
@@ -626,6 +630,8 @@ export interface CameraCueData extends CueSummary {
   video_fade_out_ms: number | null;
   video_fade_out_curve: FadeCurve | null;
   geometry: VideoGeometry;
+  /** Geometry overrides keyed by stable output destination ID. */
+  geometry_by_output?: Record<string, VideoGeometry>;
   layer_style: LayerStyle;
   /** Core NDI receiver bandwidth profile for this Camera Cue. */
   ndi_quality?: NdiQuality;

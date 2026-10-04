@@ -8,6 +8,7 @@
 //! per-cue [`VideoGeometry`] work exactly as they do for Video and Image cues.
 //! The feed runs until stopped and is replaced by the next visual GO.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -141,6 +142,7 @@ pub struct CameraCue {
     pub video_fade_out: Option<FadeSpec>,
     /// Visual geometry (fit / position / scale / rotation / crop).
     pub geometry: VideoGeometry,
+    pub geometry_by_output: HashMap<String, VideoGeometry>,
     /// Compositing (stacking layer, base opacity, blend mode).
     pub layer_style: LayerStyle,
     pub ndi_quality: NdiQuality,
@@ -195,6 +197,7 @@ impl CameraCue {
             video_fade_in: None,
             video_fade_out: None,
             geometry: VideoGeometry::default(),
+            geometry_by_output: HashMap::new(),
             layer_style: LayerStyle::default(),
             ndi_quality: NdiQuality::Highest,
             output_id: None,
@@ -393,13 +396,14 @@ impl CameraCue {
             )
             .map_err(anyhow::Error::msg)?;
             let mailbox = worker.mailbox();
-            let voice_id = match context.output_engine.show_external_bgra_source_multi(
+            let voice_id = match context.output_engine.show_external_bgra_source_multi_with_geometry(
                 self.output_id.as_deref(),
                 &self.output_ids,
                 mailbox,
                 self.geometry,
                 self.layer_style,
                 fade_in_ms,
+                &self.geometry_by_output,
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -448,13 +452,14 @@ impl CameraCue {
             let worker = SrtInputWorker::start(settings, sample_rate, producer)
                 .map_err(anyhow::Error::msg)?;
             let mailbox = worker.mailbox();
-            let voice_id = match context.output_engine.show_external_bgra_source_multi(
+            let voice_id = match context.output_engine.show_external_bgra_source_multi_with_geometry(
                 self.output_id.as_deref(),
                 &self.output_ids,
                 mailbox,
                 self.geometry,
                 self.layer_style,
                 fade_in_ms,
+                &self.geometry_by_output,
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -483,7 +488,7 @@ impl CameraCue {
         }
 
         let url = std::path::PathBuf::from(self.source.mpv_url()?);
-        let voice_id = context.output_engine.show_content_multi(
+        let voice_id = context.output_engine.show_content_multi_with_geometry(
             ContentRequest {
                 file_path: &url,
                 is_image: false,
@@ -511,6 +516,7 @@ impl CameraCue {
                 slices: Vec::new(),
             },
             &self.output_ids,
+            &self.geometry_by_output,
         )?;
 
         self.active_voice_id = Some(voice_id);
@@ -870,6 +876,11 @@ impl Cue for CameraCue {
         Some(self.geometry)
     }
 
+    fn visual_geometry_by_output(&self) -> Option<HashMap<String, VideoGeometry>> {
+        Some(self.geometry_by_output.clone())
+    }
+
+
     fn layer_style(&self) -> Option<LayerStyle> {
         Some(self.layer_style)
     }
@@ -877,6 +888,9 @@ impl Cue for CameraCue {
     fn apply_live_visual_patch(&mut self, patch: crate::cue::traits::LiveVisualPatch) {
         if let Some(geometry) = patch.geometry {
             self.geometry = geometry;
+        }
+        if let Some(overrides) = patch.geometry_by_output {
+            self.geometry_by_output = overrides;
         }
         if let Some(layer_style) = patch.layer_style {
             self.layer_style = layer_style;
@@ -939,6 +953,7 @@ impl Cue for CameraCue {
             "video_fade_out_ms": self.video_fade_out.as_ref().map(|f| f.duration_ms),
             "video_fade_out_curve": self.video_fade_out.as_ref().map(|f| f.curve),
             "geometry": self.geometry,
+            "geometry_by_output": self.geometry_by_output,
             "ndi_quality": self.ndi_quality,
             "output_id": self.output_id,
             "output_ids": self.output_ids,
@@ -1023,6 +1038,11 @@ impl CueFactory for CameraCueFactory {
         if let Some(g) = value.get("geometry") {
             if let Ok(geometry) = serde_json::from_value::<VideoGeometry>(g.clone()) {
                 cue.geometry = geometry;
+            }
+        }
+        if let Some(g) = value.get("geometry_by_output") {
+            if let Ok(overrides) = serde_json::from_value::<HashMap<String, VideoGeometry>>(g.clone()) {
+                cue.geometry_by_output = overrides;
             }
         }
         if let Some(quality) = value.get("ndi_quality") {
@@ -1250,6 +1270,7 @@ mod tests {
             duration_ms: 1500,
             curve: FadeCurve::Linear,
         });
+        cue.geometry_by_output.insert("tv".into(), VideoGeometry { crop_left: 0.12, ..VideoGeometry::default() });
 
         let json = cue.serialize();
         assert_eq!(json["type"], "camera");
@@ -1261,6 +1282,7 @@ mod tests {
         let rebuilt_json = rebuilt.serialize();
         assert_eq!(rebuilt_json["video_fade_in_ms"], 1500);
         assert_eq!(rebuilt_json["source"]["url"], "rtsp://cam.local/stream");
+        assert_eq!(rebuilt_json["geometry_by_output"]["tv"]["crop_left"], 0.12);
     }
 
     #[test]

@@ -333,6 +333,7 @@ pub enum EngineCall {
         path: String,
         is_image: bool,
         preload: bool,
+        geometry: inkue_lib::engine::output_engine::VideoGeometry,
     },
     OutputStopContent,
     OutputStopVoice { fade_ms: u32 },
@@ -528,6 +529,7 @@ impl OutputEngineApi for RecOutput {
                 path: req.file_path.to_string_lossy().into_owned(),
                 is_image: req.is_image,
                 preload: req.preload,
+                geometry: req.geometry,
             },
         );
         if self.headless {

@@ -5,6 +5,7 @@
 //! output window.  Images stay visible until explicitly stopped — there is no
 //! auto-complete via duration.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -62,6 +63,7 @@ pub struct ImageCue {
     pub display_duration_ms: Option<u64>,
     /// Visual geometry (fit / position / scale / rotation / crop).
     pub geometry: VideoGeometry,
+    pub geometry_by_output: HashMap<String, VideoGeometry>,
     /// Compositing (stacking layer, base opacity, blend mode).
     pub layer_style: LayerStyle,
     pub output_id: Option<String>,
@@ -109,6 +111,7 @@ impl ImageCue {
             fade_out: None,
             display_duration_ms: None,
             geometry: VideoGeometry::default(),
+            geometry_by_output: HashMap::new(),
             layer_style: LayerStyle::default(),
             output_id: None,
             output_ids: Vec::new(),
@@ -154,7 +157,7 @@ impl ImageCue {
             .map(|f| f.duration_ms as u32)
             .unwrap_or(0);
 
-        let voice_id = context.output_engine.show_content_multi(ContentRequest {
+        let voice_id = context.output_engine.show_content_multi_with_geometry(ContentRequest {
             file_path: path,
             is_image: true,
             fade_in_ms,
@@ -176,7 +179,7 @@ impl ImageCue {
             layer_style: self.layer_style,
             slices: Vec::new(),
             preload: self.preloading,
-        }, &self.output_ids)?;
+        }, &self.output_ids, &self.geometry_by_output)?;
 
         self.active_voice_id = Some(voice_id);
         self.action_started_at = Some(Instant::now());
@@ -530,6 +533,11 @@ impl Cue for ImageCue {
         Some(self.geometry)
     }
 
+    fn visual_geometry_by_output(&self) -> Option<HashMap<String, VideoGeometry>> {
+        Some(self.geometry_by_output.clone())
+    }
+
+
     fn layer_style(&self) -> Option<LayerStyle> {
         Some(self.layer_style)
     }
@@ -537,6 +545,9 @@ impl Cue for ImageCue {
     fn apply_live_visual_patch(&mut self, patch: crate::cue::traits::LiveVisualPatch) {
         if let Some(geometry) = patch.geometry {
             self.geometry = geometry;
+        }
+        if let Some(overrides) = patch.geometry_by_output {
+            self.geometry_by_output = overrides;
         }
         if let Some(layer_style) = patch.layer_style {
             self.layer_style = layer_style;
@@ -604,6 +615,7 @@ impl Cue for ImageCue {
             "fade_out_curve": self.fade_out.as_ref().map(|f| f.curve),
             "display_duration_ms": self.display_duration_ms,
             "geometry": self.geometry,
+            "geometry_by_output": self.geometry_by_output,
             "output_id": self.output_id,
             "output_ids": self.output_ids,
             "layer_style": self.layer_style,
@@ -684,6 +696,11 @@ impl CueFactory for ImageCueFactory {
         if let Some(g) = value.get("geometry") {
             if let Ok(geometry) = serde_json::from_value::<VideoGeometry>(g.clone()) {
                 cue.geometry = geometry;
+            }
+        }
+        if let Some(g) = value.get("geometry_by_output") {
+            if let Ok(overrides) = serde_json::from_value::<HashMap<String, VideoGeometry>>(g.clone()) {
+                cue.geometry_by_output = overrides;
             }
         }
         cue.output_id = value
@@ -779,12 +796,15 @@ mod tests {
             crop_bottom: 0.2,
             ..Default::default()
         };
+        cue.geometry_by_output.insert("ndi-program".into(), VideoGeometry { pan_x: -0.3, ..VideoGeometry::default() });
 
         let json = cue.serialize();
         assert_eq!(json["geometry"]["fit_mode"], "stretch");
+        assert_eq!(json["geometry_by_output"]["ndi-program"]["pan_x"], -0.3);
 
         let rebuilt = ImageCueFactory.from_json(json).expect("roundtrip");
         assert_eq!(rebuilt.visual_geometry().unwrap(), cue.geometry);
+        assert_eq!(rebuilt.serialize()["geometry_by_output"]["ndi-program"]["pan_x"], -0.3);
     }
 
     #[test]
