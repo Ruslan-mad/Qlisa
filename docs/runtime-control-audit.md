@@ -124,3 +124,14 @@ and OS-specific output behavior were not exercised here.
 
 See [PROJECT_GUIDE.md](PROJECT_GUIDE.md#runtime-control-status-post-fix) for
 the concise handoff status and relevant source areas.
+
+## Multi-list Panic follow-up
+
+Hard Stop All previously called transport hard-stop only on the active cue
+list. Engine panic silenced output globally, but cues in inactive lists kept
+their `Running` state and reappeared as active when selected. Hard Stop All now
+checks every cue's current state across the workspace and hard-stops each
+running or paused cue, including leaves below multiple inactive Group parents.
+It resets every cue list, emits terminal state events for running and paused
+cues, and refreshes the active list UI. A focused multi-list regression test
+covers running, paused, and nested Browser cues.

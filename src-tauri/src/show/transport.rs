@@ -970,40 +970,41 @@ impl Transport {
         Ok(())
     }
 
-    /// Panic stop (double-Escape): hard-stop all running cues, then cut
-    /// everything the engines are outputting regardless of cue bookkeeping.
+    /// Panic stop (double-Escape): hard-stop all running cues in every list,
+    /// then cut everything the engines output regardless of cue bookkeeping.
     ///
     /// The per-cue pass alone is not enough: a cue whose state desynced from
     /// its engine voice (state says Standby/Completed but the voice still
     /// plays) is invisible to the `is_running()` filter and unstoppable
-    /// through its own `hard_stop()`.  The engine-level backstop silences
-    /// those too, and the final reset pass clears their stale bookkeeping.
-    pub fn hard_stop_all(&mut self, cue_list: &mut CueList) -> Result<()> {
-        let running_ids: Vec<CueId> = cue_list
-            .cues
-            .iter()
-            .filter(|c| c.is_running() || c.is_paused())
-            .map(|c| c.id())
-            .collect();
-
-        for id in running_ids {
-            if let Some(cue) = cue_list.get_mut(&id) {
-                let _ = cue.hard_stop(&self.context);
+    /// through its own `hard_stop()`. The engine-level backstop silences those
+    /// too, and the reset pass clears stale bookkeeping in every list.
+    pub fn hard_stop_all(&mut self, cue_lists: &mut [CueList]) -> Result<()> {
+        for cue_list in cue_lists {
+            let cue_ids = cue_list.all_cue_ids();
+            for id in cue_ids {
+                let cue_is_active = cue_list
+                    .get_recursive(&id)
+                    .is_some_and(|cue| cue.is_running() || cue.is_paused());
+                if cue_is_active {
+                    if let Some(cue) = cue_list.get_mut_recursive(&id) {
+                        let _ = cue.hard_stop(&self.context);
+                    }
+                }
+                cue_list.remove_continuation_plan(id);
             }
-            cue_list.remove_continuation_plan(id);
+            cue_list.clear_continuation_plans();
+
+            for cue in cue_list.cues.iter_mut() {
+                let _ = cue.reset();
+            }
+            for id in cue_list.all_cue_ids() {
+                cue_list.remove_continuation_plan(id);
+            }
         }
-        cue_list.clear_continuation_plans();
 
         let _ = self.context.audio_engine.panic_stop_all();
         self.context.output_engine.panic_stop();
         let _ = self.context.output_engine.clear_browser_surface(true);
-
-        for cue in cue_list.cues.iter_mut() {
-            let _ = cue.reset();
-        }
-        for id in cue_list.all_cue_ids() {
-            cue_list.remove_continuation_plan(id);
-        }
         Ok(())
     }
 

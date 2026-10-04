@@ -303,24 +303,31 @@ pub fn hard_stop_all(
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let context = make_context(&state, stop_fade_ms);
     let mut transport = Transport::new(context);
-    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-    let stopping: Vec<_> = cue_list
-        .cues
+    let stopping: Vec<_> = ws
+        .cue_lists
         .iter()
-        .filter(|c| c.is_running() || c.is_paused())
-        .map(|c| c.id())
+        .flat_map(|cue_list| {
+            cue_list.all_cue_ids().into_iter().filter_map(move |id| {
+                cue_list
+                    .get_recursive(&id)
+                    .filter(|cue| cue.is_running() || cue.is_paused())
+                    .map(|cue| (id, cue.state()))
+            })
+        })
         .collect();
-    transport.hard_stop_all(cue_list).map_err(|e| e.to_string())?;
-    for id in stopping {
-        let _ = app_handle.emit(
-            "cue-state-changed",
-            serde_json::json!({
-                "cue_id": id,
-                "old_state": "running",
-                "new_state": "standby",
-            }),
-        );
+    transport
+        .hard_stop_all(&mut ws.cue_lists)
+        .map_err(|e| e.to_string())?;
+    for (id, old_state) in stopping {
+        if let Some(payload) = cue_state_change_payload(
+            &id.to_string(),
+            old_state,
+            CueState::Standby,
+        ) {
+            let _ = app_handle.emit("cue-state-changed", payload);
+        }
     }
+    let _ = app_handle.emit("cue-list-refresh", serde_json::json!({}));
     Ok(())
 }
 

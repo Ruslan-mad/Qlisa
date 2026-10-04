@@ -59,6 +59,53 @@ fn browser(reg: &CueRegistry, name: &str) -> Box<dyn Cue> {
     cue
 }
 
+#[test]
+fn hard_stop_all_clears_running_cues_across_cue_lists() {
+    let reg = full_registry();
+    let cue_one = reg.create(&CueType::Wait).unwrap();
+    let cue_one_id = cue_one.id();
+    let cue_two = reg.create(&CueType::Wait).unwrap();
+    let cue_two_id = cue_two.id();
+    let browser_cue = browser(&reg, "nested browser");
+    let browser_id = browser_cue.id();
+    let mut inner_group = GroupCue::new();
+    inner_group.children.push(browser_cue);
+    let inner_group_id = inner_group.id();
+    let mut outer_group = GroupCue::new();
+    outer_group.children.push(Box::new(inner_group));
+    let outer_group_id = outer_group.id();
+    let mut lists = vec![
+        list_of(vec![cue_one]),
+        list_of(vec![cue_two]),
+        list_of(vec![Box::new(outer_group)]),
+    ];
+    let (ctx, _rx, log) = recording_context();
+    let mut transport = Transport::new(ctx.clone());
+
+    transport.go(&mut lists[0]).unwrap();
+    transport.go(&mut lists[1]).unwrap();
+    transport.pause_cue(&mut lists[1], &cue_two_id).unwrap();
+    lists[2]
+        .get_mut_recursive(&browser_id)
+        .unwrap()
+        .go(&ctx)
+        .unwrap();
+    assert!(lists[0].get(&cue_one_id).unwrap().is_running());
+    assert!(lists[1].get(&cue_two_id).unwrap().is_paused());
+    assert_eq!(lists[2].get(&outer_group_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+    assert_eq!(lists[2].get_recursive(&inner_group_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+    assert!(lists[2].get_recursive(&browser_id).unwrap().is_running());
+
+    transport.hard_stop_all(&mut lists).unwrap();
+
+    assert_eq!(lists[0].get(&cue_one_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+    assert_eq!(lists[1].get(&cue_two_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+    assert_eq!(lists[2].get(&outer_group_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+    assert_eq!(lists[2].get_recursive(&inner_group_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+    assert_eq!(lists[2].get_recursive(&browser_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+    assert!(log.lock().unwrap().iter().any(|call| matches!(call, EngineCall::BrowserStop { cue_id, .. } if *cue_id == browser_id)));
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

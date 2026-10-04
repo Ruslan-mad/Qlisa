@@ -186,8 +186,9 @@ the Playhead.
 - **STOP** requests the cue's normal stop behavior. The default audio fade-out
   is `DEFAULT_FADE_OUT_MS = 500`; a cue may have its own stop semantics.
 - **Hard Stop** cuts the selected cue immediately. **Hard Stop All** is the
-  panic path: it hard-stops known running cues, clears engine voices/output,
-  then resets stale cue bookkeeping. The UI maps double Escape to this action.
+  global panic path: it hard-stops active cues in every cue list, resets cue
+  bookkeeping, and clears engine voices/output. The UI maps double Escape to
+  this action.
 - **Pause/resume** retains elapsed/action/media position. Seek is allowed for
   supported media cues while paused. Audio callback state is changed by queued
   engine commands, not by locking the callback from the UI.
