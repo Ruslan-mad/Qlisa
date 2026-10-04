@@ -22,7 +22,7 @@ import { createMediaPreviewIdentity, hasBlockingPreviewOverlay, shouldStepPrevie
 import { VideoPreviewControls } from "../Inspector/VideoPreviewControls";
 import { NumberPreviewControls } from "../Inspector/NumberPreview";
 import { useVideoPreviewTransport } from "../Inspector/mediaPreviewTransport";
-import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, numberActionDuration, numberGroupTimelineActions, numberMasterDuration, numberVisualActions, snapNumberTime } from "./numberTimelineModel";
+import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, numberActionDuration, numberActionLooped, numberGroupTimelineActions, numberMasterDuration, numberVisualActions, snapNumberTime } from "./numberTimelineModel";
 import { useNumberPreviewStore } from "../../stores/numberPreviewStore";
 import {
   CLIP_EDITOR_BODY_PADDING_BOTTOM,
@@ -881,7 +881,7 @@ export function ClipEditorDock({
     const masterTracks = master?.cue_type === "group"
       ? groupTracks(master, 0, timelineDurationMs, master.name)
       : master
-        ? [{ id: master.id, name: master.name, startMs: 0, endMs: numberMasterDuration(numberCue), sourceStartMs: cueSourceWindow(master).startMs, sourceEndMs: cueSourceWindow(master).endMs, master: true, cueType: master.cue_type as NumberTimelineTrack["cueType"], media: numberAssets[master.id] }]
+        ? [{ id: master.id, name: master.name, startMs: 0, endMs: numberMasterDuration(numberCue), sourceStartMs: cueSourceWindow(master).startMs, sourceEndMs: cueSourceWindow(master).endMs, master: true, looped: numberActionLooped(master), cueType: master.cue_type as NumberTimelineTrack["cueType"], media: numberAssets[master.id] }]
         : [];
     const actionTracks: NumberTimelineTrack[] = [];
     for (const action of actions) {

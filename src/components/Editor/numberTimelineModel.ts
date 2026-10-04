@@ -233,7 +233,22 @@ export function snapNumberTime(value: number, duration: number, edges: number[],
 export function numberMasterDuration(cue: NumberCueData): number {
   const master = cue.children.find((child) => child.id === cue.number_master_id);
   if (master?.cue_type === "group") return groupDurationMs(master);
-  return master ? cueMediaDurationMs(master) : 0;
+  if (!master) return 0;
+  const hasSourceDuration = master.file_duration_ms != null
+    || (master as CueSummary & { cached_duration_ms?: number | null }).cached_duration_ms != null;
+  // Cue summaries may expose duration_ms with finite repeats already applied.
+  // Use source coordinates when available; otherwise retain the effective
+  // summary duration and do not multiply it a second time.
+  if (!hasSourceDuration) return cueMediaDurationMs(master);
+  const source = cueSourceWindow(master);
+  const onePass = Math.max(0, source.endMs - source.startMs);
+  // Number's master clock includes finite media repeats. Keep the waveform's
+  // source window at one pass; only the timeline duration is multiplied.
+  if ((master.cue_type === "audio" || master.cue_type === "video")
+    && (master.loop_count ?? 0) > 0 && (master.loop_count ?? 0) < 0xffff_ffff) {
+    return onePass * ((master.loop_count ?? 0) + 1);
+  }
+  return onePass;
 }
 
 export function numberActionDuration(child: NumberVisualAction, masterDuration: number): number {
@@ -247,6 +262,13 @@ export function numberActionDuration(child: NumberVisualAction, masterDuration: 
 
 export function numberActionLooped(child: NumberVisualAction): boolean {
   return (child.cue_type === "audio" || child.cue_type === "video") && (child.loop_count ?? 0) > 0;
+}
+
+function numberActionTimelineDuration(child: NumberVisualAction, masterDuration: number): number {
+  const onePass = numberActionDuration(child, masterDuration);
+  if (!numberActionLooped(child)) return onePass;
+  if ((child.loop_count ?? 0) >= 0xffff_ffff) return masterDuration;
+  return onePass * ((child.loop_count ?? 0) + 1);
 }
 
 export function numberVisualActions(cue: NumberCueData): NumberVisualAction[] {
@@ -263,9 +285,10 @@ export function numberVisualActions(cue: NumberCueData): NumberVisualAction[] {
         ...action,
         looped,
         timeline_start_ms: start,
-        // A looping child occupies the rest of the Number clock. The native
-        // timeline paints one source pass per block instead of stretching it.
-        timeline_end_ms: looped ? duration : Math.min(duration, start + numberActionDuration(action, duration)),
+        // The timeline paints one source pass at a time. Finite repeat counts
+        // therefore occupy only their actual total duration; infinite loops
+        // continue to the end of the Number clock.
+        timeline_end_ms: Math.min(duration, start + numberActionTimelineDuration(action, duration)),
       };
     });
 }
@@ -333,6 +356,7 @@ export function numberPreviewItem(cue: NumberCueData, positionMs: number): Numbe
   if (!master || master.cue_type !== "video") return null;
   return {
     ...(master as NumberVisualAction),
+    looped: numberActionLooped(master as NumberVisualAction),
     timeline_start_ms: 0,
     timeline_end_ms: numberMasterDuration(cue),
   };

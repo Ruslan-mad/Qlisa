@@ -49,6 +49,29 @@ describe("numberTimelineModel", () => {
     expect(numberPreviewSourcePosition(numberVisualActions(cue)[1], 4000)).toBe(0);
   });
 
+  it("limits finite repeats to their full trimmed passes and preserves infinite repeats", () => {
+    const master = child("master", "video", { cue_type: "audio", duration_ms: 20_000, file_duration_ms: 20_000 });
+    const trimmed = child("trimmed", "video", {
+      cue_type: "audio", file_duration_ms: 12_000, start_time_ms: 2_000,
+      end_time_ms: 4_000, loop_count: 2,
+    });
+    const fullFile = child("full", "video", { cue_type: "audio", file_duration_ms: 2_000, loop_count: 1 });
+    const once = child("once", "video", { cue_type: "audio", file_duration_ms: 2_000, loop_count: 0 });
+    const infinite = child("infinite", "video", { cue_type: "audio", file_duration_ms: 2_000, loop_count: 0xffff_ffff });
+    const cue = { number_master_id: "master", number_action_offsets_ms: { trimmed: 1_000 }, children: [master, trimmed, fullFile, once, infinite] } as any;
+    const actions = Object.fromEntries(numberVisualActions(cue).map((action) => [action.id, action]));
+
+    expect([actions.trimmed.timeline_start_ms, actions.trimmed.timeline_end_ms]).toEqual([1_000, 7_000]);
+    expect([actions.full.timeline_start_ms, actions.full.timeline_end_ms]).toEqual([0, 4_000]);
+    expect([actions.once.timeline_start_ms, actions.once.timeline_end_ms]).toEqual([0, 2_000]);
+    expect([actions.infinite.timeline_start_ms, actions.infinite.timeline_end_ms]).toEqual([0, 20_000]);
+    expect(numberPreviewSourcePosition(actions.trimmed, 2_999)).toBe(3_999);
+    expect(numberPreviewSourcePosition(actions.trimmed, 3_000)).toBe(2_000);
+    expect(numberPreviewSourcePosition(actions.trimmed, 5_000)).toBe(2_000);
+    expect(numberPreviewSourcePosition(actions.trimmed, 6_999)).toBe(3_999);
+    expect(actions.trimmed.timeline_end_ms).toBeLessThan(20_000);
+  });
+
   it("uses cropped source bounds for a manual preview loop", () => {
     const action = child("loop", "video", { start_time_ms: 1200, end_time_ms: 3200, loop_count: 4294967295 });
     expect(numberPreviewSourceWindow(action)).toEqual({ startMs: 1200, endMs: 3200 });
@@ -105,6 +128,41 @@ describe("numberTimelineModel", () => {
     const trimmed = audioMaster({ start_time_ms: 2_000, end_time_ms: 7_000 });
     expect(numberMasterDuration(numberWith(audioMaster()))).toBe(10_000);
     expect(numberMasterDuration(numberWith(trimmed))).toBe(5_000);
+
+    const repeatedMaster = {
+      ...audioMaster({ start_time_ms: 30_000, end_time_ms: 130_000 }),
+      cached_duration_ms: 180_000,
+      loop_count: 2,
+    };
+    expect(numberMasterDuration(numberWith(repeatedMaster))).toBe(300_000);
+    expect(cueSourceWindow(repeatedMaster as any)).toEqual({ startMs: 30_000, endMs: 130_000 });
+    expect(numberActionLooped(repeatedMaster as any)).toBe(true);
+
+    const serializedFullFileMaster = {
+      id: "master", cue_type: "audio", name: "master", file_duration_ms: 10_000,
+      duration_ms: 30_000, loop_count: 2,
+    };
+    expect(numberMasterDuration(numberWith(serializedFullFileMaster as any))).toBe(30_000);
+    const effectiveSummaryMaster = {
+      id: "master", cue_type: "audio", name: "master", duration_ms: 30_000,
+      loop_count: 2,
+    };
+    expect(numberMasterDuration(numberWith(effectiveSummaryMaster as any))).toBe(30_000);
+  });
+
+  it("wraps the Number video master preview source at finite repeat boundaries", () => {
+    const master = child("master", "video", {
+      duration_ms: 300_000, file_duration_ms: 180_000,
+      start_time_ms: 30_000, end_time_ms: 130_000, loop_count: 2,
+    });
+    const cue = { id: "number", number_master_id: "master", children: [master] } as any;
+    const item = numberPreviewItem(cue, 0)!;
+
+    expect(item.looped).toBe(true);
+    expect(item.timeline_end_ms).toBe(300_000);
+    expect(numberPreviewSourcePosition(item, 99_999)).toBe(129_999);
+    expect(numberPreviewSourcePosition(item, 100_000)).toBe(30_000);
+    expect(numberPreviewSourcePosition(item, 200_000)).toBe(30_000);
   });
 
   it("maps Number-clock playhead positions to the trimmed Audio master source range", () => {
