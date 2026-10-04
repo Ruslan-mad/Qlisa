@@ -72,6 +72,28 @@ describe("numberTimelineModel", () => {
     expect(actions.trimmed.timeline_end_ms).toBeLessThan(20_000);
   });
 
+  it("ends a trimmed Number Video action after its finite Time-tab repeats", () => {
+    const master = child("master", "video", { cue_type: "audio", duration_ms: 20_000, file_duration_ms: 20_000 });
+    const finite = child("finite-video", "video", {
+      file_duration_ms: 12_000, start_time_ms: 2_000, end_time_ms: 4_000,
+      loop_count: 2,
+    });
+    const infinite = child("infinite-video", "video", {
+      file_duration_ms: 12_000, start_time_ms: 2_000, end_time_ms: 4_000,
+      loop_count: 0xffff_ffff,
+    });
+    const cue = { number_master_id: "master", number_action_offsets_ms: { "finite-video": 1_000 }, children: [master, finite, infinite] } as any;
+    const actions = Object.fromEntries(numberVisualActions(cue).map((action) => [action.id, action]));
+
+    expect([actions["finite-video"].timeline_start_ms, actions["finite-video"].timeline_end_ms]).toEqual([1_000, 7_000]);
+    expect(actions["finite-video"].timeline_end_ms).toBeLessThan(numberMasterDuration(cue));
+    expect(numberPreviewSourcePosition(actions["finite-video"], 2_999)).toBe(3_999);
+    expect(numberPreviewSourcePosition(actions["finite-video"], 3_000)).toBe(2_000);
+    expect(numberPreviewSourcePosition(actions["finite-video"], 5_000)).toBe(2_000);
+    expect(numberPreviewSourcePosition(actions["finite-video"], 6_999)).toBe(3_999);
+    expect(actions["infinite-video"].timeline_end_ms).toBe(20_000);
+  });
+
   it("uses cropped source bounds for a manual preview loop", () => {
     const action = child("loop", "video", { start_time_ms: 1200, end_time_ms: 3200, loop_count: 4294967295 });
     expect(numberPreviewSourceWindow(action)).toEqual({ startMs: 1200, endMs: 3200 });
