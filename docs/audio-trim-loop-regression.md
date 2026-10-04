@@ -1,5 +1,14 @@
 # Audio trim loop regression
 
+## Loop control behavior
+
+In the Audio and Video inspectors, enabling **Loop** starts infinite looping.
+The infinity control switches to one finite repeat; the repeat-count field then
+sets the number of extra plays. Turning **Loop** off clears the repeat count.
+The multi-cue inspector follows the same default when enabling Loop. The cue
+list's **DUR** column shows `∞` for an infinite Audio or Video loop. Finite
+loops continue to show their calculated duration.
+
 ## Defect and fix
 
 `AudioCue` initializes a voice at `start_time` and sets `end_frame` from

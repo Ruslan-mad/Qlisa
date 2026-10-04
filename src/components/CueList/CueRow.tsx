@@ -14,7 +14,7 @@ import { InlineTimeCell } from "./InlineTimeCell";
 import { canEditCueDuration, emptyCueDurationValue } from "./inlineTimeModel";
 import { CueTypeIcon } from "../common/CueTypeIcon";
 import { durationProgressPercent } from "./durationProgress";
-import { formatDurationMs } from "./formatDuration";
+import { formatCueDuration } from "./formatDuration";
 import { cueFileName, cueNotesProperty, cueNotesText, formatTargetCues } from "./cueRowContent";
 import {
   assessFileSize,
@@ -689,7 +689,7 @@ function CueRowImpl({
             ? cue.cue_type === "image" || cue.cue_type === "text"
               ? t("cueList.indefiniteDuration")
               : ""
-            : formatDurationMs(shownDurationMs);
+            : formatCueDuration({ ...cue, duration_ms: shownDurationMs });
         if (canEdit) {
           return (
             durationCell(<InlineTimeCell
@@ -718,7 +718,7 @@ function CueRowImpl({
           >
             {cue.is_loading
               ? t("sweepUi.warningLoading")
-              : formatDurationMs(cue.duration_ms)}
+              : formatCueDuration(cue)}
           </div>
         );
       }

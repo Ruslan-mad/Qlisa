@@ -15,6 +15,7 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTimingStore } from "../../stores/timingStore";
 import { Select } from "../common/Select";
 import { CurveSelect } from "../common/CurveSelect";
+import { LOOP_INFINITE, loopCountAfterInfiniteToggle, loopCountAfterToggle } from "./loopModel";
 import { ColorPicker } from "./ColorPicker";
 import { Field, Grid2, MiniField, Section, inputStyle } from "./Field";
 import { LevelMatrixGrid } from "./LevelMatrixGrid";
@@ -42,7 +43,6 @@ type Tab = "basics" | "type" | "time" | "levels" | "fade" | "layer" | "geometry"
 type PatchBuilder = Record<string, unknown> | ((cue: MultiCueRecord) => Record<string, unknown>);
 
 const MIXED = "__multi_cue_mixed__";
-const LOOP_INFINITE = 4294967295;
 
 function deepState<T>(values: readonly T[]): ValueState<T> {
   if (values.length === 0) return { kind: "empty" };
@@ -515,6 +515,11 @@ export function MultiCueInspector({ cueIds }: { cueIds: string[] }) {
     const onlyImage = types.every((type) => type === "image");
     const onlyWait = types.every((type) => type === "wait");
     const onlyFade = types.every((type) => type === "fade");
+    const allLoopsInfinite = cues.length > 0 && cues.every((cue) => Number(cue.loop_count) === LOOP_INFINITE);
+    const loopCountState = deepState(cues.map((cue) => {
+      const count = Number(cue.loop_count ?? 0);
+      return count === LOOP_INFINITE ? null : count;
+    }));
     return (
       <>
         {!allRebuildEditable && <DisabledHint>{rebuildHint}</DisabledHint>}
@@ -536,10 +541,26 @@ export function MultiCueInspector({ cueIds }: { cueIds: string[] }) {
               <MiniField label="Start Time (s)"><MixedNumberInput state={fieldState(cues, "start_time_ms")} mixedLabel={mixedLabel} disabled={saving || !allRebuildEditable} allowNull scale={1000} step={0.001} min={0} max={86400} onCommit={(value) => void save({ start_time_ms: value == null ? null : Math.round(value) }, true)} /></MiniField>
               <MiniField label="End Time (s)"><MixedNumberInput state={fieldState(cues, "end_time_ms")} mixedLabel={mixedLabel} disabled={saving || !allRebuildEditable} allowNull scale={1000} step={0.001} min={0} max={86400} onCommit={(value) => void save({ end_time_ms: value == null ? null : Math.round(value) }, true)} /></MiniField>
             </Grid2>
-            <MixedCheckbox state={deepState(cues.map((cue) => Number(cue.loop_count) > 0))} label="Loop" mixedLabel={mixedLabel} disabled={saving || !allRebuildEditable} onChange={(enabled) => void save({ loop_count: enabled ? 1 : 0 }, true)} />
+            <MixedCheckbox state={deepState(cues.map((cue) => Number(cue.loop_count) > 0))} label="Loop" mixedLabel={mixedLabel} disabled={saving || !allRebuildEditable} onChange={(enabled) => void save({ loop_count: loopCountAfterToggle(enabled) }, true)} />
             <Grid2>
-              <MiniField label={locale === "ru" ? "Количество повторов" : "Loop count"}><MixedNumberInput state={fieldState(cues, "loop_count")} mixedLabel={mixedLabel} disabled={saving || !allRebuildEditable} step={1} min={0} max={LOOP_INFINITE} onCommit={(value) => { if (value != null) void save({ loop_count: Math.round(value) }, true); }} /></MiniField>
-              <MiniField label="∞"><button disabled={saving || !allRebuildEditable} onClick={() => void save({ loop_count: LOOP_INFINITE }, true)} style={{ ...inputStyle, cursor: saving || !allRebuildEditable ? "default" : "pointer" }}>∞</button></MiniField>
+              <MiniField label={locale === "ru" ? "Количество повторов" : "Loop count"}><MixedNumberInput state={loopCountState} mixedLabel={mixedLabel} disabled={saving || !allRebuildEditable} step={1} min={0} max={LOOP_INFINITE - 1} onCommit={(value) => { if (value != null) void save({ loop_count: Math.round(value) }, true); }} /></MiniField>
+              <MiniField label="∞"><button
+                disabled={saving || !allRebuildEditable}
+                title={locale === "ru"
+                  ? allLoopsInfinite ? "Выключить бесконечный повтор" : "Включить бесконечный повтор"
+                  : allLoopsInfinite ? "Turn off infinite looping" : "Turn on infinite looping"}
+                aria-label={locale === "ru"
+                  ? allLoopsInfinite ? "Выключить бесконечный повтор" : "Включить бесконечный повтор"
+                  : allLoopsInfinite ? "Turn off infinite looping" : "Turn on infinite looping"}
+                onClick={() => void save({ loop_count: loopCountAfterInfiniteToggle(allLoopsInfinite ? LOOP_INFINITE : 0) }, true)}
+                style={{
+                  ...inputStyle,
+                  cursor: saving || !allRebuildEditable ? "default" : "pointer",
+                  background: allLoopsInfinite ? "var(--wc-accent)" : inputStyle.background,
+                  color: allLoopsInfinite ? "var(--wc-accent-fg)" : inputStyle.color,
+                  borderColor: allLoopsInfinite ? "var(--wc-accent)" : inputStyle.borderColor,
+                }}
+              >∞</button></MiniField>
             </Grid2>
             {onlyAudio && <Grid2><MiniField label="Rate (0.1 – 4×)"><MixedNumberInput state={fieldState(cues, "rate")} mixedLabel={mixedLabel} disabled={saving || !allRebuildEditable} step={0.1} min={0.1} max={4} onCommit={(value) => { if (value != null) void save({ rate: value }, true); }} /></MiniField></Grid2>}
             {onlyVideo && <MixedCheckbox state={fieldState(cues, "hold_last_frame")} label="Hold last frame at end (no cut to black)" mixedLabel={mixedLabel} disabled={saving || !allRebuildEditable} onChange={(hold_last_frame) => void save({ hold_last_frame }, true)} />}

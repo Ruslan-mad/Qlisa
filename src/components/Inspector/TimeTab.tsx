@@ -6,8 +6,7 @@ import { useLocale } from "../../i18n";
 import { VideoTrimmer } from "./VideoTrimmer";
 import { ScrubBar } from "./ScrubBar";
 import { DragNumber } from "../common/DragNumber";
-
-const LOOP_INFINITE = 4294967295; // u32::MAX
+import { LOOP_INFINITE, loopCountAfterInfiniteToggle, loopCountAfterToggle } from "./loopModel";
 
 export function TimeTab({
   cue,
@@ -173,7 +172,7 @@ export function TimeTab({
           <ToggleRow
             label="Loop"
             checked={cue.loop_count > 0}
-            onToggle={(v) => onSave({ loop_count: v ? 1 : 0 })}
+            onToggle={(v) => onSave({ loop_count: loopCountAfterToggle(v) })}
           >
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               {cue.loop_count > 0 && cue.loop_count < LOOP_INFINITE && (
@@ -193,7 +192,7 @@ export function TimeTab({
                 title={cue.loop_count === LOOP_INFINITE ? t("sweepUi.setFiniteLoop") : t("sweepUi.loopInfinitely")}
                 onClick={() =>
                   onSave({
-                    loop_count: cue.loop_count === LOOP_INFINITE ? 1 : LOOP_INFINITE,
+                    loop_count: loopCountAfterInfiniteToggle(cue.loop_count),
                   })
                 }
                 style={{

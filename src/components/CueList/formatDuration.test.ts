@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDurationMs } from "./formatDuration";
+import { formatCueDuration, formatDurationMs } from "./formatDuration";
 
 describe("formatDurationMs", () => {
   it("formats whole minutes and seconds", () => {
@@ -21,5 +21,17 @@ describe("formatDurationMs", () => {
     expect(formatDurationMs(null)).toBe("—");
     expect(formatDurationMs(undefined)).toBe("—");
     expect(formatDurationMs(Number.NaN)).toBe("—");
+  });
+});
+
+describe("formatCueDuration", () => {
+  it("shows infinity for infinite Audio and Video loops", () => {
+    expect(formatCueDuration({ cue_type: "audio", loop_count: 0xffff_ffff, duration_ms: null })).toBe("∞");
+    expect(formatCueDuration({ cue_type: "video", loop_count: 0xffff_ffff, duration_ms: null })).toBe("∞");
+  });
+
+  it("keeps finite loop durations and non-media indefinite durations unchanged", () => {
+    expect(formatCueDuration({ cue_type: "audio", loop_count: 2, duration_ms: 12_000 })).toBe("0:12");
+    expect(formatCueDuration({ cue_type: "image", loop_count: 0xffff_ffff, duration_ms: null })).toBe("—");
   });
 });
