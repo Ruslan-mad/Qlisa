@@ -226,6 +226,7 @@ pub struct LiveAudioParams {
     pub voice_id: CueId,
     /// Linear gain to apply (already converted from dB).
     pub gain: f32,
+    pub muted: bool,
     /// Stereo pan (-1.0 .. 1.0).
     pub pan: f32,
     /// Crosspoint levels in dB, `[input][patch channel]`, when the cue has a
@@ -241,6 +242,7 @@ pub struct LiveAudioParams {
 #[derive(Debug, Clone, Default)]
 pub struct LiveAudioPatch {
     pub volume_db: Option<f64>,
+    pub muted: Option<bool>,
     pub pan: Option<f32>,
     pub level_matrix: Option<Option<Vec<Vec<f64>>>>,
 }

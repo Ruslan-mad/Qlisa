@@ -5,8 +5,6 @@ import { Field, Grid2, MiniField, Section, ToggleRow, inputStyle } from "./Field
 import { ColorPicker } from "./ColorPicker";
 import { MediaPreview } from "./MediaThumbnail";
 import { resolveMediaPreviewKind } from "./mediaPreviewModel";
-import type { AudioCueData } from "../../lib/types";
-import { Select } from "../common/Select";
 import { useLocale } from "../../i18n";
 
 export function BasicsTab({
@@ -111,19 +109,6 @@ export function BasicsTab({
       )}
 
       <Section title={t("inspector.flow")}>
-        <Field label="Continue">
-          <Select
-            style={inputStyle}
-            value={cue.continue_mode}
-            onChange={(e) =>
-              onSave({ continue_mode: e.target.value as AudioCueData["continue_mode"] })
-            }
-          >
-            <option value="do_not_continue">{t("inspector.doNotContinue")}</option>
-            <option value="auto_continue">Auto-Continue</option>
-            <option value="auto_follow">Auto-Follow</option>
-          </Select>
-        </Field>
         <ToggleRow
           label={t("sweepUi.disableCue")}
           checked={cue.is_disabled ?? false}

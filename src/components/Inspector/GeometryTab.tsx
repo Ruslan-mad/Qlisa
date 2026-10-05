@@ -2,13 +2,13 @@
 // Edits apply live when the cue is on the output window. Compositing controls
 // (layer order / opacity / blend) live in the Layer tab.
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import type { CameraCueData, FitMode, ImageCueData, OutputDestination, VideoCueData, VideoGeometry } from "../../lib/types";
 import { DEFAULT_GEOMETRY } from "../../lib/types";
 import { Grid2, MiniField, NumberInput, Section, Segmented, SliderRow } from "./Field";
 import { useLocale } from "../../i18n";
 import type { ValueState } from "./multiCueModel";
-import { geometryOverridesForCue, mergeGeometryOutputOverride } from "./geometryOutputModel";
+import { useGeometryOutputOverrides } from "./geometryOutputModel";
 
 const FIT_MODES: { value: FitMode; label: string; hint: string }[] = [
   { value: "fit", label: "Fit", hint: "keep aspect, letterbox" },
@@ -141,6 +141,43 @@ export function GeometryEditor({
   );
 }
 
+export function FitByOutputRows({
+  outputs,
+  geometryByOutput,
+  fallback,
+  disabled = false,
+  onSelect,
+}: {
+  outputs: Array<{ id: string; name: string }>;
+  geometryByOutput: Record<string, VideoGeometry>;
+  fallback: VideoGeometry;
+  disabled?: boolean;
+  onSelect: (outputId: string, fitMode: FitMode) => void;
+}) {
+  const { locale } = useLocale();
+  const buttonStyle = (selected: boolean): CSSProperties => ({
+    flex: 1, minWidth: 0, padding: "4px 3px", fontSize: 10,
+    border: `1px solid ${selected ? "var(--wc-accent)" : "var(--wc-border)"}`,
+    borderRadius: 4, background: selected ? "var(--wc-accent-soft)" : "var(--wc-bg-surface)",
+    color: selected ? "var(--wc-text)" : "var(--wc-text-muted)", cursor: disabled ? "default" : "pointer",
+    opacity: disabled ? 0.55 : 1,
+  });
+  const modeTitle: Record<FitMode, string> = locale === "ru"
+    ? { fit: "Сохранить пропорции, добавить поля", fill: "Сохранить пропорции, обрезать выходящее за границы", stretch: "Игнорировать соотношение сторон" }
+    : { fit: "Keep aspect ratio and add bars", fill: "Keep aspect ratio and crop overflow", stretch: "Ignore aspect ratio" };
+  return <div style={{ display: "grid", gap: 6 }}>
+    {outputs.map((output) => {
+      const value = geometryByOutput[output.id] ?? fallback;
+      return <div key={output.id} style={{ display: "grid", gridTemplateColumns: "minmax(64px, 0.8fr) 2fr", gap: 6, alignItems: "center" }}>
+        <span title={output.name} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, color: "var(--wc-text-muted)" }}>{output.name}</span>
+        <div style={{ display: "flex", gap: 3 }}>
+          {FIT_MODES.map((mode) => <button key={mode.value} type="button" disabled={disabled} aria-label={`${output.name}: ${localeLabel(mode.value, locale)}`} title={`${localeLabel(mode.value, locale)} — ${modeTitle[mode.value]}`} aria-pressed={value.fit_mode === mode.value} style={buttonStyle(value.fit_mode === mode.value)} onClick={() => onSelect(output.id, mode.value)}>{localeLabel(mode.value, locale)}</button>)}
+        </div>
+      </div>;
+    })}
+  </div>;
+}
+
 export function GeometryTab({
   cue,
   onSave,
@@ -154,29 +191,18 @@ export function GeometryTab({
 }) {
   const { locale } = useLocale();
   const geometry: VideoGeometry = cue.geometry ?? DEFAULT_GEOMETRY;
-  const initialOverrides = { cueId: cue.id, values: cue.geometry_by_output ?? {} };
-  const [localOverrides, setLocalOverrides] = useState(initialOverrides);
-  const geometryOverrides = useRef(initialOverrides);
-  useEffect(() => {
-    const synced = { cueId: cue.id, values: cue.geometry_by_output ?? {} };
-    geometryOverrides.current = synced;
-    setLocalOverrides(synced);
-  }, [cue.id, cue.geometry_by_output]);
-  const activeOverrides = geometryOverridesForCue(localOverrides, cue.id, cue.geometry_by_output);
+  const { values: activeOverrides, saveOutput } = useGeometryOutputOverrides(
+    cue.id,
+    cue.geometry_by_output,
+    geometry,
+    (overrides) => onSave({ geometry_by_output: overrides }),
+  );
   const [activeOutput, setActiveOutput] = useState(outputIds[0] ?? "");
   useEffect(() => {
     if (outputIds.length > 0 && !outputIds.includes(activeOutput)) setActiveOutput(outputIds[0]);
   }, [outputIds.join("\u0000"), activeOutput]);
   const selectedOutputs = outputIds.map((id) => ({ id, name: outputs.find((output) => output.id === id)?.name ?? id }));
   const outputGeometry = (id: string) => activeOverrides[id] ?? geometry;
-  const saveOutputGeometry = (id: string, partial: Partial<VideoGeometry>) => {
-    const current = geometryOverridesForCue(geometryOverrides.current, cue.id, cue.geometry_by_output);
-    const overrides = mergeGeometryOutputOverride(current, id, geometry, partial);
-    const pending = { cueId: cue.id, values: overrides };
-    geometryOverrides.current = pending;
-    setLocalOverrides(pending);
-    onSave({ geometry_by_output: overrides });
-  };
   if (selectedOutputs.length > 0) {
     const fitButtonStyle = (selected: boolean): CSSProperties => ({
       flex: 1, minWidth: 0, padding: "5px 4px", fontSize: 11,
@@ -189,26 +215,10 @@ export function GeometryTab({
       const value = outputGeometry(id);
       return Object.fromEntries(Object.keys(DEFAULT_GEOMETRY).map((key) => [key, uniform(value[key as keyof VideoGeometry])])) as GeometryEditorState;
     };
-    const resetActive = () => {
-      const current = geometryOverridesForCue(geometryOverrides.current, cue.id, cue.geometry_by_output);
-      const next = { ...current, [active.id]: { ...DEFAULT_GEOMETRY } };
-      const pending = { cueId: cue.id, values: next };
-      geometryOverrides.current = pending;
-      setLocalOverrides(pending);
-      onSave({ geometry_by_output: next });
-    };
+    const resetActive = () => saveOutput(active.id, { ...DEFAULT_GEOMETRY });
     return <>
       <Section title={localeLabel("fit-title", locale)}>
-        <div style={{ display: "grid", gap: 7 }}>
-          {selectedOutputs.map((output) => (
-            <div key={output.id} style={{ display: "grid", gridTemplateColumns: "minmax(72px, 0.8fr) 2fr", gap: 7, alignItems: "center" }}>
-              <span title={output.name} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--wc-text-muted)" }}>{output.name}</span>
-              <div style={{ display: "flex", gap: 4 }}>
-                {FIT_MODES.map((mode) => <button key={mode.value} type="button" title={mode.hint} style={fitButtonStyle(outputGeometry(output.id).fit_mode === mode.value)} onClick={() => saveOutputGeometry(output.id, { fit_mode: mode.value })}>{localeLabel(mode.value, locale)}</button>)}
-              </div>
-            </div>
-          ))}
-        </div>
+        <FitByOutputRows outputs={selectedOutputs} geometryByOutput={activeOverrides} fallback={geometry} onSelect={(id, fitMode) => saveOutput(id, { fit_mode: fitMode })} />
       </Section>
       <Section title={localeLabel("output", locale)}>
         <div role="tablist" aria-label={localeLabel("output", locale)} style={{ display: "flex", gap: 5, overflowX: "auto", marginBottom: 8 }}>
@@ -218,7 +228,7 @@ export function GeometryTab({
           geometry={stateFor(active.id)}
           hideFit
           resetDisabled={JSON.stringify(outputGeometry(active.id)) === JSON.stringify(DEFAULT_GEOMETRY)}
-          onPatch={(partial) => saveOutputGeometry(active.id, partial)}
+          onPatch={(partial) => saveOutput(active.id, partial)}
           onReset={resetActive}
         />
       </Section>

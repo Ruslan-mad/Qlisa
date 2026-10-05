@@ -121,6 +121,8 @@ pub enum AudioCommand {
     Resume { voice_id: VoiceId },
     /// Set the linear gain for a voice (0.0 = silence, 1.0 = unity).
     SetGain { voice_id: VoiceId, gain: f32 },
+    /// Mute a voice at the final gain stage without changing its authored gain.
+    SetMuted { voice_id: VoiceId, muted: bool },
     /// Set the stereo pan for a voice (-1.0 = left, 0.0 = center, 1.0 = right).
     SetPan { voice_id: VoiceId, pan: f32 },
     /// Set the master output gain (linear).

@@ -1812,6 +1812,7 @@ impl AudioEngine {
             None,
             1.0,
             None,
+            false,
         )
     }
 
@@ -1834,6 +1835,7 @@ impl AudioEngine {
         patch_slot: Option<u8>,
         patch_gain: f32,
         device_id: Option<&str>,
+        muted: bool,
     ) -> Result<VoiceId> {
         let (in_ch, src_rate) = self
             .feed_info(feed_id)
@@ -1852,6 +1854,7 @@ impl AudioEngine {
         voice.patch_id = patch_id;
         voice.patch_slot = patch_slot;
         voice.inner.set_patch_gain(patch_gain);
+        voice.inner.set_muted(muted);
         if fade_in_ms > 0 {
             let total = fade_in_ms as u64 * self.sample_rate() as u64 / 1000;
             // SAFETY: written once before the voice is shared with the callback.
@@ -1963,6 +1966,10 @@ impl AudioEngine {
 
     pub fn set_voice_gain(&self, voice_id: VoiceId, gain: f32) -> Result<()> {
         self.broadcast_command(AudioCommand::SetGain { voice_id, gain })
+    }
+
+    pub fn set_voice_muted(&self, voice_id: VoiceId, muted: bool) -> Result<()> {
+        self.broadcast_command(AudioCommand::SetMuted { voice_id, muted })
     }
 
     pub fn set_voice_pan(&self, voice_id: VoiceId, pan: f32) -> Result<()> {
@@ -2728,7 +2735,7 @@ fn fill_buffer(
         let (gain_l, gain_r) = (gain_l * patch_gain, gain_r * patch_gain);
         // A level matrix carries its own routing, so it multiplies the voice
         // gain directly instead of the panned pair.
-        let matrix_gain = voice.inner.gain() * patch_gain;
+        let matrix_gain = voice.inner.mix_gain() * patch_gain;
         // SAFETY: written once before the voice was submitted; read-only here.
         let matrix_ptr = voice.inner.level_matrix.get();
         let voice_channels = voice.channels as usize;
@@ -3124,7 +3131,7 @@ fn mix_stream(
     let (gain_l, gain_r) = voice.pan_gains();
     let gain_l = gain_l * patch_gain;
     let gain_r = gain_r * patch_gain;
-    let matrix_gain = voice.inner.gain() * patch_gain;
+    let matrix_gain = voice.inner.mix_gain() * patch_gain;
     let matrix_ptr = voice.inner.level_matrix.get();
     let fade_ptr = voice.inner.fade.get();
     let end = unsafe { *voice.inner.end_frame.get() }.unwrap_or(u64::MAX);
@@ -3650,6 +3657,11 @@ fn apply_command(
         AudioCommand::SetGain { voice_id, gain } => {
             if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
                 v.inner.set_gain(gain);
+            }
+        }
+        AudioCommand::SetMuted { voice_id, muted } => {
+            if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
+                v.inner.set_muted(muted);
             }
         }
         AudioCommand::SetPan { voice_id, pan } => {
@@ -6260,5 +6272,64 @@ mod tests {
         assert_eq!(second_voice.voice_state(), VoiceState::Paused);
         assert!(!cue.is_action_started(), "repeated GO also waits for its new stream generation");
         assert_eq!(second_source.underruns(), 0);
+    }
+
+    #[test]
+    fn active_mute_outputs_exact_zero_while_gain_fade_and_playback_advance() {
+        let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
+        let (test_prod, mut commands) = HeapRb::<AudioCommand>::new(32).split();
+        *engine.cmd_prod.lock().unwrap() = test_prod;
+
+        let voice = Voice::new(Arc::new(vec![0.5; 2048]), 2, 48_000, 0.8, 0.0);
+        voice.inner.loops_remaining.store(2, Ordering::Relaxed);
+        unsafe {
+            *voice.inner.fade.get() = Some(FadeState {
+                direction: FadeDirection::In,
+                total_samples: 4096,
+                elapsed_samples: 0,
+                curve: FadeCurve::Linear,
+            });
+        }
+        let voice_id = engine.play_voice(voice).unwrap();
+
+        let mut render = || {
+            let frames = 64;
+            let mut output = vec![0.0; frames * 2];
+            let mut program = vec![0.0; frames * 2];
+            let (mut status_prod, _) = HeapRb::<AudioStatus>::new(16).split();
+            fill_buffer(
+                &mut output,
+                &mut program,
+                2,
+                48_000,
+                &engine.voices.rt_handle(),
+                &engine.input_feeds,
+                &empty_program_audio_taps(),
+                &mut commands,
+                &mut status_prod,
+                &engine.master_gain,
+                &engine.output_period,
+            );
+            output
+        };
+
+        assert!(render().iter().any(|sample| *sample > 0.0));
+        let voice = engine.voices.with(|voices| voices.iter().find(|voice| voice.id == voice_id).cloned()).flatten().unwrap();
+        let frame_before_mute = voice.current_frame();
+        let fade_before_mute = unsafe { (*voice.inner.fade.get()).as_ref().unwrap().elapsed_samples };
+        engine.set_voice_muted(voice_id, true).unwrap();
+        assert!(render().iter().all(|sample| *sample == 0.0));
+        assert!(voice.current_frame() > frame_before_mute);
+        assert_eq!(voice.inner.gain(), 0.8, "mute must preserve authored gain");
+        assert!(unsafe { (*voice.inner.fade.get()).as_ref().unwrap().elapsed_samples } > fade_before_mute);
+
+        engine.set_voice_gain(voice_id, 0.4).unwrap();
+        assert!(render().iter().all(|sample| *sample == 0.0));
+        assert_eq!(voice.inner.gain(), 0.4, "gain automation continues under mute");
+        assert_eq!(voice.inner.loops_remaining.load(Ordering::Relaxed), 2);
+
+        engine.set_voice_muted(voice_id, false).unwrap();
+        assert!(render().iter().any(|sample| *sample > 0.0));
+        assert_eq!(voice.inner.gain(), 0.4, "unmute restores the latest gain");
     }
 }

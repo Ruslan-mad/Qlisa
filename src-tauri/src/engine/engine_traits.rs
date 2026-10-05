@@ -37,6 +37,7 @@ pub trait AudioEngineApi: Send + Sync {
     /// Release the voice's current slice loop (Devamp Cue).
     fn devamp_voice(&self, voice_id: VoiceId, stop_at_end: bool) -> Result<()>;
     fn set_voice_gain(&self, voice_id: VoiceId, gain: f32) -> Result<()>;
+    fn set_voice_muted(&self, voice_id: VoiceId, muted: bool) -> Result<()>;
     fn get_voice_gain(&self, voice_id: VoiceId) -> f32;
     fn set_voice_pan(&self, voice_id: VoiceId, pan: f32) -> Result<()>;
     /// Live crosspoint routing; `None` returns the voice to pan routing.
@@ -94,9 +95,10 @@ pub trait AudioEngineApi: Send + Sync {
         patch_slot: Option<u8>,
         patch_gain: f32,
         device_id: Option<&str>,
+        muted: bool,
     ) -> Result<VoiceId> {
         let _ = (patch_id, patch_slot, device_id);
-        self.play_mic_voice(
+        let voice_id = self.play_mic_voice(
             feed_id,
             in_l,
             in_r,
@@ -106,7 +108,9 @@ pub trait AudioEngineApi: Send + Sync {
             pan,
             fade_in_ms,
             fade_curve,
-        )
+        )?;
+        if muted { self.set_voice_muted(voice_id, true)?; }
+        Ok(voice_id)
     }
     fn panic_stop_all(&self) -> Result<()>;
 }
@@ -135,6 +139,9 @@ impl AudioEngineApi for AudioEngine {
     }
     fn set_voice_gain(&self, voice_id: VoiceId, gain: f32) -> Result<()> {
         AudioEngine::set_voice_gain(self, voice_id, gain)
+    }
+    fn set_voice_muted(&self, voice_id: VoiceId, muted: bool) -> Result<()> {
+        AudioEngine::set_voice_muted(self, voice_id, muted)
     }
     fn get_voice_gain(&self, voice_id: VoiceId) -> f32 {
         AudioEngine::get_voice_gain(self, voice_id)
@@ -207,6 +214,7 @@ impl AudioEngineApi for AudioEngine {
         patch_slot: Option<u8>,
         patch_gain: f32,
         device_id: Option<&str>,
+        muted: bool,
     ) -> Result<VoiceId> {
         AudioEngine::play_mic_voice_routed(
             self,
@@ -223,6 +231,7 @@ impl AudioEngineApi for AudioEngine {
             patch_slot,
             patch_gain,
             device_id,
+            muted,
         )
     }
     fn panic_stop_all(&self) -> Result<()> {

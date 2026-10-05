@@ -241,6 +241,8 @@ pub struct VoiceInner {
     /// Linear gain (f32 bits in an AtomicU32).  Written by `SetGain` commands
     /// processed inside the callback, and by the non-RT `play_voice` path.
     pub gain_bits: AtomicU32,
+    /// Independent exact mute flag. Gain automation continues while muted.
+    pub muted: AtomicBool,
     /// Stereo pan (f32 bits).
     pub pan_bits: AtomicU32,
     /// Remaining loop repetitions.  `0` = play once.  `u32::MAX` = infinite.
@@ -315,6 +317,15 @@ impl VoiceInner {
     }
     pub fn set_gain(&self, g: f32) {
         self.gain_bits.store(f32::to_bits(g), Ordering::Relaxed);
+    }
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
+    }
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Relaxed);
+    }
+    pub fn mix_gain(&self) -> f32 {
+        if self.is_muted() { 0.0 } else { self.gain() }
     }
     pub fn pan(&self) -> f32 {
         f32::from_bits(self.pan_bits.load(Ordering::Relaxed))
@@ -504,6 +515,7 @@ impl Voice {
             state: AtomicU8::new(VoiceState::Idle as u8),
             inner: Arc::new(VoiceInner {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
+                muted: AtomicBool::new(false),
                 pan_bits: AtomicU32::new(f32::to_bits(pan)),
                 loops_remaining: AtomicU32::new(0),
                 rate_bits: AtomicU32::new(f32::to_bits(1.0_f32)),
@@ -546,6 +558,7 @@ impl Voice {
             state: AtomicU8::new(VoiceState::Idle as u8),
             inner: Arc::new(VoiceInner {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
+                muted: AtomicBool::new(false),
                 pan_bits: AtomicU32::new(f32::to_bits(pan)),
                 loops_remaining: AtomicU32::new(0),
                 rate_bits: AtomicU32::new(f32::to_bits(1.0_f32)),
@@ -587,6 +600,7 @@ impl Voice {
             state: AtomicU8::new(VoiceState::Idle as u8),
             inner: Arc::new(VoiceInner {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
+                muted: AtomicBool::new(false),
                 pan_bits: AtomicU32::new(f32::to_bits(pan)),
                 loops_remaining: AtomicU32::new(0),
                 rate_bits: AtomicU32::new(f32::to_bits(1.0_f32)),
@@ -691,7 +705,7 @@ impl Voice {
     /// Compute pan gains `(left, right)`.
     pub fn pan_gains(&self) -> (f32, f32) {
         let pan = self.inner.pan();
-        let gain = self.inner.gain();
+        let gain = self.inner.mix_gain();
         let left = ((1.0 - pan) * 0.5).clamp(0.0, 1.0).sqrt();
         let right = ((1.0 + pan) * 0.5).clamp(0.0, 1.0).sqrt();
         (left * gain, right * gain)

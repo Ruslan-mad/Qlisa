@@ -116,6 +116,7 @@ pub struct AudioCue {
     pub file_path: Option<PathBuf>,
     /// Volume in dB (-60 to +12).
     pub volume_db: f64,
+    pub muted: bool,
     /// Stereo pan (-1.0 to +1.0).
     pub pan: f32,
     /// Optional fade in specification.
@@ -252,6 +253,7 @@ impl AudioCue {
             continue_mode: ContinueMode::DoNotContinue,
             file_path: None,
             volume_db: 0.0,
+            muted: false,
             pan: 0.0,
             fade_in: None,
             fade_out: None,
@@ -460,6 +462,7 @@ impl AudioCue {
         }
 
         voice.inner.loops_remaining.store(self.loop_count, std::sync::atomic::Ordering::Relaxed);
+        voice.inner.set_muted(self.muted);
         voice.inner.set_rate(self.rate as f32);
         let loop_start_frame = self.start_time
             .map(|time| (time.as_secs_f64() * self.decoded_sample_rate as f64) as u64)
@@ -1244,6 +1247,7 @@ impl Cue for AudioCue {
         Some(crate::cue::traits::LiveAudioParams {
             voice_id,
             gain: crate::cue::types::db_to_linear(self.volume_db) as f32,
+            muted: self.muted,
             pan: self.pan,
             level_matrix: self.level_matrix.clone(),
         })
@@ -1253,6 +1257,7 @@ impl Cue for AudioCue {
         if let Some(volume_db) = patch.volume_db {
             self.volume_db = volume_db;
         }
+        if let Some(muted) = patch.muted { self.muted = muted; }
         if let Some(pan) = patch.pan {
             self.pan = pan;
         }
@@ -1276,6 +1281,7 @@ impl Cue for AudioCue {
             "file_path": self.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             "cached_duration_ms": self.cached_duration.map(|d| d.as_millis() as u64),
             "volume_db": self.volume_db,
+            "muted": self.muted,
             "pan": self.pan,
             "fade_in_ms": self.fade_in.as_ref().map(|f| f.duration_ms),
             "fade_in_curve": self.fade_in.as_ref().map(|f| f.curve),
@@ -1345,6 +1351,7 @@ impl CueFactory for AudioCueFactory {
         if let Some(db) = value.get("volume_db").and_then(|v| v.as_f64()) {
             cue.volume_db = db;
         }
+        cue.muted = value.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
         if let Some(pan) = value.get("pan").and_then(|v| v.as_f64()) {
             cue.pan = pan as f32;
         }

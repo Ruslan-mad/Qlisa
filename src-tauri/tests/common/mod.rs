@@ -429,6 +429,7 @@ impl AudioEngineApi for RecAudio {
         record(&self.0, EngineCall::AudioSetGain { gain });
         Ok(())
     }
+    fn set_voice_muted(&self, _v: VoiceId, _muted: bool) -> Result<()> { Ok(()) }
     fn get_voice_gain(&self, _v: VoiceId) -> f32 {
         1.0
     }

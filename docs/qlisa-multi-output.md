@@ -79,6 +79,18 @@ Camera NDI and SRT input paths.
   local sender/worker. Neither state proves a remote receiver is decoding or
   displaying the show.
 
+### Inspector Basics quick controls
+
+The Basics tab places compact controls below the Outputs selector. Audio and
+Video cues have an infinite loop toggle; Audio, Video, and Camera cues have a
+sound toggle. Muting stores a separate `muted` flag and produces exact silence;
+playback and position continue while muted. The flag preserves authored volume,
+channel levels, and fades for unmute. Three Continue buttons map to Do Not
+Continue, Auto-Continue (↓), and Auto-Follow (→), using the cue's existing
+`continue_mode`. Video, Image, and Camera cues also show Fit, Fill, and Stretch
+buttons for each selected output. These buttons write the same
+`geometry_by_output` overrides used by the Geometry tab.
+
 The native transport and rendering code is in `src-tauri/src/engine/network_io.rs`
 and `src-tauri/src/engine/output_engine/`; preferences and routing DTOs live in
 `src-tauri/src/preferences.rs`. Current startup/resource lookup is in

@@ -12,6 +12,7 @@ import { getCue, updateCue, setAudioFile, setVideoFile, setImageFile, setMidiFil
 import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, IMAGE_EXTENSIONS, MIDI_EXTENSIONS } from "../../lib/mediaTypes";
 import { open } from "@tauri-apps/plugin-dialog";
 import { BasicsTab } from "./BasicsTab";
+import { BasicQuickControls } from "./BasicQuickControls";
 import { TimeTab } from "./TimeTab";
 import { LevelsTab } from "./LevelsTab";
 import { FadeTab } from "./FadeTab";
@@ -120,6 +121,8 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
   const [activeTab, setActiveTab] = useState<Tab>("basics");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [formRevision, setFormRevision] = useState(0);
+  const [quickSavePending, setQuickSavePending] = useState(false);
+  const quickSavePendingRef = useRef(false);
   const selectionKey = selectedCueIds.join("\u0000");
   const cueLoadGeneration = useRef(0);
   const mediaRequestGeneration = useRef(0);
@@ -243,6 +246,18 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
     );
   };
 
+  const saveQuick = async (partial: Record<string, unknown>) => {
+    if (quickSavePendingRef.current) return;
+    quickSavePendingRef.current = true;
+    setQuickSavePending(true);
+    try {
+      await save(partial);
+    } finally {
+      quickSavePendingRef.current = false;
+      setQuickSavePending(false);
+    }
+  };
+
   const browseMedia = (kind: "audio" | "video" | "image" | "midi") => async () => {
     const targetCueId = cueData.id;
     const ticket = { cueId: targetCueId, generation: ++mediaRequestGeneration.current };
@@ -333,6 +348,19 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
               const update = updates[0];
               if (update) void save({ output_id: update.output_id, output_ids: update.output_ids });
             }}
+          />
+        )}
+        {activeTab === "basics" && (
+          <BasicQuickControls
+            cue={cueData}
+            outputs={displayPrefs.output_destinations ?? []}
+            outputIds={displayedOutputIds(
+              cueData as OutputSelectableCue,
+              new Set((displayPrefs.output_destinations ?? []).map((output) => output.id)),
+              displayPrefs.default_output_id,
+            )}
+            disabled={quickSavePending}
+            onSave={saveQuick}
           />
         )}
         {activeTab === "basics" && (

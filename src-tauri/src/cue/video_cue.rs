@@ -60,6 +60,7 @@ pub struct VideoCue {
     pub file_path: Option<PathBuf>,
     /// Playback volume in dB (−60 to +12).
     pub volume_db: f64,
+    pub muted: bool,
     /// Audio fade-in applied to the decoded audio voice.
     pub fade_in: Option<FadeSpec>,
     /// Audio fade-out applied to the decoded audio voice on stop.
@@ -174,6 +175,7 @@ impl VideoCue {
             continue_mode: ContinueMode::DoNotContinue,
             file_path: None,
             volume_db: 0.0,
+            muted: false,
             fade_in: None,
             fade_out: None,
             video_fade_in: None,
@@ -331,6 +333,7 @@ impl VideoCue {
         } else {
             return Ok(None);
         };
+        voice.inner.set_muted(self.muted);
         if self.loop_count > 0 || !self.slices.is_empty() {
             if let Some(stream) = &voice.stream {
                 if self.loop_count > 0 && self.slices.is_empty() {
@@ -1203,6 +1206,7 @@ impl Cue for VideoCue {
         Some(crate::cue::traits::LiveAudioParams {
             voice_id,
             gain: db_to_linear(self.volume_db) as f32,
+            muted: self.muted,
             pan: 0.0,
             level_matrix: self.level_matrix.clone(),
         })
@@ -1212,6 +1216,7 @@ impl Cue for VideoCue {
         if let Some(volume_db) = patch.volume_db {
             self.volume_db = volume_db;
         }
+        if let Some(muted) = patch.muted { self.muted = muted; }
         if let Some(level_matrix) = patch.level_matrix {
             self.level_matrix = level_matrix;
         }
@@ -1268,6 +1273,7 @@ impl Cue for VideoCue {
             "continue_mode": self.continue_mode,
             "file_path": self.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             "volume_db": self.volume_db,
+            "muted": self.muted,
             "fade_in_ms": self.fade_in.as_ref().map(|f| f.duration_ms),
             "fade_in_curve": self.fade_in.as_ref().map(|f| f.curve),
             "fade_out_ms": self.fade_out.as_ref().map(|f| f.duration_ms),
@@ -1344,6 +1350,7 @@ impl CueFactory for VideoCueFactory {
         if let Some(db) = value.get("volume_db").and_then(|v| v.as_f64()) {
             cue.volume_db = db;
         }
+        cue.muted = value.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
         if let Some(ms) = value.get("fade_in_ms").and_then(|v| v.as_u64()) {
             let curve = value
                 .get("fade_in_curve")

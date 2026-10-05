@@ -275,6 +275,8 @@ export interface CueSummary {
   output_patch_name?: string;
   /** Persisted audio level for audio-producing Audio/Video/Camera cues. */
   volume_db?: number;
+  /** Exact mute state for audio-producing Audio/Video/Camera cues. */
+  muted?: boolean;
   /** Persisted media loop count. `4294967295` means infinite looping. */
   loop_count?: number;
   /** Explicit named visual destinations; [] means the configured default. */
@@ -432,6 +434,7 @@ export const EMPTY_SLICES: SliceList = { markers: [], play_counts: [1] };
 export interface AudioCueData extends CueSummary {
   notes: string;
   volume_db: number;
+  muted: boolean;
   pan: number;
   /** Crosspoint levels in dB, `[input channel][patch channel]`. `null` = the
    *  cue routes with Pan instead. Replaces pan when set. */
@@ -508,6 +511,7 @@ export const DEFAULT_LAYER_STYLE: LayerStyle = {
 export interface VideoCueData extends CueSummary {
   notes: string;
   volume_db: number;
+  muted: boolean;
   /** Crosspoint levels in dB for the video's audio track. See AudioCueData. */
   level_matrix?: number[][] | null;
   /** Audio track fade-in. */
@@ -619,6 +623,7 @@ export interface CameraDeviceInfo {
 export interface CameraCueData extends CueSummary {
   notes: string;
   volume_db: number;
+  muted: boolean;
   pan: number;
   level_matrix?: number[][] | null;
   output_patch_id: string | null;

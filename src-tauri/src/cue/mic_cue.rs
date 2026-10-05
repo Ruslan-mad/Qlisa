@@ -363,6 +363,7 @@ impl Cue for MicCue {
         Some(crate::cue::traits::LiveAudioParams {
             voice_id,
             gain: crate::cue::types::db_to_linear(self.volume_db) as f32,
+            muted: false,
             pan: self.pan,
             level_matrix: None,
         })

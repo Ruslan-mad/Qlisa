@@ -150,6 +150,7 @@ pub struct CameraCue {
     pub output_ids: Vec<String>,
     /// Audio controls for network sources that provide a synthetic voice.
     pub volume_db: f64,
+    pub muted: bool,
     pub pan: f32,
     pub output_patch_id: Option<Uuid>,
     pub level_matrix: Option<Vec<Vec<f64>>>,
@@ -203,6 +204,7 @@ impl CameraCue {
             output_id: None,
             output_ids: Vec::new(),
             volume_db: 0.0,
+            muted: false,
             pan: 0.0,
             output_patch_id: None,
             level_matrix: None,
@@ -313,6 +315,7 @@ impl CameraCue {
             patch_slot,
             patch_gain,
             device_id,
+            self.muted,
         )?;
         if let Some(spec) = &self.level_matrix {
             let channels = patch.map(|value| value.channels.clone()).unwrap_or_default();
@@ -851,6 +854,7 @@ impl Cue for CameraCue {
         Some(crate::cue::traits::LiveAudioParams {
             voice_id,
             gain: crate::cue::types::db_to_linear(self.volume_db) as f32,
+            muted: self.muted,
             pan: self.pan,
             level_matrix: self.level_matrix.clone(),
         })
@@ -860,6 +864,7 @@ impl Cue for CameraCue {
         if let Some(volume_db) = patch.volume_db {
             self.volume_db = volume_db;
         }
+        if let Some(muted) = patch.muted { self.muted = muted; }
         if let Some(pan) = patch.pan {
             self.pan = pan;
         }
@@ -958,6 +963,7 @@ impl Cue for CameraCue {
             "output_id": self.output_id,
             "output_ids": self.output_ids,
             "volume_db": self.volume_db,
+            "muted": self.muted,
             "pan": self.pan,
             "output_patch_id": self.output_patch_id,
             "level_matrix": self.level_matrix,
@@ -1072,6 +1078,7 @@ impl CueFactory for CameraCueFactory {
         if let Some(volume_db) = value.get("volume_db").and_then(|v| v.as_f64()) {
             cue.volume_db = volume_db;
         }
+        cue.muted = value.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
         if let Some(pan) = value.get("pan").and_then(|v| v.as_f64()) {
             cue.pan = pan as f32;
         }
@@ -1323,10 +1330,12 @@ mod tests {
 
         cue.apply_live_audio_patch(crate::cue::traits::LiveAudioPatch {
             volume_db: Some(-3.0),
+            muted: Some(true),
             pan: Some(0.5),
             level_matrix: Some(None),
         });
         assert_eq!(cue.volume_db, -3.0);
+        assert!(cue.muted);
         assert_eq!(cue.pan, 0.5);
         assert!(cue.level_matrix.is_none());
     }

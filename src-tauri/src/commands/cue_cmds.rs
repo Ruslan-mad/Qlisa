@@ -158,6 +158,9 @@ pub struct CueSummary {
     /// Persisted audio level for audio-producing Audio/Video/Camera cues.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_db: Option<f64>,
+    /// Exact mute state for audio-producing Audio/Video/Camera cues.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
     /// Persisted media loop count. `u32::MAX` means infinite looping. Omitted
     /// for cue types whose playback does not use the media loop setting.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -608,6 +611,9 @@ fn summarise(
         output_patch_name: patches.name_for(cue),
         volume_db: matches!(cue.cue_type(), CueType::Audio | CueType::Video | CueType::Camera)
             .then(|| cue.serialize().get("volume_db").and_then(serde_json::Value::as_f64))
+            .flatten(),
+        muted: matches!(cue.cue_type(), CueType::Audio | CueType::Video | CueType::Camera)
+            .then(|| cue.serialize().get("muted").and_then(serde_json::Value::as_bool))
             .flatten(),
         loop_count: matches!(cue.cue_type(), CueType::Audio | CueType::Video)
             .then(|| cue.serialize().get("loop_count").and_then(serde_json::Value::as_u64).map(|value| value as u32))
@@ -1387,6 +1393,12 @@ fn classify_live_in_place_patch(
                     Some(validated_live_db(value)?);
                 has_live_field = true;
             }
+            "muted" if matches!(cue_type, CueType::Audio | CueType::Video | CueType::Camera) => {
+                patch.audio.get_or_insert_with(Default::default).muted = Some(
+                    value.as_bool().ok_or("muted must be a boolean")?,
+                );
+                has_live_field = true;
+            }
             "pan" if matches!(cue_type, CueType::Audio | CueType::Mic | CueType::Camera) => {
                 patch.audio.get_or_insert_with(Default::default).pan =
                     Some(validated_live_pan(value)?);
@@ -1456,19 +1468,47 @@ fn reject_group_rebuild(cue: &dyn Cue, properties: &serde_json::Value) -> Result
     )
 }
 
+#[derive(Clone, Copy)]
+enum LiveAudioField {
+    Gain,
+    Muted,
+    Pan,
+    Matrix,
+}
+
+fn should_apply_live_audio_field(
+    patch: Option<&crate::cue::traits::LiveAudioPatch>,
+    field: LiveAudioField,
+) -> bool {
+    patch.map_or(true, |patch| match field {
+        LiveAudioField::Gain => patch.volume_db.is_some(),
+        LiveAudioField::Muted => patch.muted.is_some(),
+        LiveAudioField::Pan => patch.pan.is_some(),
+        LiveAudioField::Matrix => patch.level_matrix.is_some(),
+    })
+}
+
 fn apply_existing_cue_live_side_effects(
     cue: &dyn Cue,
     state: &AppState,
     patch_channels_by_id: &[(Uuid, Vec<u16>)],
     default_patch_id: Option<Uuid>,
+    audio_patch: Option<&crate::cue::traits::LiveAudioPatch>,
 ) {
     if let Some(params) = cue.live_audio_params() {
         let audio_voice = state
             .output_engine
             .video_audio_voice(params.voice_id)
             .unwrap_or(params.voice_id);
-        let _ = state.audio_engine.set_voice_gain(audio_voice, params.gain);
-        let _ = state.audio_engine.set_voice_pan(audio_voice, params.pan);
+        if should_apply_live_audio_field(audio_patch, LiveAudioField::Gain) {
+            let _ = state.audio_engine.set_voice_gain(audio_voice, params.gain);
+        }
+        if should_apply_live_audio_field(audio_patch, LiveAudioField::Muted) {
+            let _ = state.audio_engine.set_voice_muted(audio_voice, params.muted);
+        }
+        if should_apply_live_audio_field(audio_patch, LiveAudioField::Pan) {
+            let _ = state.audio_engine.set_voice_pan(audio_voice, params.pan);
+        }
         let patch_channels = cue
             .output_patch_id()
             .or(default_patch_id)
@@ -1479,13 +1519,15 @@ fn apply_existing_cue_live_side_effects(
             })
             .map(|(_, channels)| channels.clone())
             .unwrap_or_default();
-        let matrix = params
-            .level_matrix
-            .as_ref()
-            .and_then(|spec| crate::cue::audio_cue::build_level_matrix(spec, &patch_channels));
-        let _ = state
-            .audio_engine
-            .set_voice_level_matrix(audio_voice, matrix.as_ref());
+        if should_apply_live_audio_field(audio_patch, LiveAudioField::Matrix) {
+            let matrix = params
+                .level_matrix
+                .as_ref()
+                .and_then(|spec| crate::cue::audio_cue::build_level_matrix(spec, &patch_channels));
+            let _ = state
+                .audio_engine
+                .set_voice_level_matrix(audio_voice, matrix.as_ref());
+        }
     }
     if let Some(voice_id) = cue
         .playing_voice_id()
@@ -1750,6 +1792,7 @@ pub fn bulk_update_cues(
                 return Err("Cue disappeared during bulk update".to_string());
             }
         } else if let Some(in_place) = update.in_place.take() {
+            let audio_patch = in_place.audio.clone();
             let cue = cue_list
                 .get_mut_recursive(&update.id)
                 .ok_or("Cue disappeared during bulk update")?;
@@ -1759,6 +1802,7 @@ pub fn bulk_update_cues(
                 &state,
                 &patch_channels_by_id,
                 default_patch_id,
+                audio_patch.as_ref(),
             );
             continue;
         }
@@ -1788,7 +1832,7 @@ mod bulk_update_tests {
             mic_cue::MicCue,
             registry::CueRegistry,
             text_cue::TextCue,
-            traits::RuntimeState,
+            traits::{CueFactory, RuntimeState},
             video_cue::{VideoCue, VideoCueFactory},
             wait_cue::WaitCue,
         },
@@ -2638,6 +2682,38 @@ mod bulk_update_tests {
             assert_eq!(pointer, cue.as_ref() as *const dyn Cue as *const ());
             assert_eq!(cue.serialize()["geometry"]["pan_x"], -0.2);
             assert_eq!(cue.serialize()["layer_style"]["layer"], 6);
+        }
+    }
+
+    #[test]
+    fn mute_only_live_update_does_not_reapply_gain_pan_or_matrix() {
+        let patch = crate::cue::traits::LiveAudioPatch {
+            muted: Some(true),
+            ..Default::default()
+        };
+        assert!(super::should_apply_live_audio_field(Some(&patch), super::LiveAudioField::Muted));
+        assert!(!super::should_apply_live_audio_field(Some(&patch), super::LiveAudioField::Gain));
+        assert!(!super::should_apply_live_audio_field(Some(&patch), super::LiveAudioField::Pan));
+        assert!(!super::should_apply_live_audio_field(Some(&patch), super::LiveAudioField::Matrix));
+    }
+
+    #[test]
+    fn audio_video_camera_mute_persists_and_old_projects_default_unmuted() {
+        let factories: [&dyn CueFactory; 3] = [
+            &crate::cue::audio_cue::AudioCueFactory,
+            &VideoCueFactory,
+            &crate::cue::camera_cue::CameraCueFactory,
+        ];
+        for (factory, cue_type) in factories.into_iter().zip(["audio", "video", "camera"]) {
+            let legacy = factory.from_json(serde_json::json!({ "type": cue_type, "volume_db": -7.0 })).unwrap();
+            assert_eq!(legacy.serialize()["muted"], false, "{cue_type} legacy default");
+            assert_eq!(legacy.serialize()["volume_db"], -7.0);
+
+            let mut persisted = legacy.serialize();
+            persisted["muted"] = serde_json::json!(true);
+            let restored = factory.from_json(persisted).unwrap();
+            assert_eq!(restored.serialize()["muted"], true, "{cue_type} round trip");
+            assert_eq!(restored.serialize()["volume_db"], -7.0);
         }
     }
 
@@ -3538,6 +3614,7 @@ pub fn update_cue(
             };
 
             if let Some(patch) = in_place_patch {
+                let audio_patch = patch.audio.clone();
                 {
                     let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
                     let snapshot = super::undo_cmds::take_snapshot(cue_list);
@@ -3556,6 +3633,7 @@ pub fn update_cue(
                     &state,
                     &patch_channels_by_id,
                     default_patch_id,
+                    audio_patch.as_ref(),
                 );
             } else {
                 let new_cue = {
@@ -3651,6 +3729,7 @@ pub fn update_cue(
                     &state,
                     &patch_channels_by_id,
                     default_patch_id,
+                    None,
                 );
             }
         }
