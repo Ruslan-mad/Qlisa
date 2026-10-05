@@ -304,12 +304,13 @@ export const previewCue = (cueId: CueId, startMs?: number, endMs?: number, start
 
 /** Explicit headphone-preview API for Live and future cue controls. `positionMs`
  * is file time; preview never falls back to the program/PA output. */
-export const previewCueOnHeadphones = (cueId: CueId, positionMs?: number, endMs?: number, startPaused = false) =>
+export const previewCueOnHeadphones = (cueId: CueId, positionMs?: number, endMs?: number, startPaused = false, soundEnabled = true) =>
   invoke<PreviewStartResult>("preview_cue", {
     cueId,
     startMs: positionMs != null ? Math.round(positionMs) : null,
     endMs: endMs != null ? Math.round(endMs) : null,
     startPaused,
+    soundEnabled,
   });
 
 export interface CuePreviewToggleResult {
@@ -327,14 +328,16 @@ export const toggleCuePreview = (cueId: CueId, positionMs?: number, endMs?: numb
 
 export const controlCuePreview = (
   cueId: CueId,
-  action: "pause" | "resume" | "seek" | "seek_paused",
+  action: "pause" | "resume" | "seek" | "seek_paused" | "mute" | "unmute",
   positionMs?: number,
   endMs?: number,
+  soundEnabled?: boolean,
 ) => invoke<CuePreviewToggleResult>("control_cue_preview", {
   cueId,
   action,
   positionMs: positionMs != null ? Math.round(positionMs) : null,
   endMs: endMs != null ? Math.round(endMs) : null,
+  soundEnabled: soundEnabled ?? null,
 });
 
 /** Stop the single active headphone preview, including one opened by another panel. */

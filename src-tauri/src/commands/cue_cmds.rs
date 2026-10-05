@@ -21,7 +21,7 @@ use crate::{
     },
     engine::voice::Voice,
     preferences::GeneralPreferences,
-    state::{AppState, PreviewSession},
+    state::{AppState, PreviewSession, PreviewTransport},
 };
 
 /// Audio decoded by a media cue is runtime state, not part of its JSON.  A
@@ -3871,7 +3871,7 @@ pub fn set_playhead(
     // Selecting another cue leaves no hidden headphone audition playing.
     // This is independent of show transport state and never touches program
     // voices.
-    stop_active_preview(&state)?;
+    stop_active_preview(&PreviewTaskState::from_app(&state))?;
 
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
@@ -4342,6 +4342,25 @@ struct PreviewSource {
     loop_count: u32,
 }
 
+#[derive(Clone)]
+struct PreviewTaskState {
+    workspace: Arc<std::sync::Mutex<crate::show::Workspace>>,
+    audio_engine: Arc<crate::engine::AudioEngine>,
+    preview_session: Arc<std::sync::Mutex<Option<PreviewSession>>>,
+    preview_generation: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl PreviewTaskState {
+    fn from_app(state: &AppState) -> Self {
+        Self {
+            workspace: Arc::clone(&state.workspace),
+            audio_engine: Arc::clone(&state.audio_engine),
+            preview_session: Arc::clone(&state.preview_session),
+            preview_generation: Arc::clone(&state.preview_generation),
+        }
+    }
+}
+
 /// Resolve the media cue that owns the audio for a headphone preview.
 ///
 /// A Number is a transport container, so the preview session keeps the
@@ -4412,6 +4431,10 @@ fn build_preview_voice(
         .inner
         .loops_remaining
         .store(source.loop_count, Ordering::Relaxed);
+    voice.loop_start_frame.store(
+        trim_start_ms.saturating_mul(sample_rate as u64) / 1000,
+        Ordering::Relaxed,
+    );
     voice.frame_pos.store(
         start_ms.saturating_mul(sample_rate as u64) / 1000,
         Ordering::Relaxed,
@@ -4482,7 +4505,7 @@ fn preview_source_from_parts(
     })
 }
 
-fn preview_source(cue_id: Uuid, state: &AppState) -> Result<PreviewSource, String> {
+fn preview_source(cue_id: Uuid, state: &PreviewTaskState) -> Result<PreviewSource, String> {
     let (decoded, file_path, cue_type, json) = {
         let ws = state.workspace.lock().map_err(|e| e.to_string())?;
         let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
@@ -4496,6 +4519,90 @@ fn preview_source(cue_id: Uuid, state: &AppState) -> Result<PreviewSource, Strin
         )
     };
     preview_source_from_parts(decoded, file_path, cue_type, &json)
+}
+
+/// Start supported standalone media through the bounded decoder used by
+/// ordinary Audio/Video cues. Unsupported formats fall back to the legacy PCM
+/// decoder; Number previews keep their existing multi-source path.
+fn streaming_preview_voice(
+    cue_id: Uuid,
+    position_ms: Option<u64>,
+    requested_end_ms: Option<u64>,
+    sound_enabled: bool,
+    state: &PreviewTaskState,
+) -> Result<Option<(Voice, PreviewTransport)>, String> {
+    let (original_type, decoded, path, cue_type, json) = {
+        let ws = state.workspace.lock().map_err(|e| e.to_string())?;
+        let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
+        let cue = cue_list.get_recursive(&cue_id).ok_or("Cue not found")?;
+        let original_type = cue.cue_type();
+        let target = preview_target_cue(cue)?;
+        (
+            original_type,
+            target.extract_decoded_audio(),
+            target.media_file_path().map(|path| path.to_path_buf()),
+            target.cue_type(),
+            target.serialize(),
+        )
+    };
+    if !matches!(original_type, CueType::Audio | CueType::Video)
+        || !matches!(cue_type, CueType::Audio | CueType::Video)
+        || decoded.is_some()
+    {
+        return Ok(None);
+    }
+    let Some(path) = path else {
+        return Err("No media file is assigned to this cue".into());
+    };
+    let info = match crate::cue::media_decode::probe_audio_track(&path) {
+        Ok(Some(info)) => info,
+        Ok(None) => return Err(format!("{} cue has no audio track", if cue_type == CueType::Video { "Video" } else { "Audio" })),
+        Err(_) => return Ok(None),
+    };
+    let sample_rate = info.sample_rate.max(1);
+    let total_ms = info.total_frames
+        .map(|frames| frames.saturating_mul(1000) / sample_rate as u64)
+        .unwrap_or(u64::MAX);
+    let trim_start_ms = json.get("start_time_ms").and_then(|value| value.as_u64()).unwrap_or(0).min(total_ms);
+    let trim_end_ms = json.get("end_time_ms").and_then(|value| value.as_u64()).unwrap_or(total_ms).min(total_ms);
+    let end_ms = requested_end_ms.unwrap_or(trim_end_ms).min(trim_end_ms);
+    let start_ms = position_ms.unwrap_or(trim_start_ms).max(trim_start_ms).min(total_ms);
+    if start_ms >= end_ms {
+        return Err("Preview position is outside this cue's clip range".into());
+    }
+    let start_frame = start_ms.saturating_mul(sample_rate as u64) / 1000;
+    let end_frame = (end_ms != u64::MAX).then(|| end_ms.saturating_mul(sample_rate as u64) / 1000);
+    let stream = crate::cue::media_decode::StreamingAudioSource::start_at(path, info, start_frame)
+        .map_err(|error| format!("Could not start preview audio stream: {error}"))?;
+    let loops = json.get("loop_count").and_then(|value| value.as_u64())
+        .map(|value| value.min(u32::MAX as u64) as u32).unwrap_or(0);
+    if loops > 0 {
+        if let Some(end_frame) = end_frame {
+            let loop_start = trim_start_ms.saturating_mul(sample_rate as u64) / 1000;
+            if !stream.enable_trimmed_loop(loop_start, end_frame) {
+                stream.keep_worker_for_loop();
+            } else if start_frame != loop_start {
+                let _ = stream.prepare_seek(start_frame);
+            }
+        } else {
+            stream.keep_worker_for_loop();
+        }
+    }
+    let voice = Voice::new_stream(
+        stream,
+        crate::cue::types::db_to_linear(json.get("volume_db").and_then(|value| value.as_f64()).unwrap_or(0.0)) as f32,
+        json.get("pan").and_then(|value| value.as_f64()).unwrap_or(0.0) as f32,
+    );
+    voice.frame_pos.store(start_frame, Ordering::Relaxed);
+    voice.loop_start_frame.store(trim_start_ms.saturating_mul(sample_rate as u64) / 1000, Ordering::Relaxed);
+    voice.inner.loops_remaining.store(loops, Ordering::Relaxed);
+    voice.inner.set_rate(json.get("rate").and_then(|value| value.as_f64()).unwrap_or(1.0).clamp(0.1, 4.0) as f32);
+    voice.inner.set_muted(!sound_enabled);
+    if let Some(end_frame) = end_frame {
+        // SAFETY: marker is written before this voice reaches an audio callback.
+        unsafe { *voice.inner.end_frame.get() = Some(end_frame); }
+    }
+    Ok(Some((voice, PreviewTransport { trim_start_ms, end_ms })))
 }
 
 /// One audio-bearing Number child and its position on the Number clock.
@@ -4570,7 +4677,7 @@ fn preview_source_position_ms(item: &NumberPreviewSource, position_ms: Option<u6
 fn number_preview_sources(
     cue_id: Uuid,
     position_ms: Option<u64>,
-    state: &AppState,
+    state: &PreviewTaskState,
 ) -> Result<Vec<NumberPreviewSource>, String> {
     let is_number = {
         let ws = state.workspace.lock().map_err(|e| e.to_string())?;
@@ -4662,8 +4769,10 @@ fn start_cue_preview(
     position_ms: Option<u64>,
     end_ms: Option<u64>,
     start_paused: bool,
+    sound_enabled: bool,
     expected_session: Option<(Uuid, u64)>,
-    state: &AppState,
+    reserved_generation: Option<u64>,
+    state: &PreviewTaskState,
 ) -> Result<PreviewStartResult, String> {
     // Reserve the request before decoding. Decode can take hundreds of ms and
     // Tauri may run several pointer-up replacements concurrently.
@@ -4681,18 +4790,46 @@ fn start_cue_preview(
                 state.audio_engine.preview_voice_is_playing(current.voice_id),
             );
         }
-        (state.preview_generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1), paused)
+        let generation = reserved_generation.unwrap_or_else(|| {
+            state.preview_generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1)
+        });
+        (generation, paused)
     };
-    let source_items = number_preview_sources(cue_id, position_ms, state)?;
-    let mut voices = Vec::with_capacity(source_items.len());
+    let streaming_voice = streaming_preview_voice(cue_id, position_ms, end_ms, sound_enabled, state)?;
+    let source_items = if streaming_voice.is_none() {
+        number_preview_sources(cue_id, position_ms, state)?
+    } else {
+        Vec::new()
+    };
+    let transport = if let Some((_, transport)) = streaming_voice.as_ref() {
+        Some(*transport)
+    } else if source_items.len() == 1 && !source_items[0].number_clock_position {
+        let source = &source_items[0].source;
+        let frames = source.samples.len() as u64 / source.channels.max(1) as u64;
+        let total_ms = frames.saturating_mul(1000) / source.sample_rate.max(1) as u64;
+        Some(PreviewTransport {
+            trim_start_ms: source.trim_start_ms.unwrap_or(0).min(total_ms),
+            end_ms: end_ms.unwrap_or(source.trim_end_ms.unwrap_or(total_ms))
+                .min(source.trim_end_ms.unwrap_or(total_ms))
+                .min(total_ms),
+        })
+    } else {
+        None
+    };
+    let mut voices = Vec::with_capacity(source_items.len().max(1));
+    if let Some((voice, _)) = streaming_voice {
+        voices.push(voice);
+    }
     for item in source_items {
         let source_position_ms = preview_source_position_ms(&item, position_ms)?;
         let requested_end_ms = end_ms.or(item.source.trim_end_ms);
-        voices.push(build_preview_voice(
+        let mut voice = build_preview_voice(
             item.source,
             Some(source_position_ms),
             requested_end_ms,
-        )?);
+        )?;
+        voice.inner.set_muted(!sound_enabled);
+        voices.push(voice);
     }
     let mut session = state.preview_session.lock().map_err(|e| e.to_string())?;
     if !preview_request_is_current(state.preview_generation.load(Ordering::SeqCst), generation) {
@@ -4720,6 +4857,8 @@ fn start_cue_preview(
         }
     }
     let started = PreviewSession::new(cue_id, voice_ids, generation)
+        .map(|session| session.with_transport(transport))
+        .map(|session| session.with_sound_enabled(sound_enabled))
         .ok_or_else(|| "Preview has no playable audio voice".to_string())?;
     let started_result = PreviewStartResult {
         voice_id: started.voice_id.to_string(),
@@ -4727,6 +4866,26 @@ fn start_cue_preview(
     };
     *session = Some(started);
     Ok(started_result)
+}
+
+async fn start_cue_preview_async(
+    cue_id: Uuid,
+    position_ms: Option<u64>,
+    end_ms: Option<u64>,
+    start_paused: bool,
+    sound_enabled: bool,
+    expected_session: Option<(Uuid, u64)>,
+    state: PreviewTaskState,
+) -> Result<PreviewStartResult, String> {
+    let generation = state.preview_generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+    tauri::async_runtime::spawn_blocking(move || {
+        start_cue_preview(
+            cue_id, position_ms, end_ms, start_paused, sound_enabled,
+            expected_session, Some(generation), &state,
+        )
+    })
+    .await
+    .map_err(|error| format!("Preview worker failed: {error}"))?
 }
 
 fn preview_request_is_current(current: u64, request: u64) -> bool {
@@ -4810,7 +4969,7 @@ fn take_inactive_preview_session(
 /// A completed aux voice may have sent its status just before the event loop
 /// reaps it. Reconcile the control-plane slot before toggling so the next click
 /// starts a fresh audition instead of reporting a phantom "playing" session.
-fn prune_inactive_preview_session(state: &AppState) -> Result<bool, String> {
+fn prune_inactive_preview_session(state: &PreviewTaskState) -> Result<bool, String> {
     Ok(
         take_inactive_preview_session(&state.preview_session, |voice_id| {
             state.audio_engine.preview_voice_is_alive(voice_id)
@@ -4819,7 +4978,7 @@ fn prune_inactive_preview_session(state: &AppState) -> Result<bool, String> {
     )
 }
 
-fn stop_active_preview(state: &AppState) -> Result<bool, String> {
+fn stop_active_preview(state: &PreviewTaskState) -> Result<bool, String> {
     state.preview_generation.fetch_add(1, Ordering::SeqCst);
     let Some(session) = take_preview_session(&state.preview_session)? else {
         return Ok(false);
@@ -4844,22 +5003,26 @@ pub struct PreviewStartResult {
 }
 
 #[tauri::command]
-pub fn preview_cue(
+pub async fn preview_cue(
     cue_id: String,
     start_ms: Option<u64>,
     end_ms: Option<u64>,
     start_paused: Option<bool>,
+    sound_enabled: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<PreviewStartResult, String> {
     let id: Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
-    start_cue_preview(id, start_ms, end_ms, start_paused.unwrap_or(false), None, &state)
+    start_cue_preview_async(
+        id, start_ms, end_ms, start_paused.unwrap_or(false), sound_enabled.unwrap_or(true),
+        None, PreviewTaskState::from_app(&state),
+    ).await
 }
 
 /// Stop whichever cue currently owns the headphone preview session. This is
 /// the preferred panel-close / selection-change command.
 #[tauri::command]
 pub fn stop_cue_preview(state: State<'_, AppState>) -> Result<(), String> {
-    stop_active_preview(&state)?;
+    stop_active_preview(&PreviewTaskState::from_app(&state))?;
     Ok(())
 }
 
@@ -4875,17 +5038,18 @@ pub struct PreviewToggleResult {
 }
 
 #[tauri::command]
-pub fn toggle_cue_preview(
+pub async fn toggle_cue_preview(
     cue_id: String,
     position_ms: Option<u64>,
     end_ms: Option<u64>,
     state: State<'_, AppState>,
 ) -> Result<PreviewToggleResult, String> {
     let id: Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+    let task_state = PreviewTaskState::from_app(&state);
     // Every toggle is a new lifecycle edge; invalidate any decode still in
     // flight before deciding whether this is an on or off transition.
-    state.preview_generation.fetch_add(1, Ordering::SeqCst);
-    prune_inactive_preview_session(&state)?;
+    task_state.preview_generation.fetch_add(1, Ordering::SeqCst);
+    prune_inactive_preview_session(&task_state)?;
     if let Some(session) = take_preview_session_for_cue(&state.preview_session, id)? {
         for voice_id in session.all_voice_ids() {
             state.audio_engine.stop_preview_voice(*voice_id);
@@ -4896,7 +5060,7 @@ pub fn toggle_cue_preview(
             generation: None,
         });
     }
-    let started = start_cue_preview(id, position_ms, end_ms, false, None, &state)?;
+    let started = start_cue_preview_async(id, position_ms, end_ms, false, true, None, task_state).await?;
     Ok(PreviewToggleResult {
         playing: true,
         voice_id: Some(started.voice_id),
@@ -4906,24 +5070,44 @@ pub fn toggle_cue_preview(
 
 /// Pause, resume, or seek the isolated headphone preview session.
 #[tauri::command]
-pub fn control_cue_preview(
+pub async fn control_cue_preview(
     cue_id: String,
     action: String,
     position_ms: Option<u64>,
     end_ms: Option<u64>,
+    sound_enabled: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<PreviewToggleResult, String> {
     let id: Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
-    let session = state.preview_session.lock().map_err(|e| e.to_string())?
+    let task_state = PreviewTaskState::from_app(&state);
+    let observed_session = task_state.preview_session.lock().map_err(|e| e.to_string())?
+        .as_ref().filter(|session| session.cue_id == id).cloned();
+    prune_inactive_preview_session(&task_state)?;
+    let session = task_state.preview_session.lock().map_err(|e| e.to_string())?
         .as_ref().filter(|session| session.cue_id == id).cloned();
     let Some(session) = session else {
+        if matches!(action.as_str(), "seek" | "seek_paused" | "resume") {
+            let sound_enabled = observed_session
+                .map(|session| session.sound_enabled)
+                .or(sound_enabled)
+                .unwrap_or(true);
+            let started = start_cue_preview_async(
+                id, position_ms, end_ms, action == "seek_paused", sound_enabled, None, task_state.clone(),
+            ).await?;
+            let voice_id: Uuid = started.voice_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+            return Ok(PreviewToggleResult {
+                playing: state.audio_engine.preview_voice_is_playing(voice_id),
+                voice_id: Some(started.voice_id),
+                generation: Some(started.generation),
+            });
+        }
         return Ok(PreviewToggleResult { playing: false, voice_id: None, generation: None });
     };
     match action.as_str() {
         "pause" | "resume" => {
             let paused = action == "pause";
             let slot = state.preview_session.lock().map_err(|e| e.to_string())?;
-            if slot.as_ref() != Some(&session) {
+            if !slot.as_ref().is_some_and(|current| preview_session_matches(Some(current), id, session.generation)) {
                 return Ok(PreviewToggleResult { playing: false, voice_id: None, generation: None });
             }
             // Cancel any seek decode started from this session. The current
@@ -4938,11 +5122,65 @@ pub fn control_cue_preview(
                 generation: Some(session.generation),
             })
         }
+        "mute" | "unmute" => {
+            let sound_enabled = action == "unmute";
+            let mut slot = state.preview_session.lock().map_err(|e| e.to_string())?;
+            if !slot.as_ref().is_some_and(|current| preview_session_matches(Some(current), id, session.generation)) {
+                return Ok(PreviewToggleResult { playing: false, voice_id: None, generation: None });
+            }
+            for voice_id in session.all_voice_ids() {
+                state.audio_engine.set_voice_muted(*voice_id, !sound_enabled).map_err(|e| e.to_string())?;
+            }
+            if let Some(current) = slot.as_mut() {
+                current.sound_enabled = sound_enabled;
+            }
+            Ok(PreviewToggleResult {
+                playing: state.audio_engine.preview_voice_is_playing(session.voice_id),
+                voice_id: Some(session.voice_id.to_string()),
+                generation: Some(session.generation),
+            })
+        }
         "seek" | "seek_paused" => {
+            // Seeking an existing standalone Audio/Video preview is an RT
+            // command. It does not decode PCM or replace the voice.
+            if let Some(transport) = session.transport {
+                if !state.audio_engine.preview_voice_is_alive(session.voice_id) {
+                    let started = start_cue_preview_async(
+                        id, position_ms, end_ms, action == "seek_paused",
+                        session.sound_enabled, None, task_state.clone(),
+                    ).await?;
+                    let voice_id: Uuid = started.voice_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+                    return Ok(PreviewToggleResult {
+                        playing: state.audio_engine.preview_voice_is_playing(voice_id),
+                        voice_id: Some(started.voice_id),
+                        generation: Some(started.generation),
+                    });
+                }
+                let desired_ms = position_ms.unwrap_or(transport.trim_start_ms).max(transport.trim_start_ms);
+                if desired_ms >= transport.end_ms {
+                    return Err("Preview position is outside this cue's clip range".into());
+                }
+                let slot = state.preview_session.lock().map_err(|e| e.to_string())?;
+                if !slot.as_ref().is_some_and(|current| preview_session_matches(Some(current), id, session.generation)) {
+                    return Ok(PreviewToggleResult { playing: false, voice_id: None, generation: None });
+                }
+                state.preview_generation.fetch_add(1, Ordering::SeqCst);
+                if action == "seek_paused" {
+                    for voice_id in session.all_voice_ids() {
+                        state.audio_engine.set_preview_voice_paused(*voice_id, true);
+                    }
+                }
+                state.audio_engine.seek_voice_ms(session.voice_id, desired_ms).map_err(|e| e.to_string())?;
+                return Ok(PreviewToggleResult {
+                    playing: state.audio_engine.preview_voice_is_playing(session.voice_id),
+                    voice_id: Some(session.voice_id.to_string()),
+                    generation: Some(session.generation),
+                });
+            }
             let pause_before_seek = action == "seek_paused";
             if pause_before_seek {
                 let slot = state.preview_session.lock().map_err(|e| e.to_string())?;
-                if slot.as_ref() != Some(&session) {
+                if !slot.as_ref().is_some_and(|current| preview_session_matches(Some(current), id, session.generation)) {
                     return Ok(PreviewToggleResult { playing: false, voice_id: None, generation: None });
                 }
                 // Pause the current mix first and invalidate other pending
@@ -4952,14 +5190,15 @@ pub fn control_cue_preview(
                     state.audio_engine.set_preview_voice_paused(*voice_id, true);
                 }
             }
-            let started = start_cue_preview(
+            let started = start_cue_preview_async(
                 id,
                 position_ms,
                 end_ms,
                 pause_before_seek,
+                session.sound_enabled,
                 Some((session.cue_id, session.generation)),
-                &state,
-            )?;
+                task_state.clone(),
+            ).await?;
             let started_id: Uuid = started.voice_id.parse().map_err(|e: uuid::Error| e.to_string())?;
             let playing = state.audio_engine.preview_voice_is_playing(started_id);
             Ok(PreviewToggleResult {

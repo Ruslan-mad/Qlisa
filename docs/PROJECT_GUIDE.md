@@ -45,8 +45,9 @@ They are not part of the published 1.5.11 release notes. Use
 [the manual regression checklist](BUGFIXES_NEXT.md) before release review.
 
 - Group and Number rows expand or collapse by double-click and Left/Right.
-- Headphone audition starts at the editor cursor; its play, pause, and seek
-  controls follow the active preview, including paused seeks.
+- The editor's shared Play/Pause and seek controls operate the visual preview
+  and its sound. The headphone button only mutes or unmutes sound; it does not
+  start or stop the transport.
 - Cue List Up/Down moves the visible selection and backend Playhead. Space GO
   waits for the final arrow selection, including when navigation starts without
   a selection.
@@ -344,13 +345,14 @@ network destinations are distinct destination kinds. The default destination
 must remain an enabled physical display; network output is selected explicitly.
 
 Video/image editing includes media thumbnails/metadata, scrub/seek, trims,
-geometry, layer properties, and a video preview. Headphone preview is a separate
+geometry, layer properties, and a video preview. Preview audio is an
 operator-local session, held in `AppState::preview_session`, outside the show
-workspace/playhead. There is at most one active preview voice. Its monotonically
-increasing generation token prevents a slow/stale decode or late completion
-event from replacing/clearing a newer preview. Media metadata probes are
-deduplicated and run in background workers; the cue-list summary reads a cache
-snapshot rather than probing files on every render.
+workspace/playhead. There is at most one active preview session. Its
+monotonically increasing generation token prevents a slow/stale start or late
+completion event from replacing/clearing a newer preview. Live standalone
+Audio/Video seeks reuse the preview voice and decoded stream. Media metadata
+probes are deduplicated and run in background workers; the cue-list summary
+reads a cache snapshot rather than probing files on every render.
 
 The transport bar's global fullscreen control lists physical display outputs,
 shows or hides them, and assigns a monitor to an output. It controls physical

@@ -6101,6 +6101,208 @@ mod tests {
     }
 
     #[test]
+    fn repeated_preview_seeks_keep_one_voice_and_respect_pause_and_mute() {
+        let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
+        let (command_prod, mut commands) = HeapRb::<AudioCommand>::new(64).split();
+        *engine.cmd_prod.lock().unwrap() = command_prod;
+
+        // Each 100 ms region has a distinct value, so a seek can be checked
+        // from the real mixer output rather than from a test-only mapper.
+        let sample_rate = 48_000_u32;
+        let mut samples = Vec::new();
+        for region in 0..24 {
+            samples.extend(std::iter::repeat((region + 1) as f32 / 32.0).take(4_800));
+        }
+        let mut voice = Voice::new(Arc::new(samples), 1, sample_rate, 1.0, 0.0);
+        voice.preview_only = true;
+        voice.set_playing();
+        let voice_id = voice.id;
+        let voice = Arc::new(voice);
+        assert!(engine.voices.push(Arc::clone(&voice)).is_ok());
+
+        let mut render = || {
+            let frames = 64;
+            let mut output = vec![0.0; frames * 2];
+            let mut program = vec![0.0; frames * 2];
+            let (mut status_prod, _) = HeapRb::<AudioStatus>::new(16).split();
+            fill_buffer(
+                &mut output,
+                &mut program,
+                2,
+                sample_rate,
+                &engine.voices.rt_handle(),
+                &engine.input_feeds,
+                &empty_program_audio_taps(),
+                &mut commands,
+                &mut status_prod,
+                &engine.master_gain,
+                &engine.output_period,
+            );
+            output
+        };
+
+        assert!(engine.set_preview_voice_paused(voice_id, true));
+        for region in 1..=12_u64 {
+            let position_ms = region * 100;
+            engine.seek_voice_ms(voice_id, position_ms).unwrap();
+            let _ = render();
+            assert_eq!(voice.current_frame(), position_ms * sample_rate as u64 / 1000);
+            assert_eq!(voice.voice_state(), VoiceState::Paused);
+            assert_eq!(engine.voices.with(|voices| voices.iter().filter(|v| v.preview_only).count()), Some(1));
+            assert_eq!(engine.voices.with(|voices| voices.iter().find(|v| v.id == voice_id).map(|v| v.id)), Some(Some(voice_id)));
+        }
+
+        // The latest RT seek still points into the expected synthetic region.
+        assert!(engine.set_preview_voice_paused(voice_id, false));
+        let audible = render();
+        let expected_sample = 13.0 / 32.0 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!(audible.iter().any(|sample| (*sample - expected_sample).abs() < 0.001));
+        let before_mute = voice.current_frame();
+        engine.set_voice_muted(voice_id, true).unwrap();
+        assert!(render().iter().all(|sample| *sample == 0.0));
+        assert!(voice.current_frame() > before_mute, "mute must not pause transport");
+        let after_muted_render = voice.current_frame();
+        engine.set_voice_muted(voice_id, false).unwrap();
+        let audible_after_unmute = render();
+        assert!(voice.current_frame() > after_muted_render);
+        assert!(audible_after_unmute.iter().any(|sample| *sample > 0.0));
+        assert_eq!(voice.id, voice_id, "mute and seek must not replace the preview voice");
+    }
+
+    #[test]
+    fn repeated_preview_seeks_reuse_a_bounded_stream_voice() {
+        use std::io::Write;
+
+        let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
+        let path = std::env::temp_dir().join(format!("qlisa-preview-stream-{}.wav", uuid::Uuid::new_v4()));
+        let sample_rate = 48_000_u32;
+        let frames_per_region = 4_800_usize;
+        let data_bytes = (24 * frames_per_region * 2) as u32;
+        let mut file = std::fs::File::create(&path).expect("create preview stream fixture");
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_bytes).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16_u32.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&1_u16.to_le_bytes()).unwrap();
+        file.write_all(&sample_rate.to_le_bytes()).unwrap();
+        file.write_all(&(sample_rate * 2).to_le_bytes()).unwrap();
+        file.write_all(&2_u16.to_le_bytes()).unwrap();
+        file.write_all(&16_u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_bytes.to_le_bytes()).unwrap();
+        for region in 0..24_i16 {
+            for _ in 0..frames_per_region {
+                file.write_all(&((region + 1) * 1_000).to_le_bytes()).unwrap();
+            }
+        }
+        drop(file);
+
+        let info = crate::cue::media_decode::probe_audio_track(&path)
+            .expect("probe preview stream")
+            .expect("WAV audio track");
+        let stream = crate::cue::media_decode::StreamingAudioSource::start_at(path.clone(), info, 0)
+            .expect("start bounded preview stream");
+        let mut voice = Voice::new_stream(Arc::clone(&stream), 1.0, 0.0);
+        voice.preview_only = true;
+        voice.set_playing();
+        let voice_id = voice.id;
+        let voice = Arc::new(voice);
+        assert!(engine.voices.push(Arc::clone(&voice)).is_ok());
+        while !stream.is_ready() && !stream.is_eof() {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        let (command_prod, mut commands) = HeapRb::<AudioCommand>::new(64).split();
+        *engine.cmd_prod.lock().unwrap() = command_prod;
+        let mut render = || {
+            let mut output = vec![0.0; 128];
+            let mut program = vec![0.0; 128];
+            let (mut status_prod, _) = HeapRb::<AudioStatus>::new(16).split();
+            fill_buffer(
+                &mut output,
+                &mut program,
+                2,
+                sample_rate,
+                &engine.voices.rt_handle(),
+                &engine.input_feeds,
+                &empty_program_audio_taps(),
+                &mut commands,
+                &mut status_prod,
+                &engine.master_gain,
+                &engine.output_period,
+            );
+            output
+        };
+
+        assert!(engine.set_preview_voice_paused(voice_id, true));
+        for region in 1..=12_u64 {
+            engine.seek_voice_ms(voice_id, region * 100).unwrap();
+        }
+        let _ = render();
+        assert_eq!(voice.current_frame(), 1_200 * sample_rate as u64 / 1_000);
+        assert_eq!(voice.voice_state(), VoiceState::Paused);
+        assert_eq!(engine.voices.with(|voices| voices.iter().filter(|v| v.preview_only).count()), Some(1));
+
+        assert!(engine.set_preview_voice_paused(voice_id, false));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !stream.is_ready() && !stream.is_eof() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(stream.is_ready(), "bounded decoder must refill from the latest seek");
+        let output = render();
+        let expected = 13_000.0 / 32_768.0 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!(output.iter().any(|sample| (*sample - expected).abs() < 0.002));
+        assert_eq!(voice.id, voice_id, "stream seek must retain its preview voice");
+
+        engine.stop_preview_voice(voice_id);
+        let _ = std::fs::remove_file(path);
+
+        // The existing compressed fixture exercises the same bounded seek
+        // path used for MP3 Audio and Video tracks.
+        let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tiny_slice.mp3");
+        let mp3_info = crate::cue::media_decode::probe_audio_track(&mp3)
+            .expect("probe MP3 preview fixture")
+            .expect("MP3 audio track");
+        let total_frames = mp3_info.total_frames.expect("MP3 frame count");
+        let mp3_stream = crate::cue::media_decode::StreamingAudioSource::start_at(
+            mp3.clone(), mp3_info, 0,
+        ).expect("start bounded MP3 preview stream");
+        let mut mp3_voice = Voice::new_stream(Arc::clone(&mp3_stream), 1.0, 0.0);
+        mp3_voice.preview_only = true;
+        mp3_voice.set_playing();
+        let mp3_voice_id = mp3_voice.id;
+        let mp3_voice = Arc::new(mp3_voice);
+        assert!(engine.voices.push(Arc::clone(&mp3_voice)).is_ok());
+        while !mp3_stream.is_ready() && !mp3_stream.is_eof() {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(engine.set_preview_voice_paused(mp3_voice_id, true));
+        let mut latest_ms = 0;
+        for step in 1..=12_u64 {
+            let target_frame = total_frames * step / 13;
+            latest_ms = target_frame * 1_000 / mp3_info.sample_rate as u64;
+            engine.seek_voice_ms(mp3_voice_id, latest_ms).unwrap();
+        }
+        let _ = render();
+        assert_eq!(
+            mp3_voice.current_frame(),
+            latest_ms * mp3_info.sample_rate as u64 / 1_000,
+            "MP3 preview cursor follows the last seek while paused",
+        );
+        assert_eq!(mp3_voice.voice_state(), VoiceState::Paused);
+        assert!(engine.set_preview_voice_paused(mp3_voice_id, false));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !mp3_stream.is_ready() && !mp3_stream.is_eof() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(render().iter().any(|sample| *sample != 0.0));
+        assert_eq!(mp3_voice.id, mp3_voice_id, "MP3 seek must retain its preview voice");
+        engine.stop_preview_voice(mp3_voice_id);
+    }
+
+    #[test]
     fn silent_engine_preserves_the_operator_device_choice() {
         // `desired_config` drives the watchdog banner and the manual restore —
         // starting silent must not silently rewrite the operator's selection.

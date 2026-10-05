@@ -45,7 +45,7 @@ export function NumberPreviewControls({
           : t("editorUi.videoPreviewUnavailable")}
         onClick={() => {
           action.toggle(numberId, durationMs);
-          onTransportToggle?.(playing);
+          onTransportToggle?.(useNumberPreviewStore.getState().playing);
         }}
         style={disabledStyle}
       >{playing ? "❚❚" : "▶"}</button>

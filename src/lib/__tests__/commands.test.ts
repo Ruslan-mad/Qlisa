@@ -158,6 +158,7 @@ describe("command wrappers forward the correct name + args", () => {
       startMs: 13,
       endMs: 40,
       startPaused: false,
+      soundEnabled: true,
     });
   });
 
@@ -176,6 +177,7 @@ describe("command wrappers forward the correct name + args", () => {
       startMs: 500,
       endMs: 900,
       startPaused: true,
+      soundEnabled: true,
     });
   });
 
@@ -183,14 +185,18 @@ describe("command wrappers forward the correct name + args", () => {
     await cmd.controlCuePreview("cue-1", "pause");
     await cmd.controlCuePreview("cue-1", "seek", 1500.6, 9000);
     await cmd.controlCuePreview("cue-1", "seek_paused", 1750);
+    await cmd.controlCuePreview("cue-1", "unmute", undefined, undefined, true);
     expect(invokeMock).toHaveBeenNthCalledWith(1, "control_cue_preview", {
-      cueId: "cue-1", action: "pause", positionMs: null, endMs: null,
+      cueId: "cue-1", action: "pause", positionMs: null, endMs: null, soundEnabled: null,
     });
     expect(invokeMock).toHaveBeenNthCalledWith(2, "control_cue_preview", {
-      cueId: "cue-1", action: "seek", positionMs: 1501, endMs: 9000,
+      cueId: "cue-1", action: "seek", positionMs: 1501, endMs: 9000, soundEnabled: null,
     });
     expect(invokeMock).toHaveBeenNthCalledWith(3, "control_cue_preview", {
-      cueId: "cue-1", action: "seek_paused", positionMs: 1750, endMs: null,
+      cueId: "cue-1", action: "seek_paused", positionMs: 1750, endMs: null, soundEnabled: null,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "control_cue_preview", {
+      cueId: "cue-1", action: "unmute", positionMs: null, endMs: null, soundEnabled: true,
     });
   });
 

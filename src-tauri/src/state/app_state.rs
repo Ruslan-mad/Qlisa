@@ -95,6 +95,16 @@ pub struct PreviewSession {
     /// Monotonic lifecycle token. UI observers discard lower-generation events
     /// so a delayed EOF/stop from an older preview cannot erase its replacement.
     pub generation: u64,
+    pub sound_enabled: bool,
+    /// File-time bounds for a single Audio/Video preview voice. Number mixes
+    /// use their own clock mapping and leave this unset.
+    pub transport: Option<PreviewTransport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewTransport {
+    pub trim_start_ms: u64,
+    pub end_ms: u64,
 }
 
 impl PreviewSession {
@@ -105,7 +115,19 @@ impl PreviewSession {
             voice_id,
             voice_ids: std::sync::Arc::new(voice_ids),
             generation,
+            sound_enabled: true,
+            transport: None,
         })
+    }
+
+    pub fn with_transport(mut self, transport: Option<PreviewTransport>) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    pub fn with_sound_enabled(mut self, sound_enabled: bool) -> Self {
+        self.sound_enabled = sound_enabled;
+        self
     }
 
     pub fn all_voice_ids(&self) -> &[Uuid] {

@@ -57,7 +57,7 @@ In the Cue List, **Up/Down** moves through visible rows and moves the Playhead; 
 - Play audio and video; display images and text.
 - Set levels, fade in and out, trim the beginning and end, seek, and loop playback.
 - Choose audio devices, mix audio, and preview through headphones.
-- Headphone audition starts at the editor cursor; the editor's Play/Pause and seek controls operate the active audition.
+- The editor's Play/Pause and seek controls operate the visual preview and its sound; the headphone button only mutes or unmutes the sound.
 - Use multiple display outputs and route visual Cues to specific outputs.
 - Set separate image geometry for different outputs.
 

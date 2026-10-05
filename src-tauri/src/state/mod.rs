@@ -1,2 +1,2 @@
 pub mod app_state;
-pub use app_state::{AppState, PreviewSession};
+pub use app_state::{AppState, PreviewSession, PreviewTransport};

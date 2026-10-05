@@ -30,8 +30,8 @@
   finite repeats, waveform reuse, and timeline playhead behavior.
 - [Cue List navigation](cue-list-navigation.md) — visible-row keyboard
   navigation, Group/Number expansion, and Number creation order.
-- [Headphone preview transport](headphone-preview-transport.md) — editor
-  cursor, playback, pause, and seek behavior for isolated headphone audition.
+- [Headphone preview transport](headphone-preview-transport.md) — shared visual
+  and audio preview transport, headphone mute, and repeated-seek behavior.
 - [Cue wait progress and held video frames](cue-wait-and-hold.md) — Pre-Wait and
   Post-Wait progress cells plus Auto-Follow behavior at a held final frame.
 - [Follow-up regression checklist](BUGFIXES_NEXT.md) — manual checks for seven

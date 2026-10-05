@@ -11,10 +11,13 @@ manual checks to run; an unchecked item is not a pass. / Эти изменени
   or Number row to expand and collapse it. Use Left and Right for the same
   actions. Confirm a collapsed/expanded row consumes both keys, inline editing
   still works, and video preview frame buttons still step frames.
-- [ ] **Headphone audition / Прослушивание в наушниках.** Start audition from
-  the editor cursor. Use the visual Play/Pause and seek controls while the
-  audition is active. Seek while paused, confirm no audio resumes until Play,
-  and check a Number timeline with offset/trim actions.
+- [ ] **Preview transport and sound / Транспорт и звук предпросмотра.** Start
+  from the editor cursor. Confirm shared Play/Pause controls both picture and
+  sound, while the headphone button only mutes or unmutes sound. Seek at least
+  ten times in quick succession and confirm the final cursor and audio position
+  match without a full-file decode on each seek. Seek while paused and confirm
+  audio stays paused; frame-step must also seek audio and remain paused. Check
+  EOF recovery and a Number timeline with offset/trim actions.
 - [ ] **Cue List arrows and GO / Стрелки Cue List и GO.** With a row focused,
   move Up/Down through visible rows and confirm both selection and Playhead
   move. Repeat with no selection and with nested Group rows. Press Space after

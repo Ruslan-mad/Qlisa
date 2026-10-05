@@ -33,7 +33,7 @@ export function VideoPreviewControls({
         onClick={() => {
           const state = useVideoPreviewTransport.getState();
           state.toggle(identity);
-          onTransportToggle?.(state.playing);
+          onTransportToggle?.(useVideoPreviewTransport.getState().playing);
         }}
         style={{ ...buttonStyle, opacity: available ? 1 : 0.5, cursor: available ? "pointer" : "default" }}
       >
