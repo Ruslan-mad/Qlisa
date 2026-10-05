@@ -67,6 +67,10 @@ Available Cue types include Audio, Video, Image, Text, Memo, Wait, Fade, Stop, G
 
 Configurable automatic transitions complement manual control through the Playhead, GO, STOP, and Active Cues panel. Waveform and media preview caches are stored alongside the project.
 
+The source after version 1.5.11 includes a new Stage theme for live operation,
+with a compact Cue List, independently collapsible panels, and large transport
+controls. It is not part of a release yet. See the [Stage theme notes](docs/flagship-theme.md).
+
 ### Connecting to other systems
 
 Qlisa supports MIDI, OSC, Timecode, sACN, Art-Net, NDI, and SRT. A Cue can run media and send commands to compatible software or systems.

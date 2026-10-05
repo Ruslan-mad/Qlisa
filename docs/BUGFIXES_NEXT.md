@@ -7,6 +7,12 @@ manual checks to run; an unchecked item is not a pass. / Эти изменени
 
 ## Manual checks / Ручные проверки
 
+- [ ] **Stage theme / Тема Stage.** Finish the profile migration, save status,
+  output binding, transport, and column preference checks in [the Stage theme
+  notes](flagship-theme.md). Browser UI QA passed for independent panel
+  visibility/persistence and the 1280 px layout with a local IPC fixture. This
+  does not validate physical transport, fullscreen, or window controls.
+
 - [ ] **Output Monitor / Монитор выходов.** Select each physical output in
   turn, switch between outputs repeatedly, close and reopen the monitor, and
   confirm an older selection never replaces the current preview. Check frame,

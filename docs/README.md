@@ -15,6 +15,8 @@
 
 ## Technical notes
 
+- [Stage theme](flagship-theme.md) — live-operation layout, saved UI preferences,
+  and manual checks for the unreleased source changes.
 - [Audio bus routing](audio-bus-routing.md) — routing rules for cue audio.
 - [Multi-output behavior](qlisa-multi-output.md) — display/network destinations,
   routing, delivery, and platform limits.

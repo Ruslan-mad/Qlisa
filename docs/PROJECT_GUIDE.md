@@ -45,6 +45,12 @@ after the 1.5.11 baseline. They are not part of the published 1.5.11 release
 notes. Use
 [the manual regression checklist](BUGFIXES_NEXT.md) before release review.
 
+The working source also includes the unreleased Stage theme. Its layout,
+preferences migration, transport controls, and manual regression checklist are
+documented in [the Stage theme notes](flagship-theme.md). It remains source-only
+work; frontend checks or browser QA with an IPC fixture do not validate the
+physical backend or establish release readiness.
+
 - Group and Number rows expand or collapse by double-click and Left/Right.
 - The editor's shared Play/Pause and seek controls operate the visual preview
   and its sound. The headphone button only mutes or unmutes sound; it does not
