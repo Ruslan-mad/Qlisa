@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isNumberActionSupported, isNumberMasterCandidate, normalizeNumberCueData, numberActionConfigured } from "./numberModel";
-import type { CueSummary } from "../../lib/types";
+import { isNumberActionSupported, isNumberAudioCapable, isNumberMasterCandidate, normalizeNumberCueData, numberActionConfigured, toggleNumberChildMuted } from "./numberModel";
+import type { CueSummary, NumberCueData } from "../../lib/types";
+import { renderToStaticMarkup } from "react-dom/server";
+import React from "react";
+import { NumberTab } from "./NumberTab";
 
 const cue = (patch: Partial<CueSummary>): CueSummary => ({
   id: "child", cue_type: "audio", name: "Audio", number: null, notes: "", state: "standby",
@@ -55,5 +58,37 @@ describe("Number action readiness", () => {
     expect(isNumberActionSupported(cue({ cue_type: "group" }))).toBe(true);
     expect(isNumberActionSupported(cue({ cue_type: "light" }))).toBe(false);
     expect(isNumberActionSupported(cue({ cue_type: "browser" }))).toBe(false);
+  });
+
+  it("toggles persisted mute for Audio and Video without changing gain or settings", () => {
+    for (const cueType of ["audio", "video"] as const) {
+      const child = cue({ cue_type: cueType, muted: false, volume_db: -12, loop_count: 2 });
+      const number = { ...cue({ cue_type: "number" }), children: [child] } as NumberCueData;
+      const muted = toggleNumberChildMuted(number, child.id).children[0];
+      expect(muted.muted).toBe(true);
+      expect(muted.volume_db).toBe(-12);
+      expect(muted.loop_count).toBe(2);
+      const unmuted = toggleNumberChildMuted({ ...number, children: [muted] }, child.id).children[0];
+      expect(unmuted.muted).toBe(false);
+      expect(unmuted.volume_db).toBe(-12);
+    }
+  });
+
+  it("renders an enabled, pressed unmute button and disables unsupported cue types", () => {
+    const number = {
+      ...cue({ cue_type: "number" }),
+      children: [
+        cue({ id: "muted-audio", cue_type: "audio", muted: true, volume_db: -12 }),
+        cue({ id: "quiet-video", cue_type: "video", muted: false, volume_db: -60 }),
+        cue({ id: "image", cue_type: "image" }),
+      ],
+    } as NumberCueData;
+    const markup = renderToStaticMarkup(React.createElement(NumberTab, { cue: number, onRefresh: () => {} }));
+    expect(markup).toContain('aria-label="Вкл. звук"');
+    expect(markup).toContain('aria-pressed="true"');
+    expect(markup).not.toMatch(/<button[^>]*aria-label="Вкл\. звук"[^>]*disabled/);
+    expect(markup).toMatch(/<button[^>]*aria-label="Выкл\. звук"[^>]*aria-pressed="false"/);
+    expect(markup).toMatch(/<button[^>]*aria-label="Выкл\. звук"[^>]*disabled/);
+    expect(isNumberAudioCapable(cue({ cue_type: "image" }))).toBe(false);
   });
 });

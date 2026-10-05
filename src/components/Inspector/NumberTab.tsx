@@ -4,7 +4,7 @@ import { setNumberActionOffset, setNumberMaster, updateCue } from "../../lib/com
 import { CueTypeIcon } from "../common/CueTypeIcon";
 import { inputStyle, Section } from "./Field";
 import { useLocale } from "../../i18n";
-import { isNumberActionSupported, isNumberMasterCandidate, numberActionConfigured } from "./numberModel";
+import { isNumberActionSupported, isNumberAudioCapable, isNumberMasterCandidate, numberActionConfigured, toggleNumberChildMuted } from "./numberModel";
 
 const badgeStyle: React.CSSProperties = { borderRadius: 10, padding: "2px 7px", fontSize: 10, whiteSpace: "nowrap" };
 
@@ -12,12 +12,14 @@ function ActionIcon({
   label,
   onClick,
   disabled,
+  pressed,
   children,
   tone = "default",
 }: {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  pressed?: boolean;
   children: React.ReactNode;
   tone?: "default" | "danger" | "success";
 }) {
@@ -25,6 +27,7 @@ function ActionIcon({
   return <button
     type="button"
     aria-label={label}
+    aria-pressed={pressed}
     title={label}
     disabled={disabled}
     onClick={onClick}
@@ -38,8 +41,6 @@ function ActionIcon({
       border: "1px solid var(--wc-border)",
       borderRadius: 4,
       background: disabled ? "transparent" : "var(--wc-control-bg)",
-      // Keep the muted state legible even though the action is intentionally
-      // disabled: the red crossed speaker is the persisted-state feedback.
       color: tone === "danger" ? color : disabled ? "var(--wc-text-faint)" : color,
       cursor: disabled ? "default" : "pointer",
       flexShrink: 0,
@@ -165,15 +166,13 @@ export function NumberTab({
     }));
   };
 
-  const muteChildAudio = (childId: string) => {
+  const toggleChildAudioMuted = (childId: string) => {
+    const child = localCue.children.find((candidate) => candidate.id === childId);
+    if (!child || !isNumberAudioCapable(child)) return;
+    const muted = !(child.muted ?? false);
     void run(async () => {
-      // Use the cue's normal volume field. Number has no parallel mute state
-      // and must never guess the previous gain when unmuting.
-      await updateCue(childId, { volume_db: -60 });
-    }, (current) => ({
-      ...current,
-      children: current.children.map((child) => child.id === childId ? { ...child, volume_db: -60 } : child),
-    }));
+      await updateCue(childId, { muted });
+    }, (current) => toggleNumberChildMuted(current, childId));
   };
 
   const toggleChildLoop = (child: CueSummary) => {
@@ -216,8 +215,8 @@ export function NumberTab({
       {localCue.children.length === 0 && <div style={{ color: "var(--wc-text-faint)", fontSize: 11 }}>{t("numberUi.noChildren")}</div>}
       {localCue.children.map((child) => {
         const supported = isNumberActionSupported(child);
-        const audioCapable = child.cue_type === "audio" || child.cue_type === "video";
-        const muted = audioCapable && (child.volume_db ?? 0) <= -59;
+        const audioCapable = isNumberAudioCapable(child);
+        const muted = audioCapable && (child.muted ?? false);
         const childName = child.name || `#${child.number ?? child.id.slice(0, 8)}`;
         const looped = audioCapable && (child.loop_count ?? 0) > 0;
         return <div key={child.id} style={{ display: "grid", gridTemplateColumns: "18px minmax(0, 1fr) auto", alignItems: "center", gap: 6, marginBottom: 6, minWidth: 0 }}>
@@ -227,7 +226,7 @@ export function NumberTab({
             <ActionIcon label={t("numberUi.openChild")} disabled={busy} onClick={() => onSelectCue?.(child.id)}><OpenIcon /></ActionIcon>
             <ActionIcon label={looped ? t("numberUi.loopOn") : t("numberUi.loopOff")} disabled={busy || !audioCapable} tone={looped ? "success" : "default"} onClick={() => toggleChildLoop(child)}><LoopIcon active={looped} /></ActionIcon>
             <ActionIcon label={t("numberUi.resetPositionCrop")} disabled={busy || !supported} tone={resetDone === child.id ? "success" : "default"} onClick={() => resetChildTimeline(child.id)}><ResetIcon done={resetDone === child.id} /></ActionIcon>
-            <ActionIcon label={muted ? t("numberUi.audioMuted") : t("numberUi.muteAudio")} disabled={busy || !audioCapable || muted} tone={muted ? "danger" : "default"} onClick={() => muteChildAudio(child.id)}><AudioIcon muted={muted} /></ActionIcon>
+            <ActionIcon label={muted ? t("numberUi.unmuteAudio") : t("numberUi.muteAudio")} pressed={muted} disabled={busy || !audioCapable} tone={muted ? "danger" : "default"} onClick={() => toggleChildAudioMuted(child.id)}><AudioIcon muted={muted} /></ActionIcon>
           </div>
         </div>;
       })}

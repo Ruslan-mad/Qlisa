@@ -17,3 +17,6 @@ visible crop. Trim changes only the source bounds and pass duration; it does
 not require another waveform decode. A short final pass maps to the matching
 prefix of the source crop. The Number playhead remains on the shared Number
 clock, so it advances across repeated pass boundaries.
+
+The Number quick speaker uses each Audio or Video cue's persisted mute flag.
+It toggles both ways and preserves the authored volume.

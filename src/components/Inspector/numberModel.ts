@@ -33,3 +33,17 @@ export function isNumberActionSupported(child: CueSummary): boolean {
 export function isNumberMasterCandidate(child: CueSummary): boolean {
   return child.cue_type === "audio" || child.cue_type === "video" || child.cue_type === "group";
 }
+
+export function isNumberAudioCapable(child: CueSummary): boolean {
+  return child.cue_type === "audio" || child.cue_type === "video";
+}
+
+/** Toggle the persisted mute flag without changing gain or other child settings. */
+export function toggleNumberChildMuted(data: NumberCueData, childId: string): NumberCueData {
+  return {
+    ...data,
+    children: data.children.map((child) => child.id === childId && isNumberAudioCapable(child)
+      ? { ...child, muted: !(child.muted ?? false) }
+      : child),
+  };
+}

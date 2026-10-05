@@ -4511,12 +4511,14 @@ struct NumberPreviewSource {
 fn number_preview_child_is_active(
     cue_type: &CueType,
     is_disabled: bool,
+    is_muted: bool,
     volume_db: f64,
     offset_ms: u64,
     clock_ms: u64,
 ) -> bool {
     matches!(cue_type, CueType::Audio | CueType::Video)
         && !is_disabled
+        && !is_muted
         && volume_db > -59.0
         && offset_ms <= clock_ms
 }
@@ -4585,11 +4587,13 @@ fn number_preview_sources(
             .filter_map(|child| {
                 let json = child.serialize();
                 let volume = json.get("volume_db").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let is_muted = json.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
                 let id = child.id();
                 let offset_ms = if id == master_id { 0 } else { offsets.get(&id).copied().unwrap_or(0) };
                 number_preview_child_is_active(
                     &child.cue_type(),
                     child.is_disabled(),
+                    is_muted,
                     volume,
                     offset_ms,
                     position_ms.unwrap_or(0),
@@ -6076,21 +6080,25 @@ mod tests {
         let future = Uuid::new_v4();
         let disabled = Uuid::new_v4();
         let muted = Uuid::new_v4();
+        let muted_video = Uuid::new_v4();
         let video = Uuid::new_v4();
         let candidates = vec![
-            (master, CueType::Audio, false, 0.0, 0),
-            (action, CueType::Audio, false, -3.0, 1_000),
-            (future, CueType::Audio, false, 0.0, 9_000),
-            (disabled, CueType::Video, true, 0.0, 0),
-            (muted, CueType::Audio, false, -60.0, 0),
-            (video, CueType::Video, false, -6.0, 1_000),
+            (master, CueType::Audio, false, false, 0.0, 0),
+            (action, CueType::Audio, false, false, -3.0, 1_000),
+            (future, CueType::Audio, false, false, 0.0, 9_000),
+            (disabled, CueType::Video, true, false, 0.0, 0),
+            (muted, CueType::Audio, false, true, 0.0, 0),
+            (muted_video, CueType::Video, false, true, -6.0, 1_000),
+            (video, CueType::Video, false, false, -6.0, 1_000),
+            (Uuid::new_v4(), CueType::Audio, false, false, -60.0, 0),
         ];
         let selected: Vec<Uuid> = candidates
             .iter()
-            .filter(|(_, cue_type, is_disabled, volume_db, offset_ms)| {
+            .filter(|(_, cue_type, is_disabled, is_muted, volume_db, offset_ms)| {
                 number_preview_child_is_active(
                     cue_type,
                     *is_disabled,
+                    *is_muted,
                     *volume_db,
                     *offset_ms,
                     2_000,
