@@ -58,6 +58,8 @@ import type {
   MediaInfo,
   ProbeMetadata,
   MediaCompatibility,
+  OutputMonitorDiagnostics,
+  OutputMonitorFrontendMetrics,
   MediaConversionJob,
   MediaConversionRequest,
   MediaRuntimeStatus,
@@ -533,30 +535,29 @@ export interface OutputMonitorSource {
   name: string;
 }
 
-export type OutputMonitorFrameStatus =
-  | "frame"
-  | "unchanged"
-  | "black"
-  | "no_frame"
-  | "unavailable"
-  | "error";
-
-export interface OutputMonitorFrame {
-  source_id: string;
-  status: OutputMonitorFrameStatus;
-  sequence: number;
-  width: number;
-  height: number;
-  data_url: string | null;
-  error: string | null;
-}
-
 export const listOutputMonitorSources = () =>
   invoke<OutputMonitorSource[]>("list_output_monitor_sources");
-export const setOutputMonitorSource = (sourceId: string | null) =>
-  invoke<void>("set_output_monitor_source", { sourceId });
-export const getOutputMonitorFrame = (sourceId: string, afterSequence: number | null) =>
-  invoke<OutputMonitorFrame>("get_output_monitor_frame", { sourceId, afterSequence });
+let outputMonitorSelectionQueue = Promise.resolve();
+export function setOutputMonitorSource(sourceId: string | null, selectionToken: number): Promise<void> {
+  const command = outputMonitorSelectionQueue.then(() => invoke<void>("set_output_monitor_source", { sourceId, selectionToken }));
+  outputMonitorSelectionQueue = command.catch(() => undefined);
+  return command;
+}
+let outputMonitorFrameInFlight = false;
+export async function getOutputMonitorFrame(sourceId: string, afterSequence: number | null, selectionToken: number): Promise<ArrayBuffer | null> {
+  if (outputMonitorFrameInFlight) return null;
+  outputMonitorFrameInFlight = true;
+  try {
+    return await invoke<ArrayBuffer>("get_output_monitor_frame", { sourceId, afterSequence, selectionToken });
+  } finally {
+    outputMonitorFrameInFlight = false;
+  }
+}
+
+export const reportOutputMonitorFrontendDiagnostics = (metrics: OutputMonitorFrontendMetrics) =>
+  invoke<void>("report_output_monitor_frontend_diagnostics", { metrics });
+export const getOutputMonitorDiagnostics = (sourceId?: string | null) =>
+  invoke<OutputMonitorDiagnostics>("get_output_monitor_diagnostics", { sourceId });
 export const setDefaultOutputPatch = (patchId: string | null) =>
   invoke<void>("set_default_output_patch", { patchId });
 export const refreshDevices = () => invoke<void>("refresh_devices");

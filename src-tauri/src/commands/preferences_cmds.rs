@@ -3,8 +3,7 @@
 use std::f32::consts::PI;
 use std::sync::{Arc, Mutex};
 
-use base64::Engine as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
@@ -221,60 +220,162 @@ where
 
 #[derive(Debug, Serialize)]
 pub struct OutputMonitorSource {
-    id: String,
-    name: String,
+    pub id: String,
+    pub name: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct OutputMonitorFrame {
-    source_id: String,
-    status: &'static str,
-    sequence: u64,
+const OUTPUT_MONITOR_HEADER_LEN: usize = 64;
+const OUTPUT_MONITOR_MAX_WIDTH: u32 = 640;
+const OUTPUT_MONITOR_MAX_HEIGHT: u32 = 360;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputMonitorFrontendMetrics {
+    #[serde(alias = "source_id")]
+    pub source_id: Option<String>,
+    #[serde(alias = "session_id")]
+    pub session: Option<u64>,
+    pub active: bool,
+    #[serde(alias = "received_fps")]
+    pub received_fps: Option<f64>,
+    #[serde(alias = "displayed_fps")]
+    pub displayed_fps: Option<f64>,
+    #[serde(alias = "received_frames")]
+    pub received_frames: u64,
+    #[serde(alias = "displayed_frames")]
+    pub displayed_frames: u64,
+    #[serde(alias = "frame_age_last_ms")]
+    pub frame_age_last_ms: Option<f64>,
+    #[serde(alias = "frame_age_average_ms")]
+    pub frame_age_average_ms: Option<f64>,
+    #[serde(alias = "frame_age_max_ms")]
+    pub frame_age_max_ms: Option<f64>,
+    #[serde(alias = "conversion_average_ms")]
+    pub conversion_average_ms: Option<f64>,
+    #[serde(alias = "conversion_max_ms")]
+    pub conversion_max_ms: Option<f64>,
+    #[serde(alias = "request_average_ms")]
+    pub request_average_ms: Option<f64>,
+    #[serde(alias = "request_max_ms")]
+    pub request_max_ms: Option<f64>,
+    #[serde(alias = "sampled_at_unix_ms")]
+    pub sampled_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputMonitorBinaryDiagnostics {
+    pub requests: u64,
+    pub frame_packets: u64,
+    pub black_packets: u64,
+    pub unchanged_packets: u64,
+    pub no_frame_packets: u64,
+    pub payload_bytes: u64,
+    pub total_prepare_us: u64,
+    pub maximum_prepare_us: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputMonitorDiagnostics {
+    pub capture: Option<crate::engine::output_engine::OutputMonitorCaptureDiagnostics>,
+    pub binary: OutputMonitorBinaryDiagnostics,
+    pub frontend: Option<OutputMonitorFrontendMetrics>,
+}
+
+static OUTPUT_MONITOR_BINARY_DIAGNOSTICS: std::sync::OnceLock<Mutex<OutputMonitorBinaryDiagnostics>> = std::sync::OnceLock::new();
+static OUTPUT_MONITOR_FRONTEND_DIAGNOSTICS: std::sync::OnceLock<Mutex<Option<OutputMonitorFrontendMetrics>>> = std::sync::OnceLock::new();
+
+fn unix_timestamp_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .min(u64::MAX as u128) as u64
+}
+
+fn record_monitor_packet(status: u8, payload_bytes: usize, prepare_us: u32) {
+    let stats = OUTPUT_MONITOR_BINARY_DIAGNOSTICS.get_or_init(Default::default);
+    if let Ok(mut stats) = stats.lock() {
+        stats.requests = stats.requests.saturating_add(1);
+        match status {
+            1 => stats.frame_packets = stats.frame_packets.saturating_add(1),
+            2 => stats.unchanged_packets = stats.unchanged_packets.saturating_add(1),
+            3 => stats.black_packets = stats.black_packets.saturating_add(1),
+            _ => stats.no_frame_packets = stats.no_frame_packets.saturating_add(1),
+        }
+        stats.payload_bytes = stats.payload_bytes.saturating_add(payload_bytes as u64);
+        stats.total_prepare_us = stats.total_prepare_us.saturating_add(prepare_us as u64);
+        stats.maximum_prepare_us = stats.maximum_prepare_us.max(prepare_us);
+    }
+}
+
+/// Encode one output monitor packet. Shared with the standalone native
+/// benchmark so it exercises the production packet layout.
+///
+/// Header offsets are QLMF magic (0), version/header length (4/6), status and
+/// BGRA8 format (8/9), reserved (10), width/height/stride (12/16/20), sequence
+/// and session (24/32), capture/response Unix microseconds (40/48), preparation
+/// microseconds (56), and payload byte length (60). Only status 1 has pixels.
+pub fn encode_output_monitor_packet(
+    status: u8,
     width: u32,
     height: u32,
-    data_url: Option<String>,
-    error: Option<String>,
-}
-
-fn output_monitor_response(source_id: String, status: &'static str) -> OutputMonitorFrame {
-    OutputMonitorFrame {
-        source_id,
-        status,
-        sequence: 0,
-        width: 0,
-        height: 0,
-        data_url: None,
-        error: None,
+    stride: u32,
+    sequence: u64,
+    session: u64,
+    captured_at_us: u64,
+    prepare_us: u32,
+    payload: &[u8],
+) -> Result<Vec<u8>, String> {
+    if status > 3 {
+        return Err("invalid output monitor status".into());
     }
-}
-
-fn bgra_bmp_data_url(frame: &crate::engine::network_io::BgraFrame) -> Result<String, String> {
-    frame.validate()?;
-    let row_bytes = frame.width.checked_mul(4).ok_or("monitor frame width overflow")? as usize;
-    let image_bytes = row_bytes.checked_mul(frame.height as usize).ok_or("monitor frame size overflow")?;
-    let file_bytes = 54usize.checked_add(image_bytes).ok_or("monitor bitmap size overflow")?;
-    let mut bitmap = Vec::with_capacity(file_bytes);
-    bitmap.extend_from_slice(b"BM");
-    bitmap.extend_from_slice(&(file_bytes as u32).to_le_bytes());
-    bitmap.extend_from_slice(&[0; 4]);
-    bitmap.extend_from_slice(&54_u32.to_le_bytes());
-    bitmap.extend_from_slice(&40_u32.to_le_bytes());
-    bitmap.extend_from_slice(&(frame.width as i32).to_le_bytes());
-    // Negative height declares the existing top-down BGRA row order.
-    bitmap.extend_from_slice(&(-(frame.height as i32)).to_le_bytes());
-    bitmap.extend_from_slice(&1_u16.to_le_bytes());
-    bitmap.extend_from_slice(&32_u16.to_le_bytes());
-    bitmap.extend_from_slice(&0_u32.to_le_bytes());
-    bitmap.extend_from_slice(&(image_bytes as u32).to_le_bytes());
-    bitmap.extend_from_slice(&[0; 16]);
-    for row in 0..frame.height as usize {
-        let offset = row * frame.stride as usize;
-        bitmap.extend_from_slice(&frame.data[offset..offset + row_bytes]);
+    if matches!(status, 1 | 3)
+        && (width == 0 || height == 0 || width > OUTPUT_MONITOR_MAX_WIDTH || height > OUTPUT_MONITOR_MAX_HEIGHT)
+    {
+        return Err("output monitor dimensions must be within 1..=640×360".into());
     }
-    Ok(format!(
-        "data:image/bmp;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bitmap)
-    ))
+    if status != 1 && !payload.is_empty() {
+        return Err("output monitor payload is only valid for frame packets".into());
+    }
+    if matches!(status, 0 | 2) && (width != 0 || height != 0 || stride != 0) {
+        return Err("no_frame and unchanged packets must not include dimensions".into());
+    }
+    if matches!(status, 1 | 3) {
+        let minimum_stride = width.checked_mul(4).ok_or("output monitor stride overflow")?;
+        if stride != minimum_stride {
+            return Err("output monitor v1 requires tightly packed BGRA rows".into());
+        }
+        if status == 1 {
+            let expected = (stride as usize)
+                .checked_mul(height as usize)
+                .ok_or("output monitor payload size overflow")?;
+            if payload.len() != expected {
+                return Err("output monitor payload length does not match stride and height".into());
+            }
+        }
+    }
+    let payload_len = u32::try_from(payload.len()).map_err(|_| "output monitor payload too large")?;
+    let mut packet = Vec::with_capacity(OUTPUT_MONITOR_HEADER_LEN + payload.len());
+    packet.extend_from_slice(b"QLMF");
+    packet.extend_from_slice(&1_u16.to_le_bytes());
+    packet.extend_from_slice(&(OUTPUT_MONITOR_HEADER_LEN as u16).to_le_bytes());
+    packet.push(status);
+    packet.push(1); // BGRA8
+    packet.extend_from_slice(&0_u16.to_le_bytes());
+    packet.extend_from_slice(&width.to_le_bytes());
+    packet.extend_from_slice(&height.to_le_bytes());
+    packet.extend_from_slice(&stride.to_le_bytes());
+    packet.extend_from_slice(&sequence.to_le_bytes());
+    packet.extend_from_slice(&session.to_le_bytes());
+    packet.extend_from_slice(&captured_at_us.to_le_bytes());
+    packet.extend_from_slice(&unix_timestamp_us().to_le_bytes());
+    packet.extend_from_slice(&prepare_us.to_le_bytes());
+    packet.extend_from_slice(&payload_len.to_le_bytes());
+    debug_assert_eq!(packet.len(), OUTPUT_MONITOR_HEADER_LEN);
+    packet.extend_from_slice(payload);
+    Ok(packet)
 }
 
 /// Return named output destinations from the machine-wide Preferences file.
@@ -335,85 +436,155 @@ pub fn list_output_monitor_sources(
 #[tauri::command]
 pub fn set_output_monitor_source(
     source_id: Option<String>,
+    selection_token: u64,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state
         .output_engine
-        .set_output_monitor_source(source_id.as_deref())
+        .set_output_monitor_source(source_id.as_deref(), selection_token)
         .map_err(|error| error.to_string())
+        .and_then(|accepted| accepted.then_some(()).ok_or_else(|| "stale output monitor selection token".into()))
 }
 
 #[tauri::command]
 pub async fn get_output_monitor_frame(
     source_id: String,
     after_sequence: Option<u64>,
+    selection_token: u64,
     app_handle: AppHandle,
-) -> Result<OutputMonitorFrame, String> {
+) -> Result<tauri::ipc::Response, String> {
     use crate::engine::output_engine::OutputMonitorFrameRead;
 
+    let started = std::time::Instant::now();
     let output_engine = Arc::clone(&app_handle.state::<AppState>().output_engine);
     let read = match output_engine
-        .output_monitor_frame(&source_id, after_sequence.unwrap_or(0))
+        .output_monitor_frame(&source_id, after_sequence.unwrap_or(0), selection_token)
     {
         Ok(read) => read,
-        Err(error) => {
-            let message = error.to_string();
-            let status = if message.contains("unavailable") || message.contains("not active") {
-                "unavailable"
-            } else {
-                "error"
-            };
-            let mut response = output_monitor_response(source_id, status);
-            response.error = Some(message);
-            return Ok(response);
-        }
+        Err(error) => return Err(error.to_string()),
     };
-    Ok(match read {
-        OutputMonitorFrameRead::NoFrame => output_monitor_response(source_id, "no_frame"),
-        OutputMonitorFrameRead::Unchanged { sequence } => OutputMonitorFrame {
-            sequence,
-            ..output_monitor_response(source_id, "unchanged")
-        },
-        OutputMonitorFrameRead::Frame { sequence, frame } => {
-            let failure_source_id = source_id.clone();
-            match tauri::async_runtime::spawn_blocking(move || {
-                let black = frame
-                    .data
-                    .chunks_exact(4)
-                    .all(|pixel| pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0);
-                if black {
-                    return OutputMonitorFrame {
-                        sequence,
-                        width: frame.width,
-                        height: frame.height,
-                        ..output_monitor_response(source_id, "black")
-                    };
-                }
-                match bgra_bmp_data_url(&frame) {
-                    Ok(data_url) => OutputMonitorFrame {
-                        sequence,
-                        width: frame.width,
-                        height: frame.height,
-                        data_url: Some(data_url),
-                        ..output_monitor_response(source_id, "frame")
-                    },
-                    Err(error) => {
-                        let mut response = output_monitor_response(source_id, "error");
-                        response.sequence = sequence;
-                        response.error = Some(error);
-                        response
-                    }
-                }
-            }).await {
-                Ok(response) => response,
-                Err(error) => {
-                    let mut response = output_monitor_response(failure_source_id, "error");
-                    response.error = Some(format!("Output monitor encoder task failed: {error}"));
-                    response
-                }
-            }
+    let mut status = 0_u8;
+    let mut width = 0_u32;
+    let mut height = 0_u32;
+    let mut stride = 0_u32;
+    let mut sequence = 0_u64;
+    let mut session = selection_token;
+    let mut captured_at_us = 0_u64;
+    let mut frame_data: Option<Arc<crate::engine::network_io::BgraFrame>> = None;
+    match read {
+        OutputMonitorFrameRead::NoFrame => {}
+        OutputMonitorFrameRead::Unchanged { sequence: value, session: actual_session, captured_at_us: captured } => {
+            status = 2;
+            sequence = value;
+            session = actual_session;
+            captured_at_us = captured;
         }
-    })
+        OutputMonitorFrameRead::Frame { sequence: value, session: actual_session, captured_at_us: captured, frame } => {
+            frame.validate().map_err(|error| error.to_string())?;
+            if frame.width == 0 || frame.height == 0 || frame.width > OUTPUT_MONITOR_MAX_WIDTH || frame.height > OUTPUT_MONITOR_MAX_HEIGHT {
+                return Err("output monitor frame dimensions exceed 640×360".into());
+            }
+            sequence = value;
+            session = actual_session;
+            captured_at_us = captured;
+            width = frame.width;
+            height = frame.height;
+            stride = frame.stride;
+            frame_data = Some(frame);
+        }
+    }
+    let (mut packet, payload_bytes) = if let Some(frame) = frame_data {
+        let row_bytes = (frame.width as usize).checked_mul(4).ok_or("output monitor row size overflow")?;
+        let stride_usize = frame.stride as usize;
+        let expected_bytes = stride_usize.checked_mul(frame.height as usize).ok_or("output monitor frame size overflow")?;
+        if frame.data.len() < expected_bytes || stride_usize < row_bytes {
+            return Err("invalid output monitor frame buffer".into());
+        }
+        let black = (0..frame.height as usize).all(|row| {
+            let start = row * stride_usize;
+            (0..frame.width as usize).all(|pixel| {
+                let offset = start + pixel * 4;
+                frame.data[offset] == 0 && frame.data[offset + 1] == 0 && frame.data[offset + 2] == 0
+            })
+        });
+        status = if black { 3 } else { 1 };
+        let payload = if black { &[] } else { &frame.data[..expected_bytes] };
+        let packet = encode_output_monitor_packet(status, width, height, stride, sequence, session, captured_at_us, 0, payload)?;
+        (packet, payload.len())
+    } else {
+        (encode_output_monitor_packet(status, width, height, stride, sequence, session, captured_at_us, 0, &[])?, 0)
+    };
+    let prepare_us = started.elapsed().as_micros().min(u32::MAX as u128) as u32;
+    packet[56..60].copy_from_slice(&prepare_us.to_le_bytes());
+    packet[48..56].copy_from_slice(&unix_timestamp_us().to_le_bytes());
+    record_monitor_packet(status, payload_bytes, prepare_us);
+    Ok(tauri::ipc::Response::new(packet))
+}
+
+#[tauri::command]
+pub fn get_output_monitor_diagnostics(
+    source_id: Option<String>,
+    state: State<'_, AppState>,
+) -> OutputMonitorDiagnostics {
+    collect_output_monitor_diagnostics(&state.output_engine, source_id.as_deref())
+}
+
+pub(crate) fn collect_output_monitor_diagnostics(
+    output_engine: &crate::engine::output_engine::OutputEngine,
+    source_id: Option<&str>,
+) -> OutputMonitorDiagnostics {
+    let capture = output_engine.output_monitor_diagnostics(source_id).ok();
+    let binary = OUTPUT_MONITOR_BINARY_DIAGNOSTICS
+        .get_or_init(Default::default)
+        .lock()
+        .map(|stats| stats.clone())
+        .unwrap_or_default();
+    let mut frontend = OUTPUT_MONITOR_FRONTEND_DIAGNOSTICS
+        .get_or_init(Default::default)
+        .lock()
+        .ok()
+        .and_then(|metrics| metrics.clone());
+    if let Some(metrics) = frontend.as_mut() {
+        if capture.is_none() || source_id.is_some_and(|source_id| metrics.source_id.as_deref() != Some(source_id)) {
+            metrics.active = false;
+        }
+    }
+    OutputMonitorDiagnostics { capture, binary, frontend }
+}
+
+#[tauri::command]
+pub fn report_output_monitor_frontend_diagnostics(
+    metrics: OutputMonitorFrontendMetrics,
+) -> Result<(), String> {
+    if metrics.source_id.as_ref().is_some_and(|source_id| source_id.len() > 256) {
+        return Err("output monitor source id is too long".into());
+    }
+    let measurements = [
+        metrics.received_fps,
+        metrics.displayed_fps,
+        metrics.frame_age_last_ms,
+        metrics.frame_age_average_ms,
+        metrics.frame_age_max_ms,
+        metrics.conversion_average_ms,
+        metrics.conversion_max_ms,
+        metrics.request_average_ms,
+        metrics.request_max_ms,
+    ];
+    if measurements.into_iter().flatten().any(|value| !value.is_finite() || value < 0.0) {
+        return Err("output monitor metrics must be finite non-negative numbers".into());
+    }
+    let mut latest = OUTPUT_MONITOR_FRONTEND_DIAGNOSTICS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "Output monitor diagnostics lock poisoned".to_string())?;
+    if latest.as_ref().is_some_and(|current| {
+        current.session > metrics.session
+            || (current.session == metrics.session && current.sampled_at_unix_ms > metrics.sampled_at_unix_ms)
+    }) {
+        return Ok(());
+    }
+    *latest = Some(metrics);
+    Ok(())
 }
 
 /// Replace output destinations while preserving the legacy fields for older
@@ -1471,22 +1642,52 @@ pub fn open_preferences_window(app_handle: AppHandle) -> Result<(), String> {
 mod output_monitor_tests {
     use super::*;
 
+    fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    }
+
     #[test]
-    fn monitor_bitmap_is_a_top_down_32_bit_bmp() {
-        let frame = crate::engine::network_io::BgraFrame {
-            width: 2,
-            height: 1,
-            stride: 8,
-            data: vec![0, 0, 255, 255, 0, 255, 0, 255],
-        };
-        let url = bgra_bmp_data_url(&frame).unwrap();
-        let encoded = url.strip_prefix("data:image/bmp;base64,").unwrap();
-        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
-        assert_eq!(&bytes[0..2], b"BM");
-        assert_eq!(i32::from_le_bytes(bytes[18..22].try_into().unwrap()), 2);
-        assert_eq!(i32::from_le_bytes(bytes[22..26].try_into().unwrap()), -1);
-        assert_eq!(u16::from_le_bytes(bytes[28..30].try_into().unwrap()), 32);
-        assert_eq!(&bytes[54..], frame.data.as_slice());
+    fn binary_packet_has_documented_little_endian_layout_and_payload() {
+        let payload = [1, 2, 3, 4, 5, 6, 7, 8];
+        let packet = encode_output_monitor_packet(1, 2, 1, 8, 0x0102_0304_0506_0708, 42, 99, 7, &payload).unwrap();
+        assert_eq!(&packet[0..4], b"QLMF");
+        assert_eq!(u16::from_le_bytes(packet[4..6].try_into().unwrap()), 1);
+        assert_eq!(u16::from_le_bytes(packet[6..8].try_into().unwrap()), 64);
+        assert_eq!(packet[8], 1);
+        assert_eq!(packet[9], 1);
+        assert_eq!(u32::from_le_bytes(packet[12..16].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(packet[20..24].try_into().unwrap()), 8);
+        assert_eq!(read_u64(&packet, 24), 0x0102_0304_0506_0708);
+        assert_eq!(read_u64(&packet, 32), 42);
+        assert_eq!(read_u64(&packet, 40), 99);
+        assert_eq!(u32::from_le_bytes(packet[56..60].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(packet[60..64].try_into().unwrap()), 8);
+        assert_eq!(&packet[64..], &payload);
+    }
+
+    #[test]
+    fn non_frame_status_packets_have_no_payload() {
+        for status in [0, 2] {
+            let packet = encode_output_monitor_packet(status, 0, 0, 0, 5, 6, 7, 8, &[]).unwrap();
+            assert_eq!(packet.len(), OUTPUT_MONITOR_HEADER_LEN);
+            assert_eq!(packet[8], status);
+            assert_eq!(u32::from_le_bytes(packet[60..64].try_into().unwrap()), 0);
+        }
+        let black = encode_output_monitor_packet(3, 640, 360, 2560, 5, 6, 7, 8, &[]).unwrap();
+        assert_eq!(black.len(), OUTPUT_MONITOR_HEADER_LEN);
+    }
+
+    #[test]
+    fn frame_dimensions_are_bounded() {
+        assert!(encode_output_monitor_packet(1, 0, 1, 0, 1, 1, 1, 0, &[]).is_err());
+        assert!(encode_output_monitor_packet(1, 641, 360, 2564, 1, 1, 1, 0, &[0; 4]).is_err());
+        assert!(encode_output_monitor_packet(3, 640, 361, 2560, 1, 1, 1, 0, &[]).is_err());
+        assert!(encode_output_monitor_packet(1, 640, 360, 2560, 1, 1, 1, 0, &vec![0; 2560 * 360]).is_ok());
+        assert!(encode_output_monitor_packet(1, 1, 1, 8, 1, 1, 1, 0, &[0; 8]).is_err());
+        assert!(encode_output_monitor_packet(1, 1, 1, 4, 1, 1, 1, 0, &[0; 3]).is_err());
+        assert!(encode_output_monitor_packet(1, 1, 1, 4, 1, 1, 1, 0, &[0; 5]).is_err());
+        assert!(encode_output_monitor_packet(9, 0, 0, 0, 1, 1, 1, 0, &[]).is_err());
+        assert!(encode_output_monitor_packet(2, 1, 1, 4, 1, 1, 1, 0, &[]).is_err());
     }
 }
 

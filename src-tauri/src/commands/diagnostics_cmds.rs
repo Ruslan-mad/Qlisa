@@ -38,6 +38,7 @@ pub struct DiagnosticsSnapshot {
     pub audio: AudioDiagnostics,
     pub video: VideoDiagnostics,
     pub network: NetworkDiagnostics,
+    pub output_monitor: crate::commands::preferences_cmds::OutputMonitorDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -871,6 +872,7 @@ fn collect_snapshot(state: &AppState) -> DiagnosticsSnapshot {
         audio: AudioDiagnostics { health: health.to_string(), source_counts: counts, scheduler, memory, peaks, events, sources },
         video: collect_video_snapshot(state),
         network,
+        output_monitor: crate::commands::preferences_cmds::collect_output_monitor_diagnostics(&state.output_engine, None),
     }
 }
 

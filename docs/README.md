@@ -22,6 +22,8 @@
   actions, shared capabilities, mixed values, Fit routing, and loop restrictions.
 - [Network I/O](network-io-design.md) — current network worker behavior and
   implementation caveats.
+- [Output Monitor](output-monitor.md) — binary frame packet, renderer and
+  Canvas flow, diagnostics, and native benchmark limits.
 - [Runtime control audit](runtime-control-audit.md) — current transport fixes,
   regression evidence, and remaining device-validation risks.
 - [Audio trim loop regression](audio-trim-loop-regression.md) — PCM and video

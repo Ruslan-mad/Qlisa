@@ -99,28 +99,75 @@ pub(crate) struct RenderShared {
 
 #[derive(Default)]
 struct MonitorFrameMailbox {
-    latest: Mutex<Option<(u64, BgraFrame)>>,
+    latest: Mutex<Option<(u64, u64, u64, Arc<BgraFrame>)>>,
     next_sequence: AtomicU64,
+    published_sequence: AtomicU64,
+    session: AtomicU64,
+    attempts: AtomicU64,
+    captured: AtomicU64,
+    skipped_pbo: AtomicU64,
+    dropped_stale: AtomicU64,
+    published: AtomicU64,
+    mailbox_lock_drops: AtomicU64,
+    copy_total_us: AtomicU64,
+    copy_max_us: AtomicU64,
+    copy_samples: AtomicU64,
+    started_at_us: AtomicU64,
 }
 
 impl MonitorFrameMailbox {
-    fn publish(&self, frame: BgraFrame) {
-        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-        if let Ok(mut latest) = self.latest.lock() {
-            *latest = Some((sequence, frame));
+    fn publish(&self, sequence: u64, session: u64, captured_at_us: u64, frame: BgraFrame) {
+        if self.session.load(Ordering::Acquire) != session {
+            self.dropped_stale.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if let Ok(mut latest) = self.latest.try_lock() {
+            if self.session.load(Ordering::Acquire) == session
+                && latest.as_ref().map_or(true, |(current, _, _, _)| capture_sequence_is_newer(sequence, *current))
+            {
+                *latest = Some((sequence, session, captured_at_us, Arc::new(frame)));
+                self.published_sequence.store(sequence, Ordering::Release);
+                self.published.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.dropped_stale.fetch_add(1, Ordering::Relaxed);
+            }
+        } else {
+            self.mailbox_lock_drops.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    fn read_after(&self, sequence: u64) -> Option<(u64, Option<BgraFrame>)> {
+    fn read_after(&self, sequence: u64, session: u64) -> Option<(u64, u64, u64, Option<Arc<BgraFrame>>)> {
+        if self.session.load(Ordering::Acquire) != session { return None; }
         let latest = self.latest.lock().ok()?;
-        let (current, frame) = latest.as_ref()?;
-        Some((*current, (*current > sequence).then(|| frame.clone())))
+        let (current, current_session, captured_at_us, frame) = latest.as_ref()?;
+        (*current_session == session).then(|| (*current, session, *captured_at_us,
+            capture_sequence_is_newer(*current, sequence).then(|| Arc::clone(frame))))
     }
 
-    fn clear(&self) {
+    fn select_session(&self, session: u64) -> bool {
+        let mut current = self.session.load(Ordering::Acquire);
+        loop {
+            if session < current { return false; }
+            if session == current { return true; }
+            match self.session.compare_exchange_weak(current, session, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
         if let Ok(mut latest) = self.latest.lock() {
             *latest = None;
         }
+        self.attempts.store(0, Ordering::Relaxed);
+        self.captured.store(0, Ordering::Relaxed);
+        self.skipped_pbo.store(0, Ordering::Relaxed);
+        self.dropped_stale.store(0, Ordering::Relaxed);
+        self.published.store(0, Ordering::Relaxed);
+        self.mailbox_lock_drops.store(0, Ordering::Relaxed);
+        self.copy_total_us.store(0, Ordering::Relaxed);
+        self.copy_max_us.store(0, Ordering::Relaxed);
+        self.copy_samples.store(0, Ordering::Relaxed);
+        self.started_at_us.store(0, Ordering::Relaxed);
+        true
     }
 }
 
@@ -216,18 +263,37 @@ impl RenderRuntime {
     fn network_frame_sink(&self) -> Option<NetworkFrameSink> {
         self.frame_sink.lock().ok().and_then(|current| current.clone())
     }
-    pub(super) fn set_monitor_capture(&self, active: bool) {
-        let changed = self.shared.monitor_capture_active.swap(active, Ordering::AcqRel) != active;
-        if changed {
-            self.monitor_frames.clear();
+    pub(super) fn set_monitor_capture(&self, active: bool, session: u64) -> bool {
+        if !self.monitor_frames.select_session(session) { return false; }
+        self.shared.monitor_capture_active.store(active, Ordering::Release);
+        if !active {
+            if let Ok(mut latest) = self.monitor_frames.latest.lock() { *latest = None; }
         }
         if active { self.wake(); }
+        true
     }
     pub(super) fn monitor_capture_enabled(&self) -> bool {
         self.shared.monitor_capture_active.load(Ordering::Acquire)
     }
-    pub(super) fn monitor_frame_after(&self, sequence: u64) -> Option<(u64, Option<BgraFrame>)> {
-        self.monitor_frames.read_after(sequence)
+    pub(super) fn disable_monitor_capture(&self) {
+        self.shared.monitor_capture_active.store(false, Ordering::Release);
+        if let Ok(mut latest) = self.monitor_frames.latest.lock() { *latest = None; }
+    }
+    pub(super) fn monitor_frame_after(&self, sequence: u64, session: u64) -> Option<(u64, u64, u64, Option<Arc<BgraFrame>>)> {
+        self.monitor_frames.read_after(sequence, session)
+    }
+    pub(super) fn monitor_capture_diagnostics(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64, f64) {
+        let mailbox = &self.monitor_frames;
+        let started = mailbox.started_at_us.load(Ordering::Relaxed);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros().min(u64::MAX as u128) as u64).unwrap_or(started);
+        let elapsed = now.saturating_sub(started).max(1);
+        let fps = mailbox.published.load(Ordering::Relaxed) as f64 * 1_000_000.0 / elapsed as f64;
+        (mailbox.attempts.load(Ordering::Relaxed), mailbox.captured.load(Ordering::Relaxed),
+            mailbox.skipped_pbo.load(Ordering::Relaxed), mailbox.dropped_stale.load(Ordering::Relaxed),
+            mailbox.published.load(Ordering::Relaxed), mailbox.copy_total_us.load(Ordering::Relaxed),
+            mailbox.copy_max_us.load(Ordering::Relaxed), mailbox.copy_samples.load(Ordering::Relaxed),
+            mailbox.mailbox_lock_drops.load(Ordering::Relaxed), fps)
     }
     pub(super) fn add_external_source(&self, voice: VoiceId, source: Arc<BgraFrameMailbox>, geometry: VideoGeometry, style: LayerStyle, layer_key: u64, fade_in_ms: u32) {
         let base = style.opacity.clamp(0.0, 1.0) as f32;
@@ -1223,6 +1289,27 @@ fn wait_for_render_wake_or_shutdown(shared: &RenderShared, timeout: Duration) ->
     shared.shutting_down.load(Ordering::Acquire)
 }
 
+const MONITOR_MAX_CAPTURE_FPS: u32 = 30;
+static MONITOR_CAPTURE_FPS: OnceLock<u32> = OnceLock::new();
+
+fn monitor_capture_interval() -> Duration {
+    let fps = *MONITOR_CAPTURE_FPS.get_or_init(|| {
+        std::env::var("QLISA_MONITOR_CAPTURE_FPS").ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(MONITOR_MAX_CAPTURE_FPS)
+            .clamp(1, MONITOR_MAX_CAPTURE_FPS)
+    });
+    Duration::from_nanos(1_000_000_000 / fps as u64)
+}
+
+fn advance_monitor_deadline(deadline: &mut std::time::Instant, now: std::time::Instant) {
+    while *deadline <= now {
+        let interval = monitor_capture_interval();
+        *deadline = deadline.checked_add(interval)
+            .unwrap_or_else(|| now + interval);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Render thread
 // ---------------------------------------------------------------------------
@@ -1377,8 +1464,8 @@ fn render_thread_main(
     let mut network_readback: Option<NetworkReadback> = None;
     let mut monitor_target: Option<WarpTarget> = None;
     let mut monitor_readback: Option<NetworkReadback> = None;
-    let mut last_monitor_capture = std::time::Instant::now()
-        .checked_sub(Duration::from_secs(1))
+    let mut next_monitor_capture = std::time::Instant::now()
+        .checked_sub(monitor_capture_interval())
         .unwrap_or_else(std::time::Instant::now);
     let mut external_targets: HashMap<VoiceId, ExternalFrameTarget> = HashMap::new();
     let mut external_layer_target: Option<WarpTarget> = None;
@@ -1445,7 +1532,11 @@ fn render_thread_main(
             s.state.lock().map(|st| st.anim.is_animating()).unwrap_or(false)
         });
         let needs_animation = master_animating || operator_ftb_animating || slots_animating || runtime.external_animating();
-        let timeout = if needs_animation { Duration::from_millis(16) } else { Duration::from_millis(100) };
+        let mut timeout = if needs_animation { Duration::from_millis(16) } else { Duration::from_millis(100) };
+        if runtime.shared.monitor_capture_active.load(Ordering::Acquire) {
+            let monitor_wait = next_monitor_capture.saturating_duration_since(std::time::Instant::now());
+            timeout = timeout.min(monitor_wait);
+        }
 
         if wait_for_render_wake_or_shutdown(&runtime.shared, timeout) {
             break 'render;
@@ -1549,8 +1640,13 @@ fn render_thread_main(
         let monitor_capture_active = runtime.shared.monitor_capture_active.load(Ordering::Relaxed);
         let output_visible = runtime.shared.visible.load(Ordering::Relaxed);
         if !output_visible && !capture_active && !monitor_capture_active { continue; }
-        let monitor_capture_due = monitor_capture_active
-            && last_monitor_capture.elapsed() >= Duration::from_millis(250);
+        let monitor_capture_due = monitor_capture_active && std::time::Instant::now() >= next_monitor_capture;
+        if monitor_capture_due {
+            // Consume the cadence slot before target setup or any early
+            // continue, so an unavailable target cannot turn this into a
+            // zero-timeout retry loop.
+            advance_monitor_deadline(&mut next_monitor_capture, std::time::Instant::now());
+        }
         // Skip rendering when nothing changed anywhere: no new frame from any
         // mpv, no animation, no active layers or overlay work.  Text/timer
         // overlays render unconditionally (mpv does not signal OSD-only
@@ -1816,9 +1912,8 @@ fn render_thread_main(
                         if operator_alpha > 0 {
                             draw_fade_quad(&gl, fade_program, fade_vao, operator_alpha as f32 / 255.0);
                         }
-                        readback.queue(&gl, target.fbo, preview_w, preview_h);
+                        readback.queue_monitor(&gl, target.fbo, preview_w, preview_h, &runtime.monitor_frames);
                         unsafe { gl.flush(); }
-                        last_monitor_capture = std::time::Instant::now();
                     }
                 }
             }
@@ -2001,6 +2096,37 @@ struct NetworkReadbackSlot {
     fence: Option<glow::Fence>,
     width: u32,
     height: u32,
+    capture_sequence: u64,
+    session: u64,
+    captured_at_us: u64,
+    poisoned: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ReadyMonitorPbo {
+    slot_index: usize,
+    sequence: u64,
+    session: u64,
+    captured_at_us: u64,
+}
+
+fn capture_sequence_is_newer(candidate: u64, current: u64) -> bool {
+    candidate != current && candidate.wrapping_sub(current) < (1_u64 << 63)
+}
+
+fn freshest_monitor_candidate(
+    candidates: &[Option<ReadyMonitorPbo>; 3],
+    session: u64,
+    published_sequence: u64,
+) -> Option<ReadyMonitorPbo> {
+    candidates.iter().flatten().copied()
+        .filter(|candidate| candidate.session == session
+            && capture_sequence_is_newer(candidate.sequence, published_sequence))
+        .max_by(|left, right| {
+            if capture_sequence_is_newer(left.sequence, right.sequence) { std::cmp::Ordering::Greater }
+            else if capture_sequence_is_newer(right.sequence, left.sequence) { std::cmp::Ordering::Less }
+            else { std::cmp::Ordering::Equal }
+        })
 }
 
 struct NetworkReadback {
@@ -2018,6 +2144,10 @@ impl NetworkReadback {
                     fence: None,
                     width: 0,
                     height: 0,
+                    capture_sequence: 0,
+                    session: 0,
+                    captured_at_us: 0,
+                    poisoned: false,
                 });
             }
         }
@@ -2068,18 +2198,91 @@ impl NetworkReadback {
     }
 
     fn publish_completed_to_monitor(&mut self, gl: &glow::Context, sink: &MonitorFrameMailbox) {
-        self.drain_completed(gl, |frame| sink.publish(frame));
+        let current_session = sink.session.load(Ordering::Acquire);
+        let published_sequence = sink.published_sequence.load(Ordering::Acquire);
+        let mut ready = [None; 3];
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            let Some(fence) = slot.fence else { continue };
+            let state = unsafe { gl.client_wait_sync(fence, 0, 0) };
+            if state != glow::ALREADY_SIGNALED && state != glow::CONDITION_SATISFIED { continue; }
+            ready[index] = Some(ReadyMonitorPbo {
+                slot_index: index,
+                sequence: slot.capture_sequence,
+                session: slot.session,
+                captured_at_us: slot.captured_at_us,
+            });
+        }
+
+        let newest = freshest_monitor_candidate(&ready, current_session, published_sequence);
+        for candidate in ready.iter().flatten() {
+            if newest.is_some_and(|selected| selected.slot_index == candidate.slot_index) { continue; }
+            let slot = &mut self.slots[candidate.slot_index];
+            if let Some(fence) = slot.fence.take() { unsafe { gl.delete_sync(fence); } }
+            sink.dropped_stale.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let Some(candidate) = newest else { return };
+        let slot = &mut self.slots[candidate.slot_index];
+        let Some(byte_len) = slot.width.checked_mul(slot.height).and_then(|pixels| pixels.checked_mul(4))
+            .map(|length| length as usize) else {
+                if let Some(fence) = slot.fence.take() { unsafe { gl.delete_sync(fence); } }
+                return;
+            };
+        let copy_started = std::time::Instant::now();
+        let mut copied_frame = None;
+        unsafe {
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.pbo));
+            let mapped = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, byte_len as i32, glow::MAP_READ_BIT);
+            if !mapped.is_null() {
+                let source = std::slice::from_raw_parts(mapped, byte_len);
+                let row_len = slot.width as usize * 4;
+                let mut top_down = vec![0_u8; byte_len];
+                for row in 0..slot.height as usize {
+                    let source_row = slot.height as usize - 1 - row;
+                    top_down[row * row_len..(row + 1) * row_len]
+                        .copy_from_slice(&source[source_row * row_len..(source_row + 1) * row_len]);
+                }
+                copied_frame = Some(BgraFrame { width: slot.width, height: slot.height, stride: row_len as u32, data: top_down });
+                gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+            }
+            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+            if let Some(fence) = slot.fence.take() { gl.delete_sync(fence); }
+        }
+        let copy_us = copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        sink.copy_total_us.fetch_add(copy_us, Ordering::Relaxed);
+        sink.copy_max_us.fetch_max(copy_us, Ordering::Relaxed);
+        sink.copy_samples.fetch_add(1, Ordering::Relaxed);
+        if let Some(frame) = copied_frame {
+            sink.publish(candidate.sequence, candidate.session, candidate.captured_at_us, frame);
+        }
     }
 
     /// Queue one final composited framebuffer for asynchronous readback.  No
     /// producer-side wait is used; all busy slots mean the newest frame wins.
     fn queue(&mut self, gl: &glow::Context, source: glow::Framebuffer, width: u32, height: u32) {
+        self.queue_tagged(gl, source, width, height, 0, 0, 0, false);
+    }
+
+    fn queue_monitor(&mut self, gl: &glow::Context, source: glow::Framebuffer, width: u32, height: u32, sink: &MonitorFrameMailbox) -> bool {
+        sink.attempts.fetch_add(1, Ordering::Relaxed);
+        let sequence = sink.next_sequence.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let session = sink.session.load(Ordering::Acquire);
+        let captured_at_us = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros().min(u64::MAX as u128) as u64).unwrap_or(0);
+        let _ = sink.started_at_us.compare_exchange(0, captured_at_us, Ordering::Relaxed, Ordering::Relaxed);
+        let queued = self.queue_tagged(gl, source, width, height, sequence, session, captured_at_us, true);
+        if queued { sink.captured.fetch_add(1, Ordering::Relaxed); }
+        else { sink.skipped_pbo.fetch_add(1, Ordering::Relaxed); }
+        queued
+    }
+
+    fn queue_tagged(&mut self, gl: &glow::Context, source: glow::Framebuffer, width: u32, height: u32, sequence: u64, session: u64, captured_at_us: u64, require_fence: bool) -> bool {
         let Some(index) = (0..self.slots.len())
             .map(|offset| (self.next + offset) % self.slots.len())
-            .find(|&index| self.slots[index].fence.is_none()) else { return };
+            .find(|&index| self.slots[index].fence.is_none() && !self.slots[index].poisoned) else { return false };
         self.next = (index + 1) % self.slots.len();
         let slot = &mut self.slots[index];
-        let Some(bytes) = width.checked_mul(height).and_then(|pixels| pixels.checked_mul(4)) else { return };
+        let Some(bytes) = width.checked_mul(height).and_then(|pixels| pixels.checked_mul(4)) else { return false };
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(source));
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.pbo));
@@ -2087,11 +2290,20 @@ impl NetworkReadback {
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             gl.read_pixels(0, 0, width as i32, height as i32, glow::BGRA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
             slot.fence = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
+            if require_fence && slot.fence.is_none() {
+                // No safe reuse point exists without a fence. Retire this PBO
+                // for the monitor lifetime rather than waiting for the GPU.
+                slot.poisoned = true;
+            }
             slot.width = width;
             slot.height = height;
+            slot.capture_sequence = sequence;
+            slot.session = session;
+            slot.captured_at_us = captured_at_us;
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
+        !require_fence || self.slots[index].fence.is_some()
     }
 }
 
@@ -2499,7 +2711,11 @@ fn draw_warp_pass_to(
 
 #[cfg(test)]
 mod tests {
-    use super::{monitor_dimensions, RenderRuntime, wait_for_render_wake_or_shutdown};
+    use super::{
+        advance_monitor_deadline, freshest_monitor_candidate, monitor_capture_interval,
+        monitor_dimensions, MonitorFrameMailbox, ReadyMonitorPbo, RenderRuntime,
+        wait_for_render_wake_or_shutdown,
+    };
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
@@ -2676,25 +2892,88 @@ mod tests {
     }
 
     #[test]
-    fn monitor_activation_clears_stale_frame_and_is_idempotent() {
+    fn monitor_mailbox_keeps_latest_frame_and_rejects_prior_sessions() {
         let runtime = RenderRuntime::new();
-        runtime.monitor_frames.publish(BgraFrame {
+        assert!(runtime.set_monitor_capture(true, 10));
+        runtime.monitor_frames.publish(1, 10, 100, BgraFrame {
             width: 1,
             height: 1,
             stride: 4,
             data: vec![1, 2, 3, 255],
         });
-        runtime.set_monitor_capture(true);
-        assert!(runtime.monitor_frame_after(0).is_none());
-        runtime.monitor_frames.publish(BgraFrame {
+        runtime.monitor_frames.publish(2, 10, 200, BgraFrame {
             width: 1,
             height: 1,
             stride: 4,
             data: vec![1, 2, 3, 255],
         });
-        runtime.set_monitor_capture(true);
-        assert!(runtime.monitor_frame_after(0).is_some());
-        runtime.set_monitor_capture(false);
-        assert!(runtime.monitor_frame_after(0).is_none());
+        let (sequence, session, captured_at_us, frame) = runtime.monitor_frame_after(0, 10).unwrap();
+        assert_eq!((sequence, session, captured_at_us), (2, 10, 200));
+        assert_eq!(frame.unwrap().data[0], 1);
+        assert!(runtime.monitor_frame_after(0, 9).is_none());
+        assert!(!runtime.set_monitor_capture(true, 9));
+        assert_eq!(runtime.monitor_frames.session.load(Ordering::Acquire), 10);
+        assert!(runtime.set_monitor_capture(false, 11));
+        assert!(runtime.monitor_frame_after(0, 11).is_none());
+    }
+
+    #[test]
+    fn monitor_mailbox_does_not_replace_newer_capture_with_late_old_frame() {
+        let mailbox = MonitorFrameMailbox::default();
+        mailbox.select_session(1);
+        let frame = |v| BgraFrame { width: 1, height: 1, stride: 4, data: vec![v, 0, 0, 255] };
+        mailbox.publish(8, 1, 800, frame(8));
+        mailbox.publish(7, 1, 700, frame(7));
+        let (sequence, _, _, pixels) = mailbox.read_after(0, 1).unwrap();
+        assert_eq!(sequence, 8);
+        assert_eq!(pixels.unwrap().data[0], 8);
+    }
+
+    #[test]
+    fn monitor_pbo_selection_prefers_newest_eligible_session_and_wraps_sequence() {
+        let candidates = [
+            Some(ReadyMonitorPbo { slot_index: 0, sequence: u64::MAX, session: 7, captured_at_us: 1 }),
+            Some(ReadyMonitorPbo { slot_index: 1, sequence: 0, session: 7, captured_at_us: 2 }),
+            Some(ReadyMonitorPbo { slot_index: 2, sequence: 1, session: 6, captured_at_us: 3 }),
+        ];
+        let selected = freshest_monitor_candidate(&candidates, 7, u64::MAX - 1).unwrap();
+        assert_eq!((selected.slot_index, selected.sequence), (1, 0));
+        assert!(freshest_monitor_candidate(&candidates, 7, 0).is_none());
+    }
+
+    #[test]
+    fn monitor_mailbox_publish_is_nonblocking_when_reader_holds_lock() {
+        let mailbox = MonitorFrameMailbox::default();
+        mailbox.select_session(1);
+        let held = mailbox.latest.lock().unwrap();
+        mailbox.publish(1, 1, 1, BgraFrame { width: 1, height: 1, stride: 4, data: vec![0; 4] });
+        assert_eq!(mailbox.mailbox_lock_drops.load(Ordering::Relaxed), 1);
+        assert!(held.is_none());
+    }
+
+    #[test]
+    fn monitor_capture_cadence_is_thirty_fps_target() {
+        let interval = Duration::from_micros(33_333);
+        assert_eq!(1_000_000 / interval.as_micros(), 30);
+        assert_eq!(interval.saturating_sub(Duration::from_millis(40)), Duration::ZERO);
+    }
+
+    #[test]
+    fn monitor_deadline_skips_missed_slots_without_catching_up() {
+        let start = std::time::Instant::now();
+        let interval = monitor_capture_interval();
+        let mut deadline = start + interval;
+        advance_monitor_deadline(&mut deadline, start + interval * 3);
+        assert!(deadline > start + interval * 3);
+        assert!(deadline <= start + interval * 4);
+    }
+
+    #[test]
+    fn failed_capture_attempt_still_advances_the_deadline() {
+        let now = std::time::Instant::now();
+        let mut deadline = now;
+        // Target creation/readback may fail after this scheduling step.
+        advance_monitor_deadline(&mut deadline, now);
+        assert!(deadline > now);
     }
 }

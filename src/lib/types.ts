@@ -895,9 +895,60 @@ export interface DiagnosticsSnapshot {
   } | null;
   /** Optional video diagnostics. The page accepts newer backend fields defensively. */
   video?: Record<string, unknown> | null;
+  /** Bounded Output Monitor frontend/backend cadence and latency counters. */
+  outputMonitor?: OutputMonitorDiagnostics | null;
   /** Optional network diagnostics assembled from existing transport runtime state. */
   network?: Record<string, unknown> | null;
   [key: string]: unknown;
+}
+
+export interface OutputMonitorDiagnostics {
+  capture: {
+    attempts: number; captured: number; skippedPbo: number; droppedStale: number; copySamples: number;
+    published: number; totalCopyUs: number; maximumCopyUs: number; previewFps: number;
+  } | null;
+  binary: {
+    requests: number; framePackets: number; blackPackets: number; unchangedPackets: number;
+    noFramePackets: number; payloadBytes: number; totalPrepareUs: number; maximumPrepareUs: number;
+  };
+  frontend: OutputMonitorFrontendDiagnostics | null;
+}
+
+export interface OutputMonitorFrontendDiagnostics {
+  sourceId: string | null;
+  session: number | null;
+  active: boolean;
+  receivedFps: number | null;
+  displayedFps: number | null;
+  receivedFrames: number;
+  displayedFrames: number;
+  frameAgeLastMs: number | null;
+  frameAgeAverageMs: number | null;
+  frameAgeMaxMs: number | null;
+  conversionAverageMs: number | null;
+  conversionMaxMs: number | null;
+  requestAverageMs: number | null;
+  requestMaxMs: number | null;
+  sampledAtUnixMs: number;
+}
+
+/** Frontend-to-backend Output Monitor report payload. */
+export interface OutputMonitorFrontendMetrics {
+  source_id: string | null;
+  session: number | null;
+  active: boolean;
+  received_fps: number;
+  displayed_fps: number;
+  received_frames: number;
+  displayed_frames: number;
+  frame_age_last_ms: number | null;
+  frame_age_average_ms: number | null;
+  frame_age_max_ms: number | null;
+  conversion_average_ms: number | null;
+  conversion_max_ms: number | null;
+  request_average_ms: number | null;
+  request_max_ms: number | null;
+  sampled_at_unix_ms: number;
 }
 
 export interface CollectReport {

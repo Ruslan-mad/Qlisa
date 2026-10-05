@@ -19,6 +19,52 @@ beforeEach(() => {
 });
 
 describe("command wrappers forward the correct name + args", () => {
+  it("Output Monitor sends monotonic selection tokens and uses binary frame responses", async () => {
+    const first = cmd.setOutputMonitorSource("display-1", 100);
+    const second = cmd.setOutputMonitorSource(null, 101);
+    await Promise.all([first, second]);
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "set_output_monitor_source", { sourceId: "display-1", selectionToken: 100 });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "set_output_monitor_source", { sourceId: null, selectionToken: 101 });
+    const binary = new ArrayBuffer(64);
+    invokeMock.mockResolvedValueOnce(binary);
+    await expect(cmd.getOutputMonitorFrame("display-1", 12, 102)).resolves.toBe(binary);
+    expect(invokeMock).toHaveBeenLastCalledWith("get_output_monitor_frame", { sourceId: "display-1", afterSequence: 12, selectionToken: 102 });
+  });
+  it("drops concurrent frame polls across rapid source changes without queuing", async () => {
+    let releaseFirst!: (value: ArrayBuffer) => void;
+    invokeMock
+      .mockImplementationOnce(() => new Promise<ArrayBuffer>((resolve) => { releaseFirst = resolve; }))
+      .mockResolvedValueOnce(new ArrayBuffer(64));
+    const first = cmd.getOutputMonitorFrame("display-1", null, 103);
+    const skipped = await Promise.all(Array.from({ length: 99 }, (_, index) => cmd.getOutputMonitorFrame(`display-${index}`, null, 105 + index)));
+    expect(skipped.every((result) => result === null)).toBe(true);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    releaseFirst(new ArrayBuffer(64));
+    await first;
+    const latest = await cmd.getOutputMonitorFrame("display-latest", null, 999);
+    expect(latest).toBeInstanceOf(ArrayBuffer);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    expect(invokeMock).toHaveBeenLastCalledWith("get_output_monitor_frame", { sourceId: "display-latest", afterSequence: null, selectionToken: 999 });
+  });
+  it("releases the frame semaphore when invoke rejects", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("test fault")).mockResolvedValueOnce(new ArrayBuffer(64));
+    await expect(cmd.getOutputMonitorFrame("display-1", null, 1000)).rejects.toThrow("test fault");
+    await expect(cmd.getOutputMonitorFrame("display-2", null, 1001)).resolves.toBeInstanceOf(ArrayBuffer);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+  it("reports Output Monitor diagnostics through the existing snapshot API", async () => {
+    const metrics = {
+      source_id: "display-1", session: 110, active: true, received_fps: 30, displayed_fps: 30,
+      received_frames: 30, displayed_frames: 30, frame_age_last_ms: 24, frame_age_average_ms: 26,
+      frame_age_max_ms: 32, conversion_average_ms: 3, conversion_max_ms: 5,
+      request_average_ms: 8, request_max_ms: 14, sampled_at_unix_ms: 1_800_000_000_000,
+    };
+    await cmd.reportOutputMonitorFrontendDiagnostics(metrics);
+    expect(invokeMock).toHaveBeenCalledWith("report_output_monitor_frontend_diagnostics", { metrics });
+    await cmd.getOutputMonitorDiagnostics("display-1");
+    expect(invokeMock).toHaveBeenLastCalledWith("get_output_monitor_diagnostics", { sourceId: "display-1" });
+  });
+
   it("Number commands preserve master and offset payloads", async () => {
     await cmd.addNumberAction("number-1", "audio", 250);
     expect(invokeMock).toHaveBeenCalledWith("add_number_action", {

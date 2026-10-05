@@ -7,6 +7,17 @@ manual checks to run; an unchecked item is not a pass. / Эти изменени
 
 ## Manual checks / Ручные проверки
 
+- [ ] **Output Monitor / Монитор выходов.** Select each physical output in
+  turn, switch between outputs repeatedly, close and reopen the monitor, and
+  confirm an older selection never replaces the current preview. Check frame,
+  black, unchanged, and no-frame responses. Confirm the Canvas keeps the last
+  image for unchanged responses, follows aspect ratio after output resolution
+  changes, and clears on black. Check that polling has at most one invoke in
+  flight and stops after closing the monitor. Run the native `off`, `4`, and
+  `30` benchmark modes from `src-tauri` as described in
+  [Output Monitor](output-monitor.md); record results before treating the
+  performance target as verified. The native benchmark does not measure IPC,
+  WebView, Canvas conversion, or physical display scanout.
 - [ ] **Group and Number navigation / Группы и номера.** Double-click a Group
   or Number row to expand and collapse it. Use Left and Right for the same
   actions. Confirm a collapsed/expanded row consumes both keys, inline editing

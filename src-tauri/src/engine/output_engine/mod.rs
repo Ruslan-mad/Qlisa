@@ -64,9 +64,24 @@ pub struct MediaProbe {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputMonitorFrameRead {
-    Frame { sequence: u64, frame: BgraFrame },
-    Unchanged { sequence: u64 },
+    Frame { sequence: u64, session: u64, captured_at_us: u64, frame: Arc<BgraFrame> },
+    Unchanged { sequence: u64, session: u64, captured_at_us: u64 },
     NoFrame,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputMonitorCaptureDiagnostics {
+    pub attempts: u64,
+    pub captured: u64,
+    pub skipped_pbo: u64,
+    pub dropped_stale: u64,
+    pub published: u64,
+    pub total_copy_us: u64,
+    pub maximum_copy_us: u64,
+    pub copy_samples: u64,
+    pub mailbox_lock_drops: u64,
+    pub preview_fps: f64,
 }
 
 /// A quiescence gate for one native output's overlay mpv client.
@@ -555,7 +570,7 @@ impl NativeOutputPipeline {
         if is_network_output {
             self.visible.store(false, Ordering::Relaxed);
             self.render_runtime.hide();
-            self.render_runtime.set_monitor_capture(false);
+            self.render_runtime.disable_monitor_capture();
         }
         self.render_runtime.set_network_frame_sink(sink);
     }
@@ -853,6 +868,8 @@ pub struct OutputEngine {
     /// Serialises full output graph transitions without sharing the network
     /// publisher's short endpoint-map lock.
     network_configure_gate: Mutex<()>,
+    /// Orders Output Monitor selection commands across every renderer.
+    monitor_selection: Mutex<(u64, Option<String>)>,
     display_visibility: Arc<DisplayVisibilityState>,
     network_outputs: Arc<NetworkOutputManager>,
     browser_surface: BrowserSurfaceManager,
@@ -1103,6 +1120,7 @@ impl OutputEngine {
             voice_group_completed: Mutex::new(HashMap::new()),
             voice_group_completion_emitted: Mutex::new(HashSet::new()),
             network_configure_gate: Mutex::new(()),
+            monitor_selection: Mutex::new((0, None)),
             display_visibility,
             network_outputs: Arc::new(NetworkOutputManager::default()),
             browser_surface: BrowserSurfaceManager::new(app_handle.clone()),
@@ -1133,6 +1151,7 @@ impl OutputEngine {
             voice_group_completed: Mutex::new(HashMap::new()),
             voice_group_completion_emitted: Mutex::new(HashSet::new()),
             network_configure_gate: Mutex::new(()),
+            monitor_selection: Mutex::new((0, None)),
             display_visibility,
             network_outputs: Arc::new(NetworkOutputManager::default()),
             browser_surface: BrowserSurfaceManager::new(app_handle.clone()),
@@ -1848,7 +1867,11 @@ impl OutputEngine {
 
     /// Select the only output whose final compositor image is tapped by the
     /// operator monitor. `None` disables every tap immediately.
-    pub fn set_output_monitor_source(&self, source_id: Option<&str>) -> Result<()> {
+    pub fn set_output_monitor_source(&self, source_id: Option<&str>, session: u64) -> Result<bool> {
+        let mut selection = self.monitor_selection.lock().map_err(|_| anyhow!("output monitor selection lock poisoned"))?;
+        if session < selection.0 || (session == selection.0 && source_id != selection.1.as_deref()) {
+            return Ok(false);
+        }
         let pipelines = self.active_output_pipelines();
         if let Some(source_id) = source_id {
             let selected = pipelines
@@ -1863,16 +1886,25 @@ impl OutputEngine {
             let active = source_id
                 .map(|source_id| pipeline.config().id == source_id)
                 .unwrap_or(false);
-            pipeline.render_runtime.set_monitor_capture(active);
+            if !pipeline.render_runtime.set_monitor_capture(active, session) {
+                return Ok(false);
+            }
         }
-        Ok(())
+        *selection = (session, source_id.map(str::to_owned));
+        Ok(true)
     }
 
     pub fn output_monitor_frame(
         &self,
         source_id: &str,
         after_sequence: u64,
+        session: u64,
     ) -> Result<OutputMonitorFrameRead> {
+        let active_session = self.monitor_selection.lock()
+            .map_err(|_| anyhow!("output monitor selection lock poisoned"))?.0;
+        if session != active_session {
+            return Err(anyhow!("stale selection token"));
+        }
         let pipeline = self
             .outputs
             .lock()
@@ -1885,11 +1917,25 @@ impl OutputEngine {
         {
             return Err(anyhow!("Output monitor source '{source_id}' is not active"));
         }
-        Ok(match pipeline.render_runtime.monitor_frame_after(after_sequence) {
-            Some((sequence, Some(frame))) => OutputMonitorFrameRead::Frame { sequence, frame },
-            Some((sequence, None)) => OutputMonitorFrameRead::Unchanged { sequence },
+        Ok(match pipeline.render_runtime.monitor_frame_after(after_sequence, session) {
+            Some((sequence, current_session, captured_at_us, Some(frame))) => OutputMonitorFrameRead::Frame { sequence, session: current_session, captured_at_us, frame },
+            Some((sequence, current_session, captured_at_us, None)) => OutputMonitorFrameRead::Unchanged { sequence, session: current_session, captured_at_us },
             None => OutputMonitorFrameRead::NoFrame,
         })
+    }
+
+    pub fn output_monitor_diagnostics(&self, source_id: Option<&str>) -> Result<OutputMonitorCaptureDiagnostics> {
+        let selection = self.monitor_selection.lock()
+            .map_err(|_| anyhow!("output monitor selection lock poisoned"))?;
+        let id = source_id.or(selection.1.as_deref())
+            .ok_or_else(|| anyhow!("Output monitor has no selected source"))?;
+        let pipeline = self.outputs.lock()
+            .map_err(|_| anyhow!("output map poisoned"))?
+            .get(id).cloned()
+            .ok_or_else(|| anyhow!("Output monitor source '{id}' is unavailable"))?;
+        let (attempts, captured, skipped_pbo, dropped_stale, published, total_copy_us, maximum_copy_us, copy_samples, mailbox_lock_drops, preview_fps) =
+            pipeline.render_runtime.monitor_capture_diagnostics();
+        Ok(OutputMonitorCaptureDiagnostics { attempts, captured, skipped_pbo, dropped_stale, published, total_copy_us, maximum_copy_us, copy_samples, mailbox_lock_drops, preview_fps })
     }
 
     // ── Unified content display ──────────────────────────────────────────────

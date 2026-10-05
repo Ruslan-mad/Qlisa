@@ -40,8 +40,9 @@ issues typed Tauri commands and listens for backend events.
 
 ## Source updates after 1.5.11
 
-The working source contains seven follow-up fixes after the 1.5.11 baseline.
-They are not part of the published 1.5.11 release notes. Use
+The working source contains seven follow-up fixes and Output Monitor changes
+after the 1.5.11 baseline. They are not part of the published 1.5.11 release
+notes. Use
 [the manual regression checklist](BUGFIXES_NEXT.md) before release review.
 
 - Group and Number rows expand or collapse by double-click and Left/Right.
@@ -56,6 +57,10 @@ They are not part of the published 1.5.11 release notes. Use
 - Cue List pre-wait and post-wait cells show transport progress.
 - A held final video frame does not block continuation during post-wait.
 - Automatic transition labels use Russian translations in the Russian UI.
+- Output Monitor uses one binary pull request at a time, a three-PBO
+  nonblocking readback, and a Canvas preview. See the [Output Monitor guide](output-monitor.md)
+  for packet offsets, benchmark commands, and measurement limits. Native
+  performance results remain unverified until a benchmark run is recorded.
 
 Focused implementation notes: [Cue List navigation](cue-list-navigation.md),
 [headphone preview transport](headphone-preview-transport.md), and

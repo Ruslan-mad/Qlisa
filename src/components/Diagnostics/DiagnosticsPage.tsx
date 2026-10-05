@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useLocale } from "../../i18n";
 import { getDiagnosticsSnapshot, resetDiagnosticsStatistics } from "../../lib/commands";
 import type { DiagnosticsSnapshot } from "../../lib/types";
 import { videoSummaryModel, type VideoCueDiagnostics, type VideoSummaryDiagnostics } from "./videoDiagnosticsModel";
 import { networkBoolean, networkNumber, networkState, networkSummaryModel, networkText, type NetworkConnectionModel, type NetworkSummaryModel } from "./networkDiagnosticsModel";
+import { outputMonitorDiagnosticsModel } from "./outputMonitorDiagnosticsModel";
 
 type Tab = "overview" | "audio" | "video" | "network";
 type Filter = "all" | "playing" | "paused" | "problems" | "completed";
@@ -210,6 +212,7 @@ function SourceDetail({ source }: { source: ReturnType<typeof sourceModel> }) {
 }
 
 export function DiagnosticsPage({ onClose }: { onClose?: () => void }) {
+  const { t } = useLocale();
   const dialogRef = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<Tab>("overview");
   const [snapshot, setSnapshot] = useState<DiagnosticsSnapshot | null>(null);
@@ -257,6 +260,7 @@ export function DiagnosticsPage({ onClose }: { onClose?: () => void }) {
   const audio = asRecord(snapshot?.audio);
   const system = asRecord(snapshot?.system);
   const video = videoSummaryModel(snapshot?.video);
+  const outputMonitor = outputMonitorDiagnosticsModel(snapshot?.outputMonitor);
   const network = networkSummaryModel(snapshot?.network);
   const scheduler = asRecord(audio.scheduler);
   const memory = asRecord(audio.memory);
@@ -376,7 +380,7 @@ export function DiagnosticsPage({ onClose }: { onClose?: () => void }) {
         <Workers workers={arr(scheduler, "workers")} />
         <AudioSources sources={sortedSources} selected={selected} filter={filter} setFilter={setFilter} sort={sort} setSort={setSort} onSelect={(id) => setSelectedId(selectedId === id ? null : id)} />
         <Section title="Последние события"><Events events={eventList} networkEvents={network.events} networkNames={new Map(network.connections.map((connection) => [connection.id, connection.name]))} sourceNames={sourceNames} /></Section>
-      </> : tab === "video" ? <VideoDiagnostics summary={video} system={system} /> : <NetworkDiagnostics summary={network} filter={networkFilter} setFilter={setNetworkFilter} selectedId={selectedNetworkId} onSelect={(id) => setSelectedNetworkId(selectedNetworkId === id ? null : id)} />}
+      </> : tab === "video" ? <VideoDiagnostics summary={video} system={system} outputMonitor={outputMonitor} t={t} /> : <NetworkDiagnostics summary={network} filter={networkFilter} setFilter={setNetworkFilter} selectedId={selectedNetworkId} onSelect={(id) => setSelectedNetworkId(selectedNetworkId === id ? null : id)} />}
     </div>
     </div>
   </div>;
@@ -587,7 +591,7 @@ function VideoCueCard({ cue }: { cue: VideoCueDiagnostics }) {
   </div>;
 }
 
-function VideoDiagnostics({ summary, system }: { summary: VideoSummaryDiagnostics; system: AnyRecord }) {
+function VideoDiagnostics({ summary, system, outputMonitor, t }: { summary: VideoSummaryDiagnostics; system: AnyRecord; outputMonitor: ReturnType<typeof outputMonitorDiagnosticsModel>; t: (key: never) => string }) {
   const videoSystem = Object.keys(summary.system).length > 0 ? summary.system : system;
   const processCpu = num(videoSystem, "processCpuPercent", "cpuPercent", "cpuUsage", "process_cpu_percent");
   const processRam = num(videoSystem, "processWorkingSetBytes", "processRamBytes", "ramBytes", "process_memory_bytes");
@@ -612,6 +616,44 @@ function VideoDiagnostics({ summary, system }: { summary: VideoSummaryDiagnostic
     <Section title="VideoCue">
       {summary.cues.length === 0 ? <div style={{ color: "var(--wc-text-muted)", fontSize: 12 }}>Активных VideoCue нет или видеопайплайн пока не передал данные.</div> : <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>{summary.cues.map((cue) => <VideoCueCard key={cue.id} cue={cue} />)}</div>}
     </Section>
+    {outputMonitor && <Section title={t("outputMonitorMetricsUi.title" as never)}>
+      {outputMonitor.capture && <><div style={{ fontSize: 11, color: "var(--wc-text-secondary)", marginBottom: 5 }}>{t("outputMonitorMetricsUi.captureSection" as never)}</div><MetricList items={[
+        [t("outputMonitorMetricsUi.captureAttempts" as never), show(num(outputMonitor.capture, "attempts"))],
+        [t("outputMonitorMetricsUi.captured" as never), show(num(outputMonitor.capture, "captured"))],
+        [t("outputMonitorMetricsUi.pboSkipped" as never), show(num(outputMonitor.capture, "skippedPbo"))],
+        [t("outputMonitorMetricsUi.staleDropped" as never), show(num(outputMonitor.capture, "droppedStale"))],
+        [t("outputMonitorMetricsUi.published" as never), show(num(outputMonitor.capture, "published"))],
+        [t("outputMonitorMetricsUi.previewFps" as never), show(num(outputMonitor.capture, "previewFps"))],
+        [t("outputMonitorMetricsUi.copyAverage" as never), formatMilliseconds(num(outputMonitor.capture, "totalCopyUs") == null || !num(outputMonitor.capture, "copySamples") ? null : num(outputMonitor.capture, "totalCopyUs")! / num(outputMonitor.capture, "copySamples")! / 1000)],
+        [t("outputMonitorMetricsUi.copyMaximum" as never), formatMilliseconds((num(outputMonitor.capture, "maximumCopyUs") ?? 0) / 1000)],
+      ]} /></>}
+      {outputMonitor.binary && <><div style={{ fontSize: 11, color: "var(--wc-text-secondary)", margin: "12px 0 5px" }}>{t("outputMonitorMetricsUi.binarySection" as never)}</div><MetricList items={[
+        [t("outputMonitorMetricsUi.binaryRequests" as never), show(num(outputMonitor.binary, "requests"))],
+        [t("outputMonitorMetricsUi.framePackets" as never), show(num(outputMonitor.binary, "framePackets"))],
+        [t("outputMonitorMetricsUi.blackPackets" as never), show(num(outputMonitor.binary, "blackPackets"))],
+        [t("outputMonitorMetricsUi.unchangedPackets" as never), show(num(outputMonitor.binary, "unchangedPackets"))],
+        [t("outputMonitorMetricsUi.noFramePackets" as never), show(num(outputMonitor.binary, "noFramePackets"))],
+        [t("outputMonitorMetricsUi.payloadBytes" as never), formatBytes(num(outputMonitor.binary, "payloadBytes"))],
+        [t("outputMonitorMetricsUi.prepareAverage" as never), formatMilliseconds(num(outputMonitor.binary, "requests") ? (num(outputMonitor.binary, "totalPrepareUs") ?? 0) / num(outputMonitor.binary, "requests")! / 1000 : null)],
+        [t("outputMonitorMetricsUi.prepareMaximum" as never), formatMilliseconds((num(outputMonitor.binary, "maximumPrepareUs") ?? 0) / 1000)],
+      ]} /></>}
+      {outputMonitor.frontend && <><div style={{ fontSize: 11, color: "var(--wc-text-secondary)", margin: "12px 0 5px" }}>{t("outputMonitorMetricsUi.frontendSection" as never)}</div><MetricList items={[
+        [t("outputMonitorMetricsUi.frontendState" as never), outputMonitor.active ? t("outputMonitorMetricsUi.active" as never) : t("outputMonitorMetricsUi.inactive" as never)],
+        [t("outputMonitorMetricsUi.source" as never), text(outputMonitor.frontend, "sourceId") ?? "—"],
+        [t("outputMonitorMetricsUi.session" as never), show(num(outputMonitor.frontend, "session"))],
+        [t("outputMonitorMetricsUi.receivedFrames" as never), show(num(outputMonitor.frontend, "receivedFrames"))],
+        [t("outputMonitorMetricsUi.displayedFrames" as never), show(num(outputMonitor.frontend, "displayedFrames"))],
+        [t("outputMonitorMetricsUi.receivedFps" as never), show(num(outputMonitor.frontend, "receivedFps"))],
+        [t("outputMonitorMetricsUi.displayedFps" as never), show(num(outputMonitor.frontend, "displayedFps"))],
+        [t("outputMonitorMetricsUi.latestAge" as never), formatMilliseconds(num(outputMonitor.frontend, "frameAgeLastMs"))],
+        [t("outputMonitorMetricsUi.averageAge" as never), formatMilliseconds(num(outputMonitor.frontend, "frameAgeAverageMs"))],
+        [t("outputMonitorMetricsUi.maximumAge" as never), formatMilliseconds(num(outputMonitor.frontend, "frameAgeMaxMs"))],
+        [t("outputMonitorMetricsUi.conversionAverage" as never), formatMilliseconds(num(outputMonitor.frontend, "conversionAverageMs"))],
+        [t("outputMonitorMetricsUi.conversionMaximum" as never), formatMilliseconds(num(outputMonitor.frontend, "conversionMaxMs"))],
+        [t("outputMonitorMetricsUi.requestAverage" as never), formatMilliseconds(num(outputMonitor.frontend, "requestAverageMs"))],
+        [t("outputMonitorMetricsUi.requestMaximum" as never), formatMilliseconds(num(outputMonitor.frontend, "requestMaxMs"))],
+      ]} /></>}
+    </Section>}
   </>;
 }
 
