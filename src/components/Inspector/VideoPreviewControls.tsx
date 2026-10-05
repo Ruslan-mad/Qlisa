@@ -16,7 +16,7 @@ export function VideoPreviewControls({
 }) {
   const { t } = useLocale();
   const transport = useVideoPreviewTransport((state) => state.identity === identity ? state : null);
-  const available = !!transport?.mounted && !!transport.ready && !!transport.visible;
+  const available = !!transport?.mounted && !!transport.ready;
   const playing = !!transport?.playing;
   const unavailableTitle = t("editorUi.videoPreviewUnavailable");
 

@@ -182,7 +182,7 @@ describe("headphone preview cursor", () => {
     const store = useVideoPreviewTransport.getState();
     store.activate("video-a", 0, 4000);
     store.setReady("video-a", true);
-    store.setVisible("video-a", true);
+    store.setDocumentVisible("video-a", true);
     store.toggle("video-a");
     const sync = vi.fn();
     const position = stepPreviewAndSyncHeadphones(() => {

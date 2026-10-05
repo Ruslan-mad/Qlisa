@@ -11,12 +11,12 @@ export interface VideoPreviewTransportState {
   seekVersion: number;
   mounted: boolean;
   ready: boolean;
-  visible: boolean;
+  documentVisible: boolean;
   playing: boolean;
   activate: (identity: string, startMs: number, durationMs: number) => void;
   deactivate: (identity: string) => void;
   setReady: (identity: string, ready: boolean) => void;
-  setVisible: (identity: string, visible: boolean) => void;
+  setDocumentVisible: (identity: string, visible: boolean) => void;
   setDurationFallback: (identity: string, durationMs: number) => void;
   setFrameRate: (identity: string, frameRate: number) => void;
   seek: (identity: string, positionMs: number) => void;
@@ -26,8 +26,10 @@ export interface VideoPreviewTransportState {
   stop: (identity: string) => void;
 }
 
+// Scrolling the inline renderer out of view must not disable the editor
+// controls. The mounted flag still distinguishes a live preview from teardown.
 const isAvailable = (state: VideoPreviewTransportState) =>
-  state.mounted && state.ready && state.visible;
+  state.mounted && state.ready && state.documentVisible;
 
 export const useVideoPreviewTransport = create<VideoPreviewTransportState>((set) => ({
   identity: null,
@@ -38,7 +40,7 @@ export const useVideoPreviewTransport = create<VideoPreviewTransportState>((set)
   seekVersion: 0,
   mounted: false,
   ready: false,
-  visible: false,
+  documentVisible: false,
   playing: false,
 
   activate: (identity, startMs, durationMs) => set((state) => {
@@ -65,7 +67,7 @@ export const useVideoPreviewTransport = create<VideoPreviewTransportState>((set)
       seekVersion: state.seekVersion + 1,
       mounted: true,
       ready: false,
-      visible: false,
+      documentVisible: false,
       playing: false,
     };
   }),
@@ -79,7 +81,7 @@ export const useVideoPreviewTransport = create<VideoPreviewTransportState>((set)
       seekVersion: state.seekVersion + 1,
       mounted: false,
       ready: false,
-      visible: false,
+      documentVisible: false,
       playing: false,
     }
     : state),
@@ -88,8 +90,8 @@ export const useVideoPreviewTransport = create<VideoPreviewTransportState>((set)
     ? { ...state, ready, playing: ready ? state.playing : false }
     : state),
 
-  setVisible: (identity, visible) => set((state) => state.identity === identity
-    ? { ...state, visible, playing: visible ? state.playing : false }
+  setDocumentVisible: (identity, documentVisible) => set((state) => state.identity === identity
+    ? { ...state, documentVisible, playing: documentVisible ? state.playing : false }
     : state),
 
   setDurationFallback: (identity, durationMs) => set((state) => {

@@ -54,13 +54,18 @@ describe("media preview model", () => {
   });
 
   it.each([
-    [{ documentVisible: true, intersecting: true, failed: false }, true],
-    [{ documentVisible: false, intersecting: true, failed: false }, false],
-    [{ documentVisible: true, intersecting: false, failed: false }, false],
-    [{ documentVisible: true, intersecting: true, failed: true }, false],
-    [{ documentVisible: false, intersecting: false, failed: true }, false],
-  ])("gates playback for visibility, viewport and decode errors", (state, expected) => {
+    [{ documentVisible: true, failed: false }, true],
+    [{ documentVisible: false, failed: false }, false],
+    [{ documentVisible: true, failed: true }, false],
+    [{ documentVisible: false, failed: true }, false],
+  ])("gates playback for document visibility and decode errors", (state, expected) => {
     expect(shouldPlayMediaPreview(state)).toBe(expected);
+  });
+
+  it("allows preview playback regardless of viewport intersection", () => {
+    // Viewport state is deliberately absent from this policy. Scrolling does
+    // not pause the video element that owns the transport clock.
+    expect(shouldPlayMediaPreview({ documentVisible: true, failed: false })).toBe(true);
   });
 
   it("measures source frame rate from adjacent presented video frames", () => {

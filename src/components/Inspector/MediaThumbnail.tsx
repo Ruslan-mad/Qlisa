@@ -143,10 +143,6 @@ function VideoPreview({
     sourceRevision?: string;
     url: string;
   } | null>(null);
-  const [intersection, setIntersection] = useState<{
-    source: string;
-    visible: boolean;
-  } | null>(null);
   const [documentVisible, setDocumentVisible] = useState(
     () => typeof document === "undefined" || document.visibilityState === "visible",
   );
@@ -156,9 +152,6 @@ function VideoPreview({
     && authorizedSource.sourceRevision === sourceRevision
     ? authorizedSource.url
     : null;
-  const intersecting = source !== null
-    && intersection?.source === source
-    && intersection.visible;
 
   useEffect(() => {
     useVideoPreviewTransport.getState().activate(identity, startMs, durationMs);
@@ -177,38 +170,20 @@ function VideoPreview({
         if (stale) return;
         const url = toMediaAssetUrl(resolvedPath, convertFileSrc);
         if (url) setAuthorizedSource({ cueId, path, sourceRevision, url });
-        else setFailed(true);
+        else {
+          useVideoPreviewTransport.getState().setReady(identity, false);
+          setFailed(true);
+        }
       })
       .catch(() => {
-        if (!stale) setFailed(true);
+        if (!stale) {
+          useVideoPreviewTransport.getState().setReady(identity, false);
+          setFailed(true);
+        }
       });
 
     return () => { stale = true; };
   }, [cueId, path, sourceRevision]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    if (typeof IntersectionObserver === "undefined") {
-      setIntersection(source ? { source, visible: true } : null);
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (source) {
-          setIntersection({
-            source,
-            visible: entry.isIntersecting && entry.intersectionRatio > 0,
-          });
-        }
-      },
-      { threshold: 0.01 },
-    );
-    observer.observe(video);
-    return () => observer.disconnect();
-  }, [failed, source]);
 
   useEffect(() => {
     const updateVisibility = () => setDocumentVisible(document.visibilityState === "visible");
@@ -217,11 +192,11 @@ function VideoPreview({
   }, []);
 
   useEffect(() => {
-    useVideoPreviewTransport.getState().setVisible(
+    useVideoPreviewTransport.getState().setDocumentVisible(
       identity,
-      shouldPlayMediaPreview({ documentVisible, intersecting, failed }) && source !== null,
+      shouldPlayMediaPreview({ documentVisible, failed }) && source !== null,
     );
-  }, [documentVisible, failed, identity, intersecting, source]);
+  }, [documentVisible, failed, identity, source]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -234,7 +209,7 @@ function VideoPreview({
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !source || !transport?.playing || !transport.ready || !transport.visible) {
+    if (!video || !source || !transport?.playing || !transport.ready || !transport.documentVisible) {
       video?.pause();
       return;
     }
@@ -242,18 +217,18 @@ function VideoPreview({
     let currentAttempt = true;
     void video.play().then(() => {
       const current = useVideoPreviewTransport.getState();
-      if (videoRef.current !== video || current.identity !== identity || !current.playing || !current.visible) {
+      if (videoRef.current !== video || current.identity !== identity || !current.playing || !current.documentVisible) {
         video.pause();
       }
     }).catch(() => {
       if (currentAttempt) useVideoPreviewTransport.getState().stop(identity);
     });
     return () => { currentAttempt = false; };
-  }, [identity, source, transport?.playing, transport?.ready, transport?.visible]);
+  }, [identity, source, transport?.playing, transport?.ready, transport?.documentVisible]);
 
   useEffect(() => {
     const video = videoRef.current as VideoWithFrameCallbacks | null;
-    if (!video || !source || !transport?.playing || !transport.ready || !transport.visible || !video.requestVideoFrameCallback) {
+    if (!video || !source || !transport?.playing || !transport.ready || !transport.documentVisible || !video.requestVideoFrameCallback) {
       return;
     }
     let active = true;
@@ -262,7 +237,7 @@ function VideoPreview({
     const onFrame = (_now: number, metadata: PreviewFrameMetadata) => {
       if (!active || videoRef.current !== video) return;
       const current = useVideoPreviewTransport.getState();
-      if (current.identity !== identity || !current.playing || !current.visible) return;
+      if (current.identity !== identity || !current.playing || !current.documentVisible) return;
       current.updateFromVideo(identity, metadata.mediaTime * 1000);
       if (previous) {
         const measuredRate = measurePreviewFrameRate(previous, metadata);
@@ -276,7 +251,7 @@ function VideoPreview({
       active = false;
       if (callbackId != null) video.cancelVideoFrameCallback?.(callbackId);
     };
-  }, [identity, source, transport?.playing, transport?.ready, transport?.visible]);
+  }, [identity, source, transport?.playing, transport?.ready, transport?.documentVisible]);
 
   useEffect(() => {
     const video = videoRef.current;

@@ -243,7 +243,7 @@ export function ClipEditorDock({
         || !shouldStepPreviewFrame(event.key, target, event)
       ) return;
       const state = useVideoPreviewTransport.getState();
-      if (state.identity !== mediaIdentity || !state.mounted || !state.ready || !state.visible) return;
+      if (state.identity !== mediaIdentity || !state.mounted || !state.ready) return;
       event.preventDefault();
       stepPreviewAndSyncHeadphones(() => {
         state.stepFrame(mediaIdentity, event.key === "ArrowLeft" ? -1 : 1, state.frameRate);

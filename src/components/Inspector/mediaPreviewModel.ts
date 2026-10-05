@@ -25,14 +25,12 @@ export function toMediaAssetUrl(
 
 export function shouldPlayMediaPreview({
   documentVisible,
-  intersecting,
   failed,
 }: {
   documentVisible: boolean;
-  intersecting: boolean;
   failed: boolean;
 }): boolean {
-  return documentVisible && intersecting && !failed;
+  return documentVisible && !failed;
 }
 
 export function createMediaPreviewIdentity(cueId: string, path: string): string {

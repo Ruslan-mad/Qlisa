@@ -8,7 +8,7 @@ function activateReady(identity = identityA) {
   const state = useVideoPreviewTransport.getState();
   state.activate(identity, 1000, 5000);
   state.setReady(identity, true);
-  state.setVisible(identity, true);
+  state.setDocumentVisible(identity, true);
 }
 
 describe("video preview transport", () => {
@@ -27,7 +27,7 @@ describe("video preview transport", () => {
     expect(state.durationMs).toBe(4500);
     expect(state.positionMs).toBe(3200);
     expect(state.ready).toBe(true);
-    expect(state.visible).toBe(true);
+    expect(state.documentVisible).toBe(true);
   });
 
   it("uses decoded duration only while cue metadata has no usable duration", () => {
@@ -66,18 +66,49 @@ describe("video preview transport", () => {
     expect(useVideoPreviewTransport.getState().positionMs).toBe(0);
   });
 
-  it("pauses on hidden state and deactivates cleanly on unmount", () => {
+  it("pauses on document hide but keeps seek and cursor state", () => {
     activateReady();
     const state = useVideoPreviewTransport.getState();
+    state.seek(identityA, 2400);
     state.toggle(identityA);
-    state.setVisible(identityA, false);
+    state.setDocumentVisible(identityA, false);
+    expect(useVideoPreviewTransport.getState()).toMatchObject({
+      identity: identityA, ready: true, documentVisible: false, playing: false, positionMs: 2400,
+    });
+    state.stepFrame(identityA, 1, 25);
+    expect(useVideoPreviewTransport.getState()).toMatchObject({ playing: false, positionMs: 2400 });
+    state.toggle(identityA);
     expect(useVideoPreviewTransport.getState().playing).toBe(false);
+    state.setDocumentVisible(identityA, true);
+    state.toggle(identityA);
+    expect(useVideoPreviewTransport.getState()).toMatchObject({
+      identity: identityA, ready: true, documentVisible: true, playing: true, positionMs: 2400,
+    });
+  });
+
+  it("keeps controls unavailable until media is actually ready and disables them on error", () => {
+    const state = useVideoPreviewTransport.getState();
+    state.activate(identityA, 0, 5000);
+    state.setDocumentVisible(identityA, true);
+    state.toggle(identityA);
+    state.stepFrame(identityA, 1);
+    expect(useVideoPreviewTransport.getState()).toMatchObject({ ready: false, playing: false, positionMs: 0 });
+    state.setReady(identityA, true);
+    state.toggle(identityA);
+    expect(useVideoPreviewTransport.getState().playing).toBe(true);
+    state.setReady(identityA, false);
+    expect(useVideoPreviewTransport.getState()).toMatchObject({ ready: false, playing: false });
+  });
+
+  it("deactivates when the renderer unmounts", () => {
+    activateReady();
+    const state = useVideoPreviewTransport.getState();
     state.deactivate(identityA);
     expect(useVideoPreviewTransport.getState()).toMatchObject({
       identity: null,
       mounted: false,
       ready: false,
-      visible: false,
+      documentVisible: false,
       playing: false,
     });
   });
