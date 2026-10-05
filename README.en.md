@@ -116,10 +116,10 @@ Qlisa is licensed under [GPL-3.0-or-later](LICENSE). Third-party components have
 
 ## Documentation
 
-Technical guides in docs are currently in English; the 1.5.10 release notes are available in English and Russian.
+Technical guides in docs are currently in English; the 1.5.11 release notes are available in English and Russian.
 
 - [Qlisa documentation](docs/README.md)
 - [Developer guide](docs/PROJECT_GUIDE.md)
 - [Release preparation](docs/RELEASING.md)
-- [Version 1.5.10 release notes](docs/RELEASE_NOTES_1.5.10.md)
+- [Version 1.5.11 release notes](docs/RELEASE_NOTES_1.5.11.md)
 - [License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)

@@ -18,7 +18,7 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. This source tree targets Qlisa 1.5.10; see [its release notes](RELEASE_NOTES_1.5.10.md)
+1.5.8. This source tree targets Qlisa 1.5.11; see [its release notes](RELEASE_NOTES_1.5.11.md)
 and the [Releases page](https://github.com/Ruslan-mad/Qlisa/releases) for binary
 availability. This is not an official
 upstream Inkue release checkout. The source repository is public at
