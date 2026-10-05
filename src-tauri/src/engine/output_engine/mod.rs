@@ -2248,6 +2248,18 @@ impl OutputEngine {
         slot::is_playing(&slot)
     }
 
+    /// Return whether a keep-open video slot has reached EOF while retaining
+    /// its last frame. Such a voice owns a picture, but its media transport is
+    /// complete.
+    pub fn is_voice_held_at_eof(&self, voice_id: VoiceId) -> bool {
+        self.pipeline_for_voice(voice_id).is_some_and(|pipeline| {
+            pipeline.enter_mpv_call().is_some_and(|_permit| {
+                slot::slot_for_voice(&pipeline.slot_registry, voice_id)
+                    .is_some_and(|slot| slot::is_held_at_eof(&slot))
+            })
+        })
+    }
+
     pub fn apply_geometry(&self, voice_id: VoiceId, geometry: &VideoGeometry) {
         if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
             for member in members { self.apply_geometry_single(member, geometry); }
@@ -3056,6 +3068,17 @@ impl OutputEngine {
 
     /// Remove a completed voice.
     pub fn gc_voice(&self, voice_id: VoiceId) {
+        // Keep ownership of a frozen EOF frame so Stop Cue can still address
+        // and release it after the media execution has completed.
+        let held_at_eof = self.pipeline_for_voice(voice_id).is_some_and(|pipeline| {
+            pipeline.enter_mpv_call().is_some_and(|_permit| {
+                slot::slot_for_voice(&pipeline.slot_registry, voice_id)
+                    .is_some_and(|slot| slot::is_held_at_eof(&slot))
+            })
+        });
+        if held_at_eof {
+            return;
+        }
         self.release_voice_bookkeeping(voice_id, true);
     }
 

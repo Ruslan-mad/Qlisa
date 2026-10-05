@@ -427,6 +427,8 @@ impl GroupCue {
         for child in &mut self.children {
             if child.is_running() || child.is_paused() {
                 let _ = child.hard_stop(ctx);
+            } else if child.has_retained_output() {
+                let _ = child.hard_stop(ctx);
             } else {
                 let _ = child.reset();
             }
@@ -553,6 +555,8 @@ impl GroupCue {
             let active = self.children[idx].is_running() || self.children[idx].is_paused();
             if !due_actions.contains(&id) {
                 if active {
+                    let _ = self.children[idx].hard_stop(ctx);
+                } else if self.children[idx].has_retained_output() {
                     let _ = self.children[idx].hard_stop(ctx);
                 } else {
                     let _ = self.children[idx].reset();
@@ -687,7 +691,7 @@ impl GroupCue {
                     let _ = self.children[idx].stop_with_fade(ctx, number_fade_out.as_ref());
                 }
             }
-            let _ = self.children[master_idx].reset();
+            let _ = self.children[master_idx].complete_naturally();
         }
         Ok(())
     }
@@ -770,7 +774,7 @@ impl GroupCue {
         if let Some(previous_id) = after_id {
             if let Some(previous) = self.children.iter_mut().find(|child| child.id() == previous_id) {
                 if matches!(previous.state(), CueState::Completed | CueState::Standby) {
-                    let _ = previous.reset();
+                    let _ = previous.complete_naturally();
                 }
             }
         }
@@ -922,7 +926,7 @@ impl GroupCue {
                     if Some(self.children[i].id()) == current_id_opt {
                         current_done = true;
                     } else {
-                        let _ = self.children[i].reset();
+                        let _ = self.children[i].complete_naturally();
                     }
                 }
             }
@@ -1008,7 +1012,7 @@ impl GroupCue {
             // but a source that exposes an execution marker can still cancel a
             // stale deadline if an operator stops/resets it during the wait.
             let require_marker = self.children[idx].auto_continue_marker().is_some();
-            let _ = self.children[idx].reset();
+            let _ = self.children[idx].complete_naturally();
 
             if self.mode == GroupMode::Playlist {
                 // A Playlist plays one child at a time and auto-advances through
@@ -1084,9 +1088,38 @@ impl GroupCue {
         self.random_current_idx = None;
     }
 
+    fn clear_runtime_state(&mut self) {
+        self.state = CueState::Standby;
+        self.started_at = None;
+        self.action_started_at = None;
+        self.elapsed_before_pause = Duration::ZERO;
+        self.action_elapsed_before_pause = Duration::ZERO;
+        self.in_pre_wait = false;
+        self.auto_continue_fired = false;
+        self.number_launched_actions.clear();
+        self.number_master_finished = false;
+        self.number_post_wait_until = None;
+        self.runtime_error = None;
+        self.number_master_autoplay = false;
+        self.number_shared_fade = None;
+        self.number_completion_start_ids.clear();
+    }
+
+    fn complete_children_naturally(&mut self) {
+        for child in &mut self.children {
+            let _ = child.complete_naturally();
+        }
+        self.seq_current_id = None;
+        self.seq_done = false;
+        self.seq_post_wait_until = None;
+        self.paused_at = None;
+        self.random_bag.clear();
+        self.random_current_idx = None;
+    }
+
     fn hard_stop_children(&mut self, ctx: &CueContext) {
         for child in &mut self.children {
-            if child.is_running() || child.is_paused() {
+            if child.is_running() || child.is_paused() || child.has_retained_output() {
                 let _ = child.hard_stop(ctx);
             }
             child.set_number_master_autoplay(false);
@@ -1109,7 +1142,9 @@ impl GroupCue {
     /// Playlist mode so only one child is ever audible at a time.
     fn stop_other_children(&mut self, ctx: &CueContext, keep_id: CueId) {
         for child in &mut self.children {
-            if child.id() != keep_id && (child.is_running() || child.is_paused()) {
+            if child.id() != keep_id
+                && (child.is_running() || child.is_paused() || child.has_retained_output())
+            {
                 let _ = child.stop(ctx);
                 let _ = child.reset();
             }
@@ -1358,7 +1393,7 @@ impl Cue for GroupCue {
         let shared_fade = self.fade_out.clone();
         let shared_fade = shared_fade.as_ref().or(self.number_shared_fade.as_ref());
         for child in &mut self.children {
-            if child.is_running() || child.is_paused() {
+            if child.is_running() || child.is_paused() || child.has_retained_output() {
                 let _ = child.stop_with_fade(ctx, shared_fade);
             }
             child.set_number_master_autoplay(false);
@@ -1432,7 +1467,7 @@ impl Cue for GroupCue {
 
     fn hard_stop(&mut self, ctx: &CueContext) -> Result<()> {
         for child in &mut self.children {
-            if child.is_running() || child.is_paused() {
+            if child.is_running() || child.is_paused() || child.has_retained_output() {
                 let _ = child.hard_stop(ctx);
             }
             child.set_number_master_autoplay(false);
@@ -1458,21 +1493,18 @@ impl Cue for GroupCue {
 
     fn reset(&mut self) -> Result<()> {
         self.reset_children();
-        self.state = CueState::Standby;
-        self.started_at = None;
-        self.action_started_at = None;
-        self.elapsed_before_pause = Duration::ZERO;
-        self.action_elapsed_before_pause = Duration::ZERO;
-        self.in_pre_wait = false;
-        self.auto_continue_fired = false;
-        self.number_launched_actions.clear();
-        self.number_master_finished = false;
-        self.number_post_wait_until = None;
-        self.runtime_error = None;
-        self.number_master_autoplay = false;
-        self.number_shared_fade = None;
-        self.number_completion_start_ids.clear();
+        self.clear_runtime_state();
         Ok(())
+    }
+
+    fn complete_naturally(&mut self) -> Result<()> {
+        self.complete_children_naturally();
+        self.clear_runtime_state();
+        Ok(())
+    }
+
+    fn has_retained_output(&self) -> bool {
+        self.children.iter().any(|child| child.has_retained_output())
     }
 
     fn tick(&mut self, ctx: &CueContext) -> Result<()> {
@@ -1505,7 +1537,7 @@ impl Cue for GroupCue {
                     // lingers in Running forever, so is_complete() never fires
                     // and the group (and its children) stay stuck.
                     if self.children[i].state() == CueState::Running && self.tick_child_at(i, ctx)? {
-                        let _ = self.children[i].reset();
+                        let _ = self.children[i].complete_naturally();
                     }
                 }
             }
@@ -1526,7 +1558,7 @@ impl Cue for GroupCue {
                         if Some(i) == self.random_current_idx {
                             self.random_current_idx = None;
                         }
-                        let _ = self.children[i].reset();
+                        let _ = self.children[i].complete_naturally();
                     }
                 }
             }
@@ -1549,6 +1581,38 @@ impl Cue for GroupCue {
     fn runtime_error(&self) -> Option<&str> {
         self.runtime_error.as_deref()
             .or_else(|| self.children.iter().find_map(|child| child.runtime_error()))
+    }
+
+    fn pending_child_post_wait(&self) -> Option<(CueId, Duration, Duration)> {
+        if self.number_mode {
+            if !self.number_master_finished {
+                return None;
+            }
+            let due = self.number_post_wait_until?;
+            let total = self.post_wait;
+            if total.is_zero() {
+                return None;
+            }
+            // Number's deadline includes an optional master fade-out before
+            // authored Post-Wait. Clamp remaining to the Post-Wait duration so
+            // the bar stays empty during that fade prefix.
+            let clock_now = self.paused_at.unwrap_or_else(Instant::now);
+            let remaining = due.saturating_duration_since(clock_now);
+            let elapsed = total.saturating_sub(remaining.min(total));
+            return Some((self.id, elapsed, total));
+        }
+        let pending = self.seq_post_wait_until?;
+        if !self.pending_advance_is_valid(pending) {
+            return None;
+        }
+        let source = self.children.iter().find(|child| child.id() == pending.source_id)?;
+        let total = source.post_wait();
+        if total.is_zero() {
+            return None;
+        }
+        let clock_now = pending.source_paused_at.unwrap_or_else(Instant::now);
+        let remaining = pending.due.saturating_duration_since(clock_now);
+        Some((pending.source_id, total.saturating_sub(remaining), total))
     }
 
     fn is_action_started(&self) -> bool {
@@ -2035,6 +2099,36 @@ mod tests {
     use crate::cue::light_cue::LightCue;
     use crate::cue::memo_cue::MemoCue;
     use crate::cue::video_cue::VideoCue;
+
+    #[test]
+    fn number_post_wait_progress_freezes_while_paused_and_clears_at_deadline() {
+        let mut number = GroupCue::new_number();
+        number.number_master_finished = true;
+        number.post_wait = Duration::from_secs(1);
+
+        // The deadline includes a one-second fade prefix. During that prefix,
+        // the authored Post-Wait bar remains at zero.
+        let fade_started = Instant::now();
+        number.number_post_wait_until = Some(fade_started + Duration::from_secs(2));
+        let (cue_id, elapsed, total) = number.pending_child_post_wait().unwrap();
+        assert_eq!(cue_id, number.id);
+        assert_eq!(elapsed, Duration::ZERO);
+        assert_eq!(total, Duration::from_secs(1));
+
+        // Freeze halfway through Post-Wait. Repeated reads use paused_at, not
+        // wall clock, so the displayed progress does not move while paused.
+        let paused_at = Instant::now();
+        number.paused_at = Some(paused_at);
+        number.number_post_wait_until = Some(paused_at + Duration::from_millis(500));
+        let first = number.pending_child_post_wait().unwrap();
+        let second = number.pending_child_post_wait().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.1, Duration::from_millis(500));
+
+        number.number_post_wait_until = None;
+        assert!(number.pending_child_post_wait().is_none());
+    }
+
 
     #[test]
     fn number_seek_plan_clamps_master_and_starts_only_due_actions() {

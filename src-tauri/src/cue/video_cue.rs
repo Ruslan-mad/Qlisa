@@ -490,6 +490,17 @@ impl VideoCue {
     }
 
     fn start_video_action(&mut self, context: &CueContext) -> Result<()> {
+        // GO marks the cue Running before this action starts. Detect its old
+        // retained EOF layer from the engine state, so a retrigger after
+        // pre-wait also releases exactly this cue's previous picture.
+        if !self.preloading && self.hold_last_frame {
+            if let Some(previous_voice) = self.active_voice_id {
+                if context.output_engine.is_voice_held_at_eof(previous_voice) {
+                    context.output_engine.stop_content(previous_voice, 0, 0);
+                    self.active_voice_id = None;
+                }
+            }
+        }
         let start_ms = self.start_time.map(|d| d.as_millis() as u64);
         let end_ms = self.end_time.map(|d| d.as_millis() as u64).or_else(|| {
             (self.loop_count > 0 && self.slices.is_empty() && start_ms.is_some())
@@ -1038,6 +1049,17 @@ impl Cue for VideoCue {
         Ok(())
     }
 
+    fn complete_naturally(&mut self) -> Result<()> {
+        let retained_voice = self.hold_last_frame.then_some(self.active_voice_id).flatten();
+        self.reset()?;
+        self.active_voice_id = retained_voice;
+        Ok(())
+    }
+
+    fn has_retained_output(&self) -> bool {
+        self.state == CueState::Standby && self.hold_last_frame && self.active_voice_id.is_some()
+    }
+
     fn tick(&mut self, context: &CueContext) -> Result<()> {
         // Once the pre-wait timer expires, start the video action.
         if self.in_pre_wait && self.elapsed() >= self.pre_wait {
@@ -1463,7 +1485,41 @@ impl CueFactory for VideoCueFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cue::group_cue::GroupCue;
     use crate::engine::output_engine::FitMode;
+
+    #[test]
+    fn natural_completion_retains_held_handle_but_explicit_reset_clears_it() {
+        let mut cue = VideoCue::new();
+        cue.hold_last_frame = true;
+        cue.active_voice_id = Some(uuid::Uuid::new_v4());
+        let retained = cue.active_voice_id;
+
+        cue.complete_naturally().unwrap();
+        assert_eq!(cue.state, CueState::Standby);
+        assert_eq!(cue.active_voice_id, retained);
+        assert!(cue.has_retained_output());
+
+        cue.reset().unwrap();
+        assert_eq!(cue.active_voice_id, None);
+        assert!(!cue.has_retained_output());
+    }
+
+    #[test]
+    fn nested_group_exposes_retained_video_for_parent_stop_cleanup() {
+        let mut video = VideoCue::new();
+        video.hold_last_frame = true;
+        video.active_voice_id = Some(uuid::Uuid::new_v4());
+        video.complete_naturally().unwrap();
+
+        let mut inner = GroupCue::new();
+        inner.children.push(Box::new(video));
+        inner.complete_naturally().unwrap();
+
+        let mut outer = GroupCue::new_number();
+        outer.children.push(Box::new(inner));
+        assert!(outer.has_retained_output());
+    }
 
     #[test]
     fn serialize_roundtrip_geometry_and_hold() {

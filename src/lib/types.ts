@@ -1585,6 +1585,10 @@ export interface CueTimeUpdateEvent {
   remaining_ms: number;
   /** File-relative playhead for Audio/Video leaves; null for other cues. */
   media_position_ms: number | null;
+  /** Current transport wait phase, if the cue is waiting before/after media. */
+  wait_phase?: "pre_wait" | "post_wait" | null;
+  wait_elapsed_ms?: number | null;
+  wait_duration_ms?: number | null;
 }
 
 /** Operator-local headphone preview timing. This never represents the show

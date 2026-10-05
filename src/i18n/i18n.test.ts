@@ -156,6 +156,10 @@ describe('Qlisa i18n core', () => {
     expect(ru.multiCueInspector.discard).toBe('Отменить изменения');
     expect(ru.multiCueInspector.preWait).toBe('Pre-Wait');
     expect(ru.multiCueInspector.postWait).toBe('Post-Wait');
+    expect(ru.inspector.autoContinue).toBe('Автопродолжение');
+    expect(ru.inspector.autoFollow).toBe('Автопереход');
+    expect(ru.transport.autoContinue).toBe('Автопродолжение');
+    expect(ru.transport.autoFollow).toBe('Автопереход');
     expect(ru.multiCueInspector.stopCueToEditFades).toBe('Остановите выбранные cue, чтобы изменить фейды.');
     expect(en.multiCueInspector.title).toBe('{count} cues selected');
     expect(en.multiCueInspector.mixed).toBe('Different values');

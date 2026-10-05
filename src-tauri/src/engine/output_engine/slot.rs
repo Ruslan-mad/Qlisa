@@ -1753,6 +1753,11 @@ pub(super) fn is_playing(slot: &Arc<VideoSlot>) -> bool {
     if !slot.accepts_mpv_calls() {
         return false;
     }
+    let hold_last_frame = slot
+        .state
+        .lock()
+        .map(|state| state.hold_last_frame)
+        .unwrap_or(false);
     let name = cs("idle-active");
     let mut idle_active: i32 = 1;
     let ret = unsafe {
@@ -1763,7 +1768,27 @@ pub(super) fn is_playing(slot: &Arc<VideoSlot>) -> bool {
             &mut idle_active as *mut i32 as *mut c_void,
         )
     };
-    ret == 0 && idle_active == 0
+    let eof_reached = hold_last_frame
+        .then(|| unsafe { get_prop_flag(&slot.lib, slot.mpv_ctx.0, "eof-reached") })
+        .flatten();
+    playback_is_active((ret == 0).then_some(idle_active != 0), hold_last_frame, eof_reached)
+}
+
+pub(super) fn is_held_at_eof(slot: &Arc<VideoSlot>) -> bool {
+    if !slot.accepts_mpv_calls() {
+        return false;
+    }
+    let holds = slot.state.lock().map(|state| state.hold_last_frame).unwrap_or(false);
+    holds && unsafe { get_prop_flag(&slot.lib, slot.mpv_ctx.0, "eof-reached") } == Some(true)
+}
+
+fn playback_is_active(
+    idle_active: Option<bool>,
+    hold_last_frame: bool,
+    eof_reached: Option<bool>,
+) -> bool {
+    let Some(idle_active) = idle_active else { return false };
+    !idle_active && !(hold_last_frame && eof_reached == Some(true))
 }
 
 /// Collect properties that mpv exposes without sending commands.  Properties
@@ -1852,6 +1877,100 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use uuid::Uuid;
+
+    #[test]
+    fn held_last_frame_is_not_counted_as_active_playback() {
+        assert!(playback_is_active(Some(false), true, Some(false)));
+        assert!(!playback_is_active(Some(false), true, Some(true)));
+        // A seek back clears EOF and restores the stale-completion guard.
+        assert!(playback_is_active(Some(false), true, Some(false)));
+        // Ordinary videos keep their previous idle-active behavior.
+        assert!(playback_is_active(Some(false), false, Some(true)));
+        assert!(!playback_is_active(Some(true), true, Some(false)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the installed pinned Windows libmpv and FFmpeg runtime"]
+    fn installed_mpv_keeps_last_frame_while_eof_is_not_playing_and_seek_resumes() {
+        use crate::engine::mpv_sys::{MpvLib, MPV_FORMAT_FLAG};
+        use std::{ffi::CString, os::windows::process::CommandExt, process::Command, time::Instant};
+
+        struct TempVideo(std::path::PathBuf);
+        impl Drop for TempVideo {
+            fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+        }
+        struct MpvContext { lib: Arc<MpvLib>, ctx: *mut c_void }
+        impl Drop for MpvContext {
+            fn drop(&mut self) { unsafe { (self.lib.mpv_terminate_destroy)(self.ctx); } }
+        }
+
+        fn set_option(lib: &MpvLib, ctx: *mut c_void, key: &str, value: &str) {
+            let key = CString::new(key).unwrap();
+            let value = CString::new(value).unwrap();
+            assert!(unsafe { (lib.mpv_set_option_string)(ctx, key.as_ptr(), value.as_ptr()) } >= 0);
+        }
+
+        fn command(lib: &MpvLib, ctx: *mut c_void, args: &[&str]) {
+            let strings = args.iter().map(|arg| CString::new(*arg).unwrap()).collect::<Vec<_>>();
+            let mut pointers = strings.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
+            pointers.push(std::ptr::null());
+            assert!(unsafe { (lib.mpv_command)(ctx, pointers.as_ptr()) } >= 0);
+        }
+
+        fn flag(lib: &MpvLib, ctx: *mut c_void, name: &str) -> Option<bool> {
+            let name = CString::new(name).unwrap();
+            let mut value = 0_i32;
+            (unsafe { (lib.mpv_get_property)(ctx, name.as_ptr(), MPV_FORMAT_FLAG, &mut value as *mut i32 as *mut c_void) } == 0)
+                .then_some(value != 0)
+        }
+
+        let runtime = crate::media_runtime::runtime_dir();
+        let ffmpeg = runtime.join("ffmpeg.exe");
+        assert!(ffmpeg.is_file(), "installed FFmpeg runtime missing: {}", ffmpeg.display());
+        let video = std::env::temp_dir().join(format!("qlisa-mpv-hold-{}.mp4", Uuid::new_v4()));
+        let _temp_video = TempVideo(video.clone());
+        let generated = Command::new(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=24:d=1", "-an", "-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-y"])
+            .arg(&video)
+            .creation_flags(0x08000000)
+            .output()
+            .expect("run installed ffmpeg");
+        assert!(generated.status.success(), "FFmpeg fixture failed: {}", String::from_utf8_lossy(&generated.stderr));
+
+        let lib = Arc::new(MpvLib::load().expect("load installed libmpv runtime"));
+        let ctx = unsafe { (lib.mpv_create)() };
+        assert!(!ctx.is_null(), "mpv_create failed");
+        let _mpv_context = MpvContext { lib: Arc::clone(&lib), ctx };
+        set_option(&lib, ctx, "vo", "null");
+        set_option(&lib, ctx, "ao", "null");
+        set_option(&lib, ctx, "audio", "no");
+        set_option(&lib, ctx, "terminal", "no");
+        set_option(&lib, ctx, "keep-open", "yes");
+        assert!(unsafe { (lib.mpv_initialize)(ctx) } >= 0);
+        let path = video.to_string_lossy().to_string();
+        command(&lib, ctx, &["loadfile", &path, "replace"]);
+
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while Instant::now() < deadline && flag(&lib, ctx, "eof-reached") != Some(true) {
+            unsafe { (lib.mpv_wait_event)(ctx, 0.05); }
+        }
+        let idle = flag(&lib, ctx, "idle-active").expect("idle-active is supported");
+        let eof = flag(&lib, ctx, "eof-reached").expect("eof-reached is supported");
+        assert!(!idle, "keep-open should retain the loaded player/layer");
+        assert!(eof, "mpv should identify EOF while keep-open retains the last picture");
+        assert!(!playback_is_active(Some(idle), true, Some(eof)));
+
+        command(&lib, ctx, &["seek", "0.2", "absolute+exact"]);
+        let seek_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < seek_deadline && flag(&lib, ctx, "eof-reached") != Some(false) {
+            unsafe { (lib.mpv_wait_event)(ctx, 0.02); }
+        }
+        let eof_after_seek = flag(&lib, ctx, "eof-reached");
+        assert_eq!(eof_after_seek, Some(false), "seek-back must clear EOF");
+        assert!(playback_is_active(Some(flag(&lib, ctx, "idle-active").unwrap()), true, eof_after_seek));
+
+    }
 
     #[test]
     fn slot_event_exit_signal_wakes_a_blocked_waiter() {

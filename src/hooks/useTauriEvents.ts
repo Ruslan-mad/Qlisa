@@ -64,6 +64,9 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
             action_elapsed_ms: e.payload.action_elapsed_ms,
             remaining_ms: e.payload.remaining_ms,
             media_position_ms: e.payload.media_position_ms ?? null,
+            wait_phase: e.payload.wait_phase ?? null,
+            wait_elapsed_ms: e.payload.wait_elapsed_ms ?? null,
+            wait_duration_ms: e.payload.wait_duration_ms ?? null,
           });
         })
       );

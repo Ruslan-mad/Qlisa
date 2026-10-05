@@ -14,6 +14,7 @@ import { InlineTimeCell } from "./InlineTimeCell";
 import { canEditCueDuration, emptyCueDurationValue } from "./inlineTimeModel";
 import { CueTypeIcon } from "../common/CueTypeIcon";
 import { durationProgressPercent } from "./durationProgress";
+import { waitProgressPercent } from "./waitProgress";
 import { formatCueDuration } from "./formatDuration";
 import { cueFileName, formatTargetCues } from "./cueRowContent";
 import { cueNotesText, cueNotesUpdate } from "../../lib/cueNotes";
@@ -293,6 +294,16 @@ function CueRowImpl({
     fileDurationMs: cue.file_duration_ms,
     isEditing: editingCell === "duration_ms",
   });
+  const waitProgress = (columnPhase: "pre_wait" | "post_wait") => waitProgressPercent({
+    phase: timing?.wait_phase,
+    columnPhase,
+    elapsedMs: timing?.wait_elapsed_ms,
+    durationMs: timing?.wait_duration_ms,
+    isRunning,
+    isPaused,
+    isStandbyPostWait: cue.state === "standby",
+    isEditing: editingCell === "pre_wait_ms" || editingCell === "post_wait_ms",
+  });
 
   const colorAccent = COLOR_SWATCHES[cue.color] ?? "transparent";
   const fullRowTint = cueColorStyle === "full_row" && colorAccent !== "transparent"
@@ -427,6 +438,25 @@ function CueRowImpl({
           />
         )}
         <div style={{ position: "relative", zIndex: 1, width: "100%", height: "100%" }}>{content}</div>
+      </div>
+    );
+  }
+
+  function waitCell(content: React.ReactNode, progressPct: number | null) {
+    return (
+      <div style={{ position: "relative", width: "100%", height: "100%", minWidth: 0, overflow: "hidden" }}>
+        {progressPct !== null && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: "absolute", left: 3, top: 4, bottom: 4,
+              width: `calc((100% - 6px) * ${progressPct / 100})`,
+              borderRadius: 2, background: "rgba(96, 165, 250, 0.3)",
+              pointerEvents: "none", transition: "width 80ms linear",
+            }}
+          />
+        )}
+        <div style={{ position: "relative", height: "100%" }}>{content}</div>
       </div>
     );
   }
@@ -663,7 +693,7 @@ function CueRowImpl({
             </span>
           );
         }
-        return (
+        return waitCell(
           <InlineTimeCell
             cueId={cue.id}
             fieldKey="pre_wait_ms"
@@ -672,11 +702,13 @@ function CueRowImpl({
             valueMs={cue.pre_wait_ms}
             emptyValueMs={0}
             displayValue={cue.pre_wait_ms ? `${(cue.pre_wait_ms / 1000).toFixed(1)}s` : "—"}
+            transparentDisplayBackground={waitProgress("pre_wait") !== null}
             onEditingChange={(editing) => setEditingCell((current) =>
               editing ? "pre_wait_ms" : current === "pre_wait_ms" ? null : current)}
             onCommit={(cueId, valueMs) => updateCue(cueId, { pre_wait_ms: valueMs ?? 0 })}
             onFailure={onRefresh}
-          />
+          />,
+          waitProgress("pre_wait"),
         );
 
       case "duration": {
@@ -725,7 +757,7 @@ function CueRowImpl({
       }
 
       case "post_wait":
-        return (
+        return waitCell(
           <InlineTimeCell
             cueId={cue.id}
             fieldKey="post_wait_ms"
@@ -734,19 +766,21 @@ function CueRowImpl({
             valueMs={cue.post_wait_ms}
             emptyValueMs={0}
             displayValue={cue.post_wait_ms ? `${(cue.post_wait_ms / 1000).toFixed(1)}s` : "—"}
+            transparentDisplayBackground={waitProgress("post_wait") !== null}
             onEditingChange={(editing) => setEditingCell((current) =>
               editing ? "post_wait_ms" : current === "post_wait_ms" ? null : current)}
             onCommit={(cueId, valueMs) => updateCue(cueId, { post_wait_ms: valueMs ?? 0 })}
             onFailure={onRefresh}
-          />
+          />,
+          waitProgress("post_wait"),
         );
 
       case "continue": {
         const label = t(cue.continue_mode === "auto_continue"
-          ? "inspector.autoContinue"
+          ? "multiCueInspector.autoContinue"
           : cue.continue_mode === "auto_follow"
-            ? "inspector.autoFollow"
-            : "inspector.doNotContinue");
+            ? "multiCueInspector.autoFollow"
+            : "multiCueInspector.doNotContinue");
         return (
           <div
             role="img"
@@ -809,7 +843,16 @@ function CueRowImpl({
       data-parent-group-id={parentGroupId ?? undefined}
       onMouseDown={(e) => onCueDragStart(cue.id, cueIndex, e)}
       onClick={(e) => onClick(cue.id, cueIndex, parentGroupId ?? null, e)}
-      onDoubleClick={() => onDoubleClick(cue)}
+      onDoubleClick={(e) => {
+        const target = e.target;
+        if (target instanceof Element && target.closest("input, textarea, button, [contenteditable='true'], [role='textbox']")) return;
+        if (editingCell !== null) return;
+        if (cue.cue_type === "group" || cue.cue_type === "number") {
+          onToggleExpand?.(cue.id);
+          return;
+        }
+        onDoubleClick(cue);
+      }}
       onContextMenu={(e) => onContextMenu(cue.id, parentGroupId ?? null, e)}
     >
       {/* The left gutter is an unambiguous mouse-selection affordance.  Row

@@ -424,6 +424,25 @@ pub trait Cue: Send {
     /// Reset the cue to its initial Standby state (clears elapsed time etc.).
     fn reset(&mut self) -> Result<()>;
 
+    /// Complete a cue after its action finishes naturally. Cues that retain an
+    /// output after playback can override this without changing explicit Reset.
+    fn complete_naturally(&mut self) -> Result<()> {
+        self.reset()
+    }
+
+    /// Whether Stop All must address a cue that is no longer Running but still
+    /// owns a retained output layer.
+    fn has_retained_output(&self) -> bool {
+        false
+    }
+
+    /// A container's active post-wait deadline for a completed child, expressed
+    /// as `(child id, elapsed, total)`. The show loop publishes it in the usual
+    /// cue timing event stream.
+    fn pending_child_post_wait(&self) -> Option<(CueId, Duration, Duration)> {
+        None
+    }
+
     /// Called by the event loop at ~30 fps for every Running cue.
     ///
     /// The default implementation is a no-op.  Audio cues override this to

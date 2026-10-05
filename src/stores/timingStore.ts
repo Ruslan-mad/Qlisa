@@ -9,6 +9,9 @@ export interface CueTiming {
   remaining_ms: number;
   /** File-relative playhead for Audio/Video leaves; null for other cues. */
   media_position_ms: number | null;
+  wait_phase: "pre_wait" | "post_wait" | null;
+  wait_elapsed_ms: number | null;
+  wait_duration_ms: number | null;
 }
 
 interface TimingState {

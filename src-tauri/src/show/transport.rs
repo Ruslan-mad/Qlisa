@@ -53,6 +53,17 @@ fn collect_running_ids(cue: &dyn crate::cue::traits::Cue, out: &mut Vec<CueId>) 
     }
 }
 
+fn collect_retained_output_ids(cue: &dyn crate::cue::traits::Cue, out: &mut Vec<CueId>) {
+    if cue.has_retained_output() {
+        out.push(cue.id());
+    }
+    if let Some(children) = cue.child_cues() {
+        for child in children {
+            collect_retained_output_ids(child.as_ref(), out);
+        }
+    }
+}
+
 fn collect_subtree_ids(cue: &dyn crate::cue::traits::Cue, out: &mut HashSet<CueId>) {
     out.insert(cue.id());
     if let Some(children) = cue.child_cues() {
@@ -953,6 +964,19 @@ impl Transport {
 
     /// Stop all running cues with a soft fade-out.
     pub fn stop_all(&mut self, cue_list: &mut CueList) -> Result<()> {
+        // Release held visual layers first. Stopping a containing Group also
+        // resets its children, so their retained handles must be consumed now.
+        let mut retained_ids = Vec::new();
+        for cue in &cue_list.cues {
+            collect_retained_output_ids(cue.as_ref(), &mut retained_ids);
+        }
+        for id in retained_ids {
+            if let Some(cue) = cue_list.get_mut_recursive(&id) {
+                let _ = cue.stop(&self.context);
+            }
+            cue_list.remove_continuation_plan(id);
+        }
+
         let running_ids: Vec<CueId> = cue_list
             .cues
             .iter()

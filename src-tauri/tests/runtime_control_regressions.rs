@@ -116,6 +116,94 @@ fn deleting_running_visual_also_stops_paired_audio_voice() {
     assert_ne!(visual_id, uuid::Uuid::nil());
 }
 
+fn held_video_nested_under_number() -> (CueList, uuid::Uuid, uuid::Uuid) {
+    let registry = full_registry();
+    let mut video_json = registry.create(&CueType::Video).unwrap().serialize();
+    video_json["file_path"] = serde_json::json!("test.mp4");
+    video_json["hold_last_frame"] = serde_json::json!(true);
+    let mut video = registry.from_json(video_json).unwrap();
+    preload_silent_video_audio(video.as_mut());
+    let video_id = video.id();
+
+    let mut number = GroupCue::new_number();
+    number.children.push(video);
+    number.set_number_master(video_id).unwrap();
+    let number_id = number.id();
+
+    let mut outer = GroupCue::new();
+    outer.children.push(Box::new(number));
+    let outer_id = outer.id();
+    (list_of(vec![Box::new(outer)]), outer_id, video_id)
+}
+
+fn start_nested_held_video(
+    list: &mut CueList,
+    outer_id: uuid::Uuid,
+    video_id: uuid::Uuid,
+    context: &CueContext,
+) {
+    list.set_playhead(Some(outer_id)).unwrap();
+    let mut transport = Transport::new(context.clone());
+    transport.go(list).unwrap();
+    let video = list.get_recursive(&video_id).unwrap();
+    assert!(video.is_running(), "Number GO must start its master Video");
+    assert!(!video.all_voice_ids().is_empty());
+    list.get_mut_recursive(&video_id).unwrap().complete_naturally().unwrap();
+    let video = list.get_recursive(&video_id).unwrap();
+    assert!(video.has_retained_output());
+    assert!(!video.all_voice_ids().is_empty());
+}
+
+#[test]
+fn outer_group_stop_releases_retained_nested_number_video() {
+    let (mut list, outer_id, video_id) = held_video_nested_under_number();
+    let (context, _events, log) = recording_context_with_video_audio();
+    start_nested_held_video(&mut list, outer_id, video_id, &context);
+    let mut transport = Transport::new(context);
+
+    transport.stop_cue(&mut list, &outer_id).unwrap();
+
+    assert!(log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| matches!(call, EngineCall::OutputStopContent)));
+    assert!(list.get(&outer_id).unwrap().all_voice_ids().is_empty());
+}
+
+#[test]
+fn outer_group_hard_stop_releases_retained_nested_number_video_voice() {
+    let (mut list, outer_id, video_id) = held_video_nested_under_number();
+    let (context, _events, log) = recording_context_with_video_audio();
+    start_nested_held_video(&mut list, outer_id, video_id, &context);
+    let mut transport = Transport::new(context);
+
+    transport.hard_stop_cue(&mut list, &outer_id).unwrap();
+
+    assert!(log.lock().unwrap().iter().any(|call| matches!(
+        call,
+        EngineCall::OutputStopVoice { fade_ms: 0 }
+    )));
+    assert!(list.get(&outer_id).unwrap().all_voice_ids().is_empty());
+}
+
+#[test]
+fn transport_stop_all_releases_retained_nested_number_video() {
+    let (mut list, outer_id, video_id) = held_video_nested_under_number();
+    let (context, _events, log) = recording_context_with_video_audio();
+    start_nested_held_video(&mut list, outer_id, video_id, &context);
+    let mut transport = Transport::new(context);
+
+    transport.stop_all(&mut list).unwrap();
+
+    assert!(log
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|call| matches!(call, EngineCall::OutputStopContent)));
+    assert!(list.get(&outer_id).unwrap().all_voice_ids().is_empty());
+}
+
 fn configured_wait(
     registry: &CueRegistry,
     duration: Duration,

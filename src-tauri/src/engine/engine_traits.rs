@@ -402,6 +402,9 @@ pub trait OutputEngineApi: Send + Sync {
     fn video_audio_voice(&self, voice_id: VoiceId) -> Option<VoiceId>;
     /// Whether mpv still reports this voice as actively playing.
     fn is_voice_playing(&self, voice_id: VoiceId) -> bool { let _ = voice_id; false }
+    /// Whether a keep-open video voice has reached EOF while retaining its
+    /// frame. Compatibility test engines default to false.
+    fn is_voice_held_at_eof(&self, voice_id: VoiceId) -> bool { let _ = voice_id; false }
     /// Re-anchor a video's paired audio voice to its actual picture position.
     fn resync_audio_to_video(&self, voice_id: VoiceId);
     /// Current animated opacity (0.0–1.0) of a voice's layer.
@@ -577,6 +580,9 @@ impl OutputEngineApi for OutputEngine {
     }
     fn is_voice_playing(&self, voice_id: VoiceId) -> bool {
         OutputEngine::is_voice_playing(self, voice_id)
+    }
+    fn is_voice_held_at_eof(&self, voice_id: VoiceId) -> bool {
+        OutputEngine::is_voice_held_at_eof(self, voice_id)
     }
     fn resync_audio_to_video(&self, voice_id: VoiceId) {
         OutputEngine::resync_audio_to_video(self, voice_id)

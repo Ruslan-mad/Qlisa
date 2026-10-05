@@ -158,6 +158,10 @@ pub fn run(
     let mut prev_playhead_cue: Option<CueId> = None;
     // Fingerprint of the full cue list (number+name). Sending on change.
     let mut prev_cue_list_hash: u64 = 0;
+    // Wait bars are event snapshots. Remember their owners so a container wait
+    // that ends without a cue-state transition can publish one clearing edge.
+    let mut prev_wait_snapshot_ids: std::collections::HashSet<CueId> =
+        std::collections::HashSet::new();
     // Audio-freeze guard state (device-loss timeline pause).
     let mut last_cb_count: u64 = audio_engine.callback_count();
     let mut cb_last_advance: Instant = Instant::now();
@@ -185,6 +189,7 @@ pub fn run(
             &mut prev_running_cues,
             &mut prev_playhead_cue,
             &mut prev_cue_list_hash,
+            &mut prev_wait_snapshot_ids,
             &mut last_cb_count,
             &mut cb_last_advance,
             &mut audio_frozen,
@@ -261,11 +266,23 @@ fn progress_values(
 
 /// Collect `cue-time-update` snapshots recursively, including children of
 /// running Group cues.
+#[derive(Clone, Copy)]
+struct CueTimeSnapshot {
+    cue_id: CueId,
+    elapsed_ms: u64,
+    action_elapsed_ms: u64,
+    remaining_ms: Option<u64>,
+    media_position_ms: Option<u64>,
+    wait_phase: Option<&'static str>,
+    wait_elapsed_ms: Option<u64>,
+    wait_duration_ms: Option<u64>,
+}
+
 fn collect_time_snapshots(
     cues: &[Box<dyn crate::cue::traits::Cue>],
     audio_engine: &Arc<AudioEngine>,
     output_engine: &Arc<OutputEngine>,
-) -> Vec<(CueId, u64, u64, Option<u64>, Option<u64>)> {
+) -> Vec<CueTimeSnapshot> {
     let mut result = Vec::new();
     for cue in cues {
         if cue.state() == CueState::Running || cue.state() == CueState::Paused {
@@ -274,14 +291,31 @@ fn collect_time_snapshots(
             // media position, never in elapsed/remaining duration values.
             let action_elapsed = cue.action_elapsed().as_millis() as u64;
             let media_position_ms = cue.media_position_ms(audio_engine, output_engine);
-            result.push((
-                cue.id(),
-                cue.elapsed().as_millis() as u64,
-                action_elapsed,
-                cue.duration()
-                    .map(|d| (d.as_millis() as u64).saturating_sub(action_elapsed)),
+            let (wait_phase, wait_elapsed_ms, wait_duration_ms) = if !cue.is_action_started()
+                && !cue.pre_wait().is_zero()
+            {
+                (Some("pre_wait"), Some(cue.elapsed().as_millis() as u64), Some(cue.pre_wait().as_millis() as u64))
+            } else if cue.continue_mode() == ContinueMode::AutoContinue
+                && !cue.is_auto_continue_fired()
+                && !cue.post_wait().is_zero()
+            {
+                (Some("post_wait"), Some(cue.auto_continue_elapsed().as_millis() as u64), Some(cue.post_wait().as_millis() as u64))
+            } else {
+                (None, None, None)
+            };
+            result.push(CueTimeSnapshot {
+                cue_id: cue.id(),
+                elapsed_ms: cue.elapsed().as_millis() as u64,
+                action_elapsed_ms: action_elapsed,
+                remaining_ms: cue.duration().map(|d| (d.as_millis() as u64).saturating_sub(action_elapsed)),
                 media_position_ms,
-            ));
+                wait_phase,
+                wait_elapsed_ms,
+                wait_duration_ms,
+            });
+        }
+        if let Some((child_id, wait_elapsed, wait_duration)) = cue.pending_child_post_wait() {
+            merge_wait_snapshot(&mut result, child_id, wait_elapsed, wait_duration);
         }
         if let Some(children) = cue.child_cues() {
             result.extend(collect_time_snapshots(
@@ -292,6 +326,61 @@ fn collect_time_snapshots(
         }
     }
     result
+}
+
+fn merge_wait_snapshot(
+    snapshots: &mut Vec<CueTimeSnapshot>,
+    cue_id: CueId,
+    elapsed: Duration,
+    duration: Duration,
+) {
+    let wait_elapsed_ms = Some(elapsed.as_millis() as u64);
+    let wait_duration_ms = Some(duration.as_millis() as u64);
+    if let Some(snapshot) = snapshots.iter_mut().find(|snapshot| snapshot.cue_id == cue_id) {
+        snapshot.wait_phase = Some("post_wait");
+        snapshot.wait_elapsed_ms = wait_elapsed_ms;
+        snapshot.wait_duration_ms = wait_duration_ms;
+        return;
+    }
+    snapshots.push(CueTimeSnapshot {
+        cue_id,
+        elapsed_ms: 0,
+        action_elapsed_ms: 0,
+        remaining_ms: None,
+        media_position_ms: None,
+        wait_phase: Some("post_wait"),
+        wait_elapsed_ms,
+        wait_duration_ms,
+    });
+}
+
+fn append_wait_clear_snapshots(
+    snapshots: &mut Vec<CueTimeSnapshot>,
+    previous_wait_ids: &mut std::collections::HashSet<CueId>,
+) {
+    let current_wait_ids: std::collections::HashSet<CueId> = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.wait_phase.is_some())
+        .map(|snapshot| snapshot.cue_id)
+        .collect();
+    for cue_id in previous_wait_ids.difference(&current_wait_ids) {
+        // A regular timing snapshot already clears the wait phase. Do not
+        // append a zeroed terminal record over its live elapsed/media fields.
+        if snapshots.iter().any(|snapshot| snapshot.cue_id == *cue_id) {
+            continue;
+        }
+        snapshots.push(CueTimeSnapshot {
+            cue_id: *cue_id,
+            elapsed_ms: 0,
+            action_elapsed_ms: 0,
+            remaining_ms: None,
+            media_position_ms: None,
+            wait_phase: None,
+            wait_elapsed_ms: None,
+            wait_duration_ms: None,
+        });
+    }
+    *previous_wait_ids = current_wait_ids;
 }
 
 /// Collect the ids of `cue` and every descendant that is Running or Paused.
@@ -335,7 +424,7 @@ fn reap_voice_completed_children(
                         })
                         .unwrap_or(false);
                 if voice_done {
-                    let _ = child.reset();
+                    let _ = child.complete_naturally();
                 }
             }
             reap_voice_completed_children(children, completed, audio_engine, output_engine);
@@ -502,6 +591,7 @@ fn tick(
     prev_running_cues: &mut Vec<CueId>,
     prev_playhead_cue: &mut Option<CueId>,
     prev_cue_list_hash: &mut u64,
+    prev_wait_snapshot_ids: &mut std::collections::HashSet<CueId>,
     last_cb_count: &mut u64,
     cb_last_advance: &mut Instant,
     audio_frozen: &mut bool,
@@ -963,7 +1053,7 @@ fn tick(
     // Aggregate results across all lists for event emission.
     let mut all_newly_completed: Vec<(CueId, ContinueMode, Duration)> = Vec::new();
     let mut all_go_fired: Vec<CueId> = Vec::new();
-    let mut all_time_snapshots: Vec<(CueId, u64, u64, Option<u64>, Option<u64>)> = Vec::new();
+    let mut all_time_snapshots: Vec<CueTimeSnapshot> = Vec::new();
     let mut all_go_triggered: Vec<CueId> = Vec::new();
     let mut all_go_stopped: Vec<CueId> = Vec::new();
     let mut all_seq_group_playheads: Vec<Option<CueId>> = Vec::new();
@@ -984,10 +1074,32 @@ fn tick(
     pending_continuations.retain(|cue_id, pending| {
         match pending_continuation_status(pending, *cue_id, ws.cue_list_by_id(pending.list_id), now)
         {
-            PendingContinuationStatus::Invalid => false,
+            PendingContinuationStatus::Invalid => {
+                all_time_snapshots.push(CueTimeSnapshot {
+                    cue_id: *cue_id,
+                    elapsed_ms: 0,
+                    action_elapsed_ms: 0,
+                    remaining_ms: None,
+                    media_position_ms: None,
+                    wait_phase: None,
+                    wait_elapsed_ms: None,
+                    wait_duration_ms: None,
+                });
+                false
+            }
             PendingContinuationStatus::Waiting => true,
             PendingContinuationStatus::Due => {
                 ready_continuations.insert((pending.list_id, *cue_id, pending.continuation_token));
+                all_time_snapshots.push(CueTimeSnapshot {
+                    cue_id: *cue_id,
+                    elapsed_ms: 0,
+                    action_elapsed_ms: 0,
+                    remaining_ms: None,
+                    media_position_ms: None,
+                    wait_phase: None,
+                    wait_elapsed_ms: None,
+                    wait_duration_ms: None,
+                });
                 false
             }
         }
@@ -1124,7 +1236,7 @@ fn tick(
                     if cue.holds_playhead() && current_playhead == Some(id) {
                         advance_playhead_ids.push(id);
                     }
-                    let _ = cue.reset();
+                    let _ = cue.complete_naturally();
                     if let Some(remaining) = auto_continue_remaining {
                         completed_auto_continue.push((id, remaining));
                     }
@@ -1392,6 +1504,36 @@ fn tick(
         }
     }
 
+    // Auto-Follow's post-wait begins at natural media completion, after the
+    // cue has reset to Standby. Publish its existing pending deadline through
+    // the normal 30 Hz timing event so the row stays event-driven.
+    let wait_now = Instant::now();
+    for (cue_id, pending) in pending_continuations.iter() {
+        let Some(cue_list) = ws.cue_list_by_id(pending.list_id) else { continue };
+        if !pending_continuation_is_valid(pending, *cue_id, Some(cue_list)) {
+            continue;
+        }
+        let Some(cue) = cue_list.get_recursive(cue_id) else { continue };
+        let duration_ms = cue.post_wait().as_millis() as u64;
+        if duration_ms == 0 { continue; }
+        let remaining_ms = pending.due.saturating_duration_since(wait_now).as_millis() as u64;
+        all_time_snapshots.push(CueTimeSnapshot {
+            cue_id: *cue_id,
+            elapsed_ms: 0,
+            action_elapsed_ms: 0,
+            remaining_ms: None,
+            media_position_ms: None,
+            wait_phase: Some("post_wait"),
+            wait_elapsed_ms: Some(duration_ms.saturating_sub(remaining_ms)),
+            wait_duration_ms: Some(duration_ms),
+        });
+    }
+
+    // Container-owned waits (for example a sequential Group child post-wait)
+    // can end without a cue-state event. Send one terminal timing snapshot so
+    // the row clears its last progress fill.
+    append_wait_clear_snapshots(&mut all_time_snapshots, prev_wait_snapshot_ids);
+
     // Capture final playhead for the GO event (active list only, matching QLab).
     let go_final_playhead: Option<CueId> = if !all_go_triggered.is_empty() {
         ws.active_cue_list().and_then(|cl| cl.playhead_cue_id)
@@ -1538,16 +1680,18 @@ fn tick(
         let _ = handle.emit("playhead-moved", serde_json::json!({ "cue_id": new_ph }));
     }
 
-    for (cue_id, elapsed_ms, action_elapsed_ms, remaining_ms, media_position_ms) in &time_snapshots
-    {
+    for snapshot in &time_snapshots {
         let _ = handle.emit(
             "cue-time-update",
             serde_json::json!({
-                "cue_id": cue_id,
-                "elapsed_ms": elapsed_ms,
-                "action_elapsed_ms": action_elapsed_ms,
-                "remaining_ms": remaining_ms,
-                "media_position_ms": media_position_ms,
+                "cue_id": snapshot.cue_id,
+                "elapsed_ms": snapshot.elapsed_ms,
+                "action_elapsed_ms": snapshot.action_elapsed_ms,
+                "remaining_ms": snapshot.remaining_ms,
+                "media_position_ms": snapshot.media_position_ms,
+                "wait_phase": snapshot.wait_phase,
+                "wait_elapsed_ms": snapshot.wait_elapsed_ms,
+                "wait_duration_ms": snapshot.wait_duration_ms,
             }),
         );
     }
@@ -1856,15 +2000,77 @@ fn format_timer(ms: u64, show_ms: bool) -> String {
     #[cfg(test)]
     mod tests {
     use super::{
-        ordered_ready_continuations, pending_continuation_is_valid,
+        append_wait_clear_snapshots, merge_wait_snapshot, ordered_ready_continuations,
+        pending_continuation_is_valid,
         pending_continuation_status, preview_playhead_payload, progress_values,
-        should_complete_with_voice_state, PendingContinuation, PendingContinuationStatus,
+        should_complete_with_voice_state, CueTimeSnapshot, PendingContinuation,
+        PendingContinuationStatus,
     };
     use crate::cue::{memo_cue::MemoCue, traits::Cue, types::ContinueMode, wait_cue::WaitCue};
     use crate::show::cue_list::CueList;
     use crate::state::PreviewSession;
     use std::time::{Duration, Instant};
     use uuid::Uuid;
+
+    #[test]
+    fn pending_number_wait_updates_only_existing_wait_fields() {
+        let cue_id = Uuid::new_v4();
+        let mut snapshots = vec![CueTimeSnapshot {
+            cue_id,
+            elapsed_ms: 2_500,
+            action_elapsed_ms: 1_500,
+            remaining_ms: Some(900),
+            media_position_ms: Some(1_480),
+            wait_phase: None,
+            wait_elapsed_ms: None,
+            wait_duration_ms: None,
+        }];
+
+        merge_wait_snapshot(
+            &mut snapshots,
+            cue_id,
+            Duration::from_millis(400),
+            Duration::from_millis(1_000),
+        );
+
+        assert_eq!(snapshots.len(), 1);
+        let snapshot = &snapshots[0];
+        assert_eq!(snapshot.wait_phase, Some("post_wait"));
+        assert_eq!(snapshot.wait_elapsed_ms, Some(400));
+        assert_eq!(snapshot.wait_duration_ms, Some(1_000));
+        assert_eq!(snapshot.elapsed_ms, 2_500);
+        assert_eq!(snapshot.action_elapsed_ms, 1_500);
+        assert_eq!(snapshot.remaining_ms, Some(900));
+        assert_eq!(snapshot.media_position_ms, Some(1_480));
+    }
+
+    #[test]
+    fn wait_phase_clear_does_not_overwrite_live_timing_snapshot() {
+        let cue_id = Uuid::new_v4();
+        let disappeared_id = Uuid::new_v4();
+        let mut previous_wait_ids = std::collections::HashSet::from([cue_id, disappeared_id]);
+        let mut snapshots = vec![CueTimeSnapshot {
+            cue_id,
+            elapsed_ms: 1_250,
+            action_elapsed_ms: 750,
+            remaining_ms: Some(2_000),
+            media_position_ms: Some(680),
+            wait_phase: None,
+            wait_elapsed_ms: None,
+            wait_duration_ms: None,
+        }];
+
+        append_wait_clear_snapshots(&mut snapshots, &mut previous_wait_ids);
+
+        assert_eq!(snapshots.len(), 2);
+        let live = snapshots.iter().find(|snapshot| snapshot.cue_id == cue_id).unwrap();
+        assert_eq!(live.elapsed_ms, 1_250);
+        assert_eq!(live.action_elapsed_ms, 750);
+        assert_eq!(live.media_position_ms, Some(680));
+        let terminal = snapshots.iter().find(|snapshot| snapshot.cue_id == disappeared_id).unwrap();
+        assert_eq!(terminal.wait_phase, None);
+        assert!(previous_wait_ids.is_empty());
+    }
 
     #[test]
     fn ready_continuations_have_deterministic_list_and_token_order() {

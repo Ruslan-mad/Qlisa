@@ -27,7 +27,7 @@ export function MemoTab({
       />
       <div style={{ fontSize: 11, color: "var(--wc-text-faint)", marginTop: 4 }}>
         {locale === "ru"
-          ? "Отображается в столбце «Заметки» списка cue. Memo ничего не делает при GO и завершается мгновенно, поэтому Auto-Continue и Auto-Follow продолжают цепочку."
+          ? "Отображается в столбце «Заметки» списка cue. Memo ничего не делает при GO и завершается мгновенно, поэтому автопродолжение и автопереход продолжают цепочку."
           : "Shown in the cue list's Notes column. A Memo does nothing on GO — it completes instantly, so Auto-Continue and Auto-Follow still chain through it."}
       </div>
     </Section>
