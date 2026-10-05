@@ -211,11 +211,12 @@ export function OutputMonitorWindow() {
               metrics.recordReceived(ageMs);
               setAspectRatio(packet.width / packet.height);
               if (packet.status === "black") setMonitorStatus("black");
-              else {
+              else setMonitorStatus("waiting");
+              const canvas = canvasRef.current;
+              if (canvas) {
                 const conversionStart = performance.now();
-                if (canvasRef.current) paintOutputMonitorFrame(canvasRef.current, packet, imageDataRef.current);
+                paintOutputMonitorFrame(canvas, packet, imageDataRef.current);
                 metrics.recordDisplayed(performance.now() - conversionStart);
-                setMonitorStatus("waiting");
               }
             } else if (packet.status === "no_frame") {
               if (canvasRef.current) clearOutputMonitorCanvas(canvasRef.current);

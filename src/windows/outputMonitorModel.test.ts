@@ -123,4 +123,24 @@ describe("Output Monitor polling and metrics", () => {
     clearOutputMonitorCanvas(canvas);
     expect(clearCalls).toBe(1);
   });
+
+  it("paints black over the full canvas and retains the reusable ImageData", () => {
+    const state = { imageData: null as ImageData | null };
+    const imageData = { width: 2, height: 1, data: new Uint8ClampedArray(8) } as ImageData;
+    const fills: Array<[string, number, number]> = [];
+    const context = {
+      createImageData: () => imageData,
+      putImageData: () => undefined,
+      fillStyle: "",
+      fillRect: (...args: [number, number, number, number]) => fills.push([context.fillStyle, args[2], args[3]]),
+    } as unknown as CanvasRenderingContext2D;
+    const canvas = { width: 2, height: 1, getContext: () => context } as unknown as HTMLCanvasElement;
+
+    paintOutputMonitorFrame(canvas, parseOutputMonitorPacket(packet(1, [9, 8, 7, 6, 5, 4, 3, 2], 2, 1)), state);
+    const retained = state.imageData;
+    paintOutputMonitorFrame(canvas, parseOutputMonitorPacket(packet(3, [], 2, 1)), state);
+
+    expect(fills).toEqual([["#000", 2, 1]]);
+    expect(state.imageData).toBe(retained);
+  });
 });
