@@ -25,6 +25,8 @@
   trim-loop behavior, regression coverage, and runtime-test limits.
 - [Number timeline](number-timeline.md) — Number action offsets, trim ranges,
   finite repeats, waveform reuse, and timeline playhead behavior.
+- [Media preview cache](cache.md) — project-scoped waveform, thumbnail, and
+  filmstrip cache behavior, invalidation, promotion, and storage limits.
 - [Audio underrun diagnostics](audio-underrun-diagnostics.md) — callback-safe
   underrun context, reproduced cold-start evidence, and real-device test setup.
 - [Windows network runtime](windows-network-runtime.md) — NDI and FFmpeg/SRT

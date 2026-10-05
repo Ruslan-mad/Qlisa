@@ -24,6 +24,7 @@ import { DevampTab } from "./DevampTab";
 import { GroupTab } from "./GroupTab";
 import { NumberTab } from "./NumberTab";
 import { normalizeNumberCueData } from "./numberModel";
+import { shouldRetainCueDataForTarget } from "../../lib/clipEditorLoadGuards";
 import { LayerTab } from "./LayerTab";
 import { GeometryTab } from "./GeometryTab";
 import { MidiTab } from "./MidiTab";
@@ -125,6 +126,7 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
   const quickSavePendingRef = useRef(false);
   const selectionKey = selectedCueIds.join("\u0000");
   const cueLoadGeneration = useRef(0);
+  const cueDataTargetRef = useRef<string | null>(null);
   const mediaRequestGeneration = useRef(0);
   const singleSaveGeneration = useRef(0);
   const currentSaveSelectionKey = useRef(selectionKey);
@@ -132,10 +134,15 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
 
   useLayoutEffect(() => {
     currentSelectedCueId.current = selectedCueIds.length === 1 ? selectedCue?.id ?? null : null;
+    const target = selectedCue && selectedCueIds.length === 1
+      ? `${selectedCue.id}\u0000${selectedCue.cue_type}`
+      : null;
+    if (!shouldRetainCueDataForTarget(cueDataTargetRef.current, target)) setCueData(null);
+    cueDataTargetRef.current = target;
     ++mediaRequestGeneration.current;
     setSaveError(null);
     return () => { ++mediaRequestGeneration.current; };
-  }, [selectedCue?.id, selectionKey, reloadToken]);
+  }, [selectedCue?.id, selectedCue?.cue_type, selectionKey, reloadToken]);
 
   useLayoutEffect(() => {
     currentSaveSelectionKey.current = selectionKey;
@@ -152,8 +159,6 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
       setCueData(null);
       return;
     }
-    // Clear stale data immediately so type flags never mismatch cueData.
-    setCueData(null);
     const available = tabsFor(selectedCue.cue_type, t).map((t) => t.id);
     setActiveTab((prev) => (available.includes(prev) ? prev : "basics"));
     getCue(selectedCue.id)
@@ -171,7 +176,7 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
       });
     // reloadToken: the clip editor dock saved this cue — re-fetch it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCue?.id, selectedCue?.number_master_id, selectedCueIds.length, reloadToken]);
+  }, [selectedCue?.id, selectedCue?.cue_type, selectedCue?.number_master_id, selectedCueIds.length, reloadToken]);
 
   if (selectedCueIds.length > 1) {
     return <MultiCueInspector cueIds={selectedCueIds} />;

@@ -27,6 +27,7 @@ pub mod fixture;
 pub mod midi_file;
 pub mod midi_trigger;
 pub mod media_metadata;
+pub mod media_cache;
 pub mod mpv_sys;
 pub mod net_interface;
 pub mod network_io;

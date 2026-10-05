@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, groupAudioSegments, groupDurationMs, numberActionDuration, numberActionLooped, numberChildTimelineStartMs, numberDragRange, numberMasterDuration, numberPreviewItem, numberPreviewSourcePosition, numberPreviewSourceWindow, numberVisualActions, shouldRetainNumberPreviewAsset, snapNumberTime } from "./numberTimelineModel";
+import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, groupAudioSegments, groupDurationMs, numberActionDuration, numberActionLooped, numberChildTimelineStartMs, numberDragRange, numberMasterDuration, numberMediaLayoutSignature, numberMediaSourceSignature, numberPreviewItem, numberPreviewSourcePosition, numberPreviewSourceWindow, numberVisualActions, shouldRetainNumberPreviewAsset, snapNumberTime } from "./numberTimelineModel";
 import { mediaSourceMsAtPixel } from "./timelineViewModel";
 
 const child = (id: string, type: "video" | "image", extra: Record<string, unknown> = {}) => ({
@@ -106,6 +106,64 @@ describe("numberTimelineModel", () => {
     expect(shouldRetainNumberPreviewAsset("next", "next", "asset://next")).toBe(false);
     expect(shouldRetainNumberPreviewAsset("next", "previous", null)).toBe(false);
     expect(shouldRetainNumberPreviewAsset(null, "previous", "asset://previous")).toBe(false);
+  });
+
+  it("reuses Number source waveforms across edits and trims, but invalidates changed sources", () => {
+    const waveform = { peaks: [0.5], rms: [0.2], file_duration_s: 1 };
+    const asset = { cueId: "audio-a", filePath: "media/a.wav", sourceRevision: "rev-1", waveform };
+    expect(canReuseNumberWaveformAsset(asset, "audio-a", "media/a.wav", "rev-1")).toBe(true);
+    // Trim and offset are not inputs to the source waveform cache key.
+    expect(canReuseNumberWaveformAsset(asset, "audio-a", "media/a.wav", "rev-1")).toBe(true);
+    expect(canReuseNumberWaveformAsset(asset, "audio-a", "media/a.wav", "rev-2")).toBe(false);
+    expect(canReuseNumberWaveformAsset(asset, "audio-b", "media/a.wav", "rev-1")).toBe(false);
+  });
+
+  it("keeps the Number source signature stable for identity and playback-only edits", () => {
+    const cue = {
+      id: "number-a", number_master_id: "master", number_action_offsets_ms: { video: 500 },
+      children: [
+        { ...child("master", "video"), file_path: "master.mp4", media_source_revision: "m1" },
+        { ...child("video", "video"), file_path: "video.mp4", media_source_revision: "v1" },
+      ],
+    } as any;
+    const source = numberMediaSourceSignature(cue.children);
+    const initialLayout = numberMediaLayoutSignature(cue);
+    const presentationEdit = {
+      ...cue,
+      children: cue.children.map((item: any) => ({ ...item, name: "Renamed", is_disabled: true, continue_mode: "manual" })),
+    };
+    expect(numberMediaSourceSignature(presentationEdit.children)).toBe(source);
+    expect(numberMediaLayoutSignature(presentationEdit)).toBe(initialLayout);
+
+    const replaced = { ...cue, children: cue.children.map((item: any) => item.id === "video" ? { ...item, media_source_revision: "v2" } : item) };
+    expect(numberMediaSourceSignature(replaced.children)).not.toBe(source);
+    expect(numberMediaSourceSignature(cue.children.map((item: any) => item.id === "video" ? { ...item, id: "video-b" } : item))).not.toBe(source);
+    expect(numberMediaSourceSignature(cue.children.map((item: any) => item.id === "video" ? { ...item, file_path: "replacement.mp4" } : item))).not.toBe(source);
+    expect(numberMediaSourceSignature(cue.children.map((item: any) => item.id === "video" ? { ...item, cue_type: "audio" } : item))).not.toBe(source);
+  });
+
+  it("tracks trim, offset, group mode, repeats, and slices as layout changes", () => {
+    const cue = {
+      id: "number-a", number_master_id: "master", number_action_offsets_ms: { child: 100 },
+      children: [{ ...child("child", "video"), file_path: "child.mp4", media_source_revision: "v1", start_time_ms: 0, end_time_ms: 4000 }],
+    } as any;
+    const source = numberMediaSourceSignature(cue.children);
+    const layout = numberMediaLayoutSignature(cue);
+    const changed = (edit: Record<string, unknown>) => ({
+      ...cue,
+      ...edit,
+      children: cue.children.map((item: any) => ({ ...item, ...((edit.children as any[])?.[0] ?? {}) })),
+    });
+    const trimmed = changed({ children: [{ end_time_ms: 3000 }] });
+    expect(numberMediaSourceSignature(trimmed.children)).toBe(source);
+    expect(numberMediaLayoutSignature(trimmed)).not.toBe(layout);
+    expect(numberMediaLayoutSignature({ ...cue, number_action_offsets_ms: { child: 200 } })).not.toBe(layout);
+
+    const groupCue = { ...cue, children: [{ ...cue.children[0], cue_type: "group", group_mode: "simultaneous" }] };
+    const groupLayout = numberMediaLayoutSignature(groupCue);
+    expect(numberMediaLayoutSignature({ ...groupCue, children: [{ ...groupCue.children[0], group_mode: "sequential" }] })).not.toBe(groupLayout);
+    expect(numberMediaLayoutSignature({ ...groupCue, children: [{ ...groupCue.children[0], loop_count: 2 }] })).not.toBe(groupLayout);
+    expect(numberMediaLayoutSignature({ ...groupCue, children: [{ ...groupCue.children[0], slices: { markers: [500], play_counts: [1, 2] } }] })).not.toBe(groupLayout);
   });
 
   it("bounds a resize to the available source span", () => {

@@ -1,5 +1,10 @@
 import type { CueSummary } from "./types";
 
+/** Keep loaded cue data while refreshing the same selected cue. */
+export function shouldRetainCueDataForTarget(currentTarget: string | null, nextTarget: string | null): boolean {
+  return currentTarget !== null && currentTarget === nextTarget;
+}
+
 /** True when an async clip-editor result still belongs to the latest request. */
 export function isCurrentClipLoad(generation: number, currentGeneration: number): boolean {
   return generation === currentGeneration;

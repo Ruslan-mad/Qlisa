@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { CueSummary } from "../types";
-import { findCueIsLoading, isCurrentClipLoad, isCurrentPreviewStart, previewUiForCue, shouldRetryWaveform } from "../clipEditorLoadGuards";
+import { findCueIsLoading, isCurrentClipLoad, isCurrentPreviewStart, previewUiForCue, shouldRetainCueDataForTarget, shouldRetryWaveform } from "../clipEditorLoadGuards";
 import { useTimingStore } from "../../stores/timingStore";
 
 describe("clip editor async load guards", () => {
   it("rejects a result from an earlier cue generation", () => {
     expect(isCurrentClipLoad(1, 2)).toBe(false);
     expect(isCurrentClipLoad(2, 2)).toBe(true);
+  });
+
+  it("retains loaded cue data only while refreshing the same target", () => {
+    expect(shouldRetainCueDataForTarget("cue-a\u0000video", "cue-a\u0000video")).toBe(true);
+    expect(shouldRetainCueDataForTarget("cue-a\u0000video", "cue-b\u0000video")).toBe(false);
+    expect(shouldRetainCueDataForTarget("cue-a\u0000video", "cue-a\u0000image")).toBe(false);
+    expect(shouldRetainCueDataForTarget(null, "cue-a\u0000video")).toBe(false);
   });
 
   it("finds nested cue loading state and retries only on its false edge", () => {

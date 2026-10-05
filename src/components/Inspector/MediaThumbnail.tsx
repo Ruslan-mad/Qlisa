@@ -18,21 +18,34 @@ import { useVideoPreviewTransport } from "./mediaPreviewTransport";
 // Session-lifetime cache: the backend caches JPEGs on disk, but this avoids
 // re-invoking (and re-transferring the data URL) on every cue re-selection.
 const thumbnailCache = new Map<string, string>();
+const MAX_THUMBNAIL_CACHE_ENTRIES = 96;
+
+function rememberThumbnail(key: string, value: string) {
+  thumbnailCache.delete(key);
+  thumbnailCache.set(key, value);
+  if (thumbnailCache.size > MAX_THUMBNAIL_CACHE_ENTRIES) {
+    const oldest = thumbnailCache.keys().next().value;
+    if (oldest !== undefined) thumbnailCache.delete(oldest);
+  }
+}
 
 export function MediaThumbnail({
   path,
   seekInto,
+  sourceRevision,
 }: {
   path: string;
+  sourceRevision?: string;
   /** Pick a frame ~15% in (videos — frame 0 is often black). */
   seekInto: boolean;
 }) {
   const { t } = useLocale();
-  const [url, setUrl] = useState<string | null>(() => thumbnailCache.get(path) ?? null);
+  const cacheKey = `${path}\u0000${sourceRevision ?? ""}\u0000${seekInto ? 1 : 0}`;
+  const [url, setUrl] = useState<string | null>(() => thumbnailCache.get(cacheKey) ?? null);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    const cached = thumbnailCache.get(path);
+    const cached = thumbnailCache.get(cacheKey);
     setUrl(cached ?? null);
     setFailed(false);
     if (cached) return;
@@ -40,14 +53,14 @@ export function MediaThumbnail({
     let stale = false;
     getMediaThumbnail(path, seekInto)
       .then((dataUrl) => {
-        thumbnailCache.set(path, dataUrl);
+        rememberThumbnail(cacheKey, dataUrl);
         if (!stale) setUrl(dataUrl);
       })
       .catch(() => {
         if (!stale) setFailed(true);
       });
     return () => { stale = true; };
-  }, [path, seekInto]);
+  }, [path, seekInto, cacheKey]);
 
   if (failed) return null;
 
@@ -84,18 +97,20 @@ export function MediaPreview({
   kind,
   startMs = 0,
   durationMs = 0,
+  sourceRevision,
 }: {
   cueId: string;
   path: string;
   kind: MediaPreviewKind;
   startMs?: number;
   durationMs?: number;
+  sourceRevision?: string;
 }) {
   if (kind === "image") {
-    return <MediaThumbnail path={path} seekInto={false} />;
+    return <MediaThumbnail path={path} seekInto={false} sourceRevision={sourceRevision} />;
   }
 
-  return <VideoPreview cueId={cueId} path={path} startMs={startMs} durationMs={durationMs} />;
+  return <VideoPreview cueId={cueId} path={path} sourceRevision={sourceRevision} startMs={startMs} durationMs={durationMs} />;
 }
 
 type PreviewFrameMetadata = { mediaTime: number; presentedFrames: number };
@@ -107,11 +122,13 @@ type VideoWithFrameCallbacks = HTMLVideoElement & {
 function VideoPreview({
   cueId,
   path,
+  sourceRevision,
   startMs,
   durationMs,
 }: {
   cueId: string;
   path: string;
+  sourceRevision?: string;
   startMs: number;
   durationMs: number;
 }) {
@@ -123,6 +140,7 @@ function VideoPreview({
   const [authorizedSource, setAuthorizedSource] = useState<{
     cueId: string;
     path: string;
+    sourceRevision?: string;
     url: string;
   } | null>(null);
   const [intersection, setIntersection] = useState<{
@@ -135,6 +153,7 @@ function VideoPreview({
   // Never render a URL authorized for the previously selected cue, not even
   // for the single render before the async authorization effect resets state.
   const source = authorizedSource?.cueId === cueId && authorizedSource.path === path
+    && authorizedSource.sourceRevision === sourceRevision
     ? authorizedSource.url
     : null;
   const intersecting = source !== null
@@ -157,7 +176,7 @@ function VideoPreview({
       .then((resolvedPath) => {
         if (stale) return;
         const url = toMediaAssetUrl(resolvedPath, convertFileSrc);
-        if (url) setAuthorizedSource({ cueId, path, url });
+        if (url) setAuthorizedSource({ cueId, path, sourceRevision, url });
         else setFailed(true);
       })
       .catch(() => {
@@ -165,7 +184,7 @@ function VideoPreview({
       });
 
     return () => { stale = true; };
-  }, [cueId, path]);
+  }, [cueId, path, sourceRevision]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -270,7 +289,7 @@ function VideoPreview({
   }, [failed, source]);
 
   if (failed) {
-    return <MediaThumbnail path={path} seekInto />;
+    return <MediaThumbnail path={path} seekInto sourceRevision={sourceRevision} />;
   }
 
   return (
@@ -289,7 +308,7 @@ function VideoPreview({
     >
       {source ? (
         <video
-          key={`${identity}\u0000${source}`}
+          key={`${identity}\u0000${sourceRevision ?? ""}\u0000${source}`}
           ref={videoRef}
           src={source}
           muted

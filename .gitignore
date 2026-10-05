@@ -36,6 +36,9 @@ src-tauri/WixTools/
 # Workspace files (user data, not source)
 *.inkue
 *.wincue
+*.qlisa.cache/
+*.inkue.cache/
+*.wincue.cache/
 
 # Loose user data at repo root (Open Stage Control sessions, runtime config) —
 # personal test artifacts, never source.

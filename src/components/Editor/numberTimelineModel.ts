@@ -22,13 +22,73 @@ export interface NumberAudioSegment {
 
 type WaveformAsset = WaveformData | null | undefined;
 
+type NumberMediaIdentityCue = CueSummary & {
+  start_time_ms?: number | null;
+  end_time_ms?: number | null;
+  display_duration_ms?: number | null;
+  cached_duration_ms?: number | null;
+  loop_count?: number | null;
+  slices?: { markers?: number[]; play_counts?: number[] } | null;
+  playlist_loop?: boolean;
+  children?: NumberMediaIdentityCue[];
+};
+
+function mediaIdentityTree(cues: readonly NumberMediaIdentityCue[]): unknown[] {
+  const identities: unknown[] = [];
+  for (const cue of cues) {
+    if (cue.cue_type === "audio" || cue.cue_type === "video") {
+      identities.push([cue.id, cue.cue_type, cue.file_path, cue.media_source_revision ?? null]);
+    } else if (cue.children) {
+      identities.push([cue.id, cue.cue_type, mediaIdentityTree(cue.children)]);
+    }
+  }
+  return identities;
+}
+
+/** Identity of media sources used by Number asset loading; excludes cue labels and playback flags. */
+export function numberMediaSourceSignature(cues: readonly CueSummary[]): string {
+  return JSON.stringify(mediaIdentityTree(cues as readonly NumberMediaIdentityCue[]));
+}
+
+function mediaLayoutTree(cues: readonly NumberMediaIdentityCue[]): unknown[] {
+  return cues.map((cue) => [
+    cue.id,
+    cue.cue_type,
+    cue.duration_ms,
+    cue.file_duration_ms,
+    cue.cached_duration_ms,
+    cue.start_time_ms,
+    cue.end_time_ms,
+    cue.display_duration_ms,
+    cue.pre_wait_ms,
+    cue.post_wait_ms,
+    cue.group_mode,
+    cue.playlist_loop,
+    cue.loop_count,
+    cue.slices?.markers ?? null,
+    cue.slices?.play_counts ?? null,
+    mediaLayoutTree(cue.children ?? []),
+  ]);
+}
+
+/** Number timing and Group composition inputs; excludes names, mute, and continue mode. */
+export function numberMediaLayoutSignature(cue: Pick<NumberCueData, "children" | "number_action_offsets_ms" | "number_master_id">): string {
+  return JSON.stringify([
+    cue.number_master_id,
+    cue.number_action_offsets_ms ?? {},
+    mediaLayoutTree(cue.children as readonly NumberMediaIdentityCue[]),
+  ]);
+}
+
 /** Full-file waveform peaks remain valid when only a cue's trim range changes. */
 export function canReuseNumberWaveformAsset(
-  asset: { cueId: string; filePath: string | null; waveform: WaveformAsset } | null | undefined,
+  asset: { cueId: string; filePath: string | null; sourceRevision?: string; waveform: WaveformAsset } | null | undefined,
   cueId: string,
   filePath: string | null | undefined,
+  sourceRevision?: string,
 ): boolean {
-  return Boolean(filePath && asset?.waveform && asset.cueId === cueId && asset.filePath === filePath);
+  return Boolean(filePath && asset?.waveform && asset.cueId === cueId && asset.filePath === filePath
+    && asset.sourceRevision === sourceRevision);
 }
 
 /**

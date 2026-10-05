@@ -1,7 +1,7 @@
 // Inline audio waveform with trim markers, drawn DAW-style: a dim peak
 // envelope with a brighter RMS body inside it, one column per CSS pixel.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AudioCueData, WaveformData } from "../../lib/types";
 import { getWaveformPeaks } from "../../lib/commands";
 import { TrimStrip, type TrimPainter } from "./TrimStrip";
@@ -31,14 +31,18 @@ export function WaveformViewer({
 }) {
   const { t } = useLocale();
   const [waveform, setWaveform] = useState<WaveformData | null>(null);
+  const requestGeneration = useRef(0);
 
   useEffect(() => {
+    const generation = ++requestGeneration.current;
+    let stale = false;
     setWaveform(null);
     if (!cue.file_path) return;
     getWaveformPeaks(cue.id, WAVEFORM_BINS)
-      .then(setWaveform)
-      .catch(() => setWaveform({ peaks: [], rms: [], file_duration_s: 0 }));
-  }, [cue.id, cue.file_path]);
+      .then((data) => { if (!stale && generation === requestGeneration.current) setWaveform(data); })
+      .catch(() => { if (!stale && generation === requestGeneration.current) setWaveform({ peaks: [], rms: [], file_duration_s: 0 }); });
+    return () => { stale = true; };
+  }, [cue.id, cue.file_path, cue.media_source_revision]);
 
   const paint = useCallback<TrimPainter>(
     (ctx, W, H, startX, endX) => {

@@ -13,7 +13,7 @@ import { useLocale } from "../../i18n";
 import { useTimingStore } from "../../stores/timingStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { CLIP_EDITOR_TAB_LABELS, previewPlayheadForCue } from "../../lib/clipEditorPrefs";
-import { findCueIsLoading, isCurrentClipLoad, isCurrentPreviewStart, previewUiForCue, shouldRetryWaveform, type CueBoundPreviewUi } from "../../lib/clipEditorLoadGuards";
+import { findCueIsLoading, isCurrentClipLoad, isCurrentPreviewStart, previewUiForCue, shouldRetainCueDataForTarget, shouldRetryWaveform, type CueBoundPreviewUi } from "../../lib/clipEditorLoadGuards";
 import { formatInspectorSaveError, isCurrentCueRequest, persistThenCommit } from "../Inspector/singleCueSave";
 import { normalizeNumberCueData } from "../Inspector/numberModel";
 import { CueTypeIcon } from "../common/CueTypeIcon";
@@ -22,7 +22,7 @@ import { createMediaPreviewIdentity, hasBlockingPreviewOverlay, shouldStepPrevie
 import { VideoPreviewControls } from "../Inspector/VideoPreviewControls";
 import { NumberPreviewControls } from "../Inspector/NumberPreview";
 import { useVideoPreviewTransport } from "../Inspector/mediaPreviewTransport";
-import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, numberActionDuration, numberActionLooped, numberGroupTimelineActions, numberMasterDuration, numberVisualActions, snapNumberTime } from "./numberTimelineModel";
+import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, numberActionDuration, numberActionLooped, numberGroupTimelineActions, numberMasterDuration, numberMediaLayoutSignature, numberMediaSourceSignature, numberVisualActions, snapNumberTime } from "./numberTimelineModel";
 import { useNumberPreviewStore } from "../../stores/numberPreviewStore";
 import {
   CLIP_EDITOR_BODY_PADDING_BOTTOM,
@@ -51,6 +51,7 @@ type NumberEditableChild = NumberCueData["children"][number] & {
 type NumberMediaAsset = {
   cueId: string;
   filePath: string | null;
+  sourceRevision?: string;
   filmstripKey: string | null;
   waveform: WaveformData | null;
   tiles: HTMLImageElement[] | null;
@@ -134,7 +135,9 @@ export function ClipEditorDock({
   const previewRequestRef = useRef(0);
   const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cueLoadGenerationRef = useRef(0);
+  const cueDataTargetRef = useRef<string | null>(null);
   const assetGenerationRef = useRef(0);
+  const numberAssetGenerationRef = useRef(0);
   const waveformRequestRef = useRef(0);
   const previousLoadingRef = useRef<{ cueId: string | null; isLoading: boolean | undefined }>({ cueId: null, isLoading: undefined });
   const saveGenerationRef = useRef(0);
@@ -237,11 +240,15 @@ export function ClipEditorDock({
     return () => { ++saveGenerationRef.current; };
   }, [cueId, reloadToken]);
 
+  useLayoutEffect(() => {
+    if (!shouldRetainCueDataForTarget(cueDataTargetRef.current, cueId)) setCue(null);
+    cueDataTargetRef.current = cueId;
+  }, [cueId]);
+
   // Fetch the cue JSON — again whenever the inspector saved it (reloadToken).
   useEffect(() => {
     const generation = ++cueLoadGenerationRef.current;
     let cancelled = false;
-    setCue(null);
     if (!cueId) return () => { cancelled = true; };
     getCue(cueId)
       .then((data) => {
@@ -263,18 +270,43 @@ export function ClipEditorDock({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cueId, reloadToken]);
 
-  // (Re)load the media preview when the target's file changes — not on every
+  const mediaSourceIdentity = cue?.id === cueId && cue.file_path
+    ? JSON.stringify([cue.id, cue.cue_type, cue.file_path, cue.media_source_revision ?? null])
+    : null;
+  const previousMediaSourceIdentityRef = useRef<string | null>(null);
+
+  useLayoutEffect(() => {
+    if (previousMediaSourceIdentityRef.current === mediaSourceIdentity) return;
+    previousMediaSourceIdentityRef.current = mediaSourceIdentity;
+    // Invalidate requests before paint when selection or source revision changes.
+    ++assetGenerationRef.current;
+    ++waveformRequestRef.current;
+    setWaveform(null);
+    setTiles(null);
+    setWantDetail(false);
+    setZoomView(null);
+    setRangeStrip(null);
+  }, [mediaSourceIdentity]);
+
+  // (Re)load the media preview when the target's source changes — not on every
   // cue re-fetch, so inspector edits don't re-decode the waveform/filmstrip.
   useEffect(() => {
     const generation = ++assetGenerationRef.current;
     let cancelled = false;
+    if (!cueId || !cue?.file_path || cue.id !== cueId) {
+      setWaveform(null);
+      setTiles(null);
+      setWantDetail(false);
+      setZoomView(null);
+      setRangeStrip(null);
+      return;
+    }
     setWaveform(null);
     setTiles(null);
     setWantDetail(false);
     setZoomView(null);
     setRangeStrip(null);
     const waveformRequest = ++waveformRequestRef.current;
-    if (!cueId || !cue?.file_path) return;
     if (cue.cue_type === "video") {
       getWaveformPeaks(cueId, 2000)
         .then((data) => {
@@ -306,34 +338,20 @@ export function ClipEditorDock({
     }
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cueId, cue?.file_path, cue?.cue_type]);
+  }, [mediaSourceIdentity]);
 
   // Number tracks use the same decoded media primitives as the ordinary
   // timeline, but each child owns its waveform/filmstrip.
-  // Use an explicit nested signature: some cue refresh paths retain the
-  // parent object while replacing a trimmed child in-place, which otherwise
-  // leaves the old filmstrip cached in this effect.
-  const numberMediaSignature = cue?.cue_type === "number"
-    ? JSON.stringify(cue.children, (_key, value) => {
-      if (value && typeof value === "object") {
-        const item = value as Record<string, unknown>;
-        if ("id" in item || "cue_type" in item) {
-          return {
-            id: item.id,
-            cue_type: item.cue_type,
-            file_path: item.file_path,
-            start_time_ms: item.start_time_ms,
-            end_time_ms: item.end_time_ms,
-            duration_ms: item.duration_ms,
-            file_duration_ms: item.file_duration_ms,
-            children: item.children,
-          };
-        }
-      }
-      return value;
-    })
-    : "";
+  // Track only fields that affect decoded media or composed Group waveforms.
+  // Name, mute, and other inspector edits must not rerun this asset effect.
+  const numberCueForMedia = cue?.cue_type === "number" ? cue as NumberCueData : null;
+  const numberMediaSourceKey = numberCueForMedia ? numberMediaSourceSignature(numberCueForMedia.children) : "";
+  const numberMediaLayoutKey = numberCueForMedia ? numberMediaLayoutSignature(numberCueForMedia) : "";
+  useLayoutEffect(() => {
+    ++numberAssetGenerationRef.current;
+  }, [cue?.id, cue?.cue_type, numberMediaSourceKey, numberMediaLayoutKey]);
   useEffect(() => {
+    const generation = ++numberAssetGenerationRef.current;
     let cancelled = false;
     if (!cue || cue.cue_type !== "number") { setNumberAssets({}); return () => { cancelled = true; }; }
     const numberCue = cue as NumberCueData;
@@ -356,13 +374,15 @@ export function ClipEditorDock({
     const pendingAssets = Object.fromEntries(mediaChildren.map((child) => {
       const cached = numberAssets[child.id];
       const path = child.file_path ?? null;
-      const canReuseWaveform = canReuseNumberWaveformAsset(cached, child.id, path);
+      const sourceRevision = child.media_source_revision;
+      const canReuseWaveform = canReuseNumberWaveformAsset(cached, child.id, path, sourceRevision);
       const nextFilmstripKey = filmstripKey(child);
       const sameSource = cached?.cueId === child.id && cached.filePath === path;
-      const canReuseTiles = sameSource && cached.filmstripKey === nextFilmstripKey;
+      const canReuseTiles = sameSource && cached.sourceRevision === sourceRevision && cached.filmstripKey === nextFilmstripKey;
       return [child.id, {
         cueId: child.id,
         filePath: path,
+        sourceRevision,
         filmstripKey: nextFilmstripKey,
         waveform: canReuseWaveform ? cached.waveform : null,
         tiles: canReuseTiles ? cached.tiles : null,
@@ -372,14 +392,16 @@ export function ClipEditorDock({
     Promise.all(mediaChildren.map(async (child) => {
         const cached = numberAssets[child.id];
         const path = child.file_path ?? null;
-        const waveform = canReuseNumberWaveformAsset(cached, child.id, path)
+        const sourceRevision = child.media_source_revision;
+        const waveform = canReuseNumberWaveformAsset(cached, child.id, path, sourceRevision)
           ? cached!.waveform!
           : await getWaveformPeaks(child.id, 1200).catch(() => null);
         const source = cueSourceWindow(child);
         const sourceStartMs = source.startMs;
         const sourceEndMs = source.endMs;
         const key = filmstripKey(child);
-        const canReuseTiles = cached?.cueId === child.id && cached.filePath === path && cached.filmstripKey === key;
+        const canReuseTiles = cached?.cueId === child.id && cached.filePath === path
+          && cached.sourceRevision === sourceRevision && cached.filmstripKey === key;
         const tiles = child.cue_type === "video" && child.file_path
           ? canReuseTiles
             ? cached.tiles
@@ -388,10 +410,10 @@ export function ClipEditorDock({
               : getVideoFilmstrip(child.file_path, FILMSTRIP_TILES, FILMSTRIP_TILE_WIDTH))
               .then((urls) => Promise.all(urls.map(loadImage))).catch(() => null)
           : null;
-        return [child.id, { cueId: child.id, filePath: path, filmstripKey: key, waveform, tiles }] as const;
+        return [child.id, { cueId: child.id, filePath: path, sourceRevision, filmstripKey: key, waveform, tiles }] as const;
       }))
       .then((entries) => {
-        if (cancelled) return;
+        if (cancelled || generation !== numberAssetGenerationRef.current) return;
         const assets = Object.fromEntries(entries) as Record<string, NumberMediaAsset>;
         const addGroupAssets = (children: typeof numberCue.children) => {
           for (const child of children) {
@@ -409,7 +431,7 @@ export function ClipEditorDock({
         setNumberAssets(assets);
       });
     return () => { cancelled = true; };
-  }, [cue, cueTreeIsLoading, numberMediaSignature]);
+  }, [cue?.id, cue?.cue_type, cueTreeIsLoading, numberMediaSourceKey, numberMediaLayoutKey]);
 
   // A background media decode can still be running when the first waveform
   // request arrives. The workspace summary is the authoritative completion

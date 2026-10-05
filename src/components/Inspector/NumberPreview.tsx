@@ -73,8 +73,8 @@ export function NumberPreview({ cue }: NumberPreviewProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const loadGenerationRef = useRef(0);
   const item = useMemo(() => numberPreviewItem(cue, positionMs), [cue, positionMs]);
-  const itemKey = item ? `${item.id}\u0000${item.cue_type}\u0000${item.file_path ?? ""}` : null;
-  const assetItemKey = assetItem ? `${assetItem.id}\u0000${assetItem.cue_type}\u0000${assetItem.file_path ?? ""}` : null;
+  const itemKey = item ? `${item.id}\u0000${item.cue_type}\u0000${item.file_path ?? ""}\u0000${item.media_source_revision ?? ""}` : null;
+  const assetItemKey = assetItem ? `${assetItem.id}\u0000${assetItem.cue_type}\u0000${assetItem.file_path ?? ""}\u0000${assetItem.media_source_revision ?? ""}` : null;
   // Keep the last successfully decoded source visible while the next layer
   // is loading. This avoids a black flash when the Number cursor crosses a
   // layer boundary. A missing visual still clears the old source below.
@@ -108,7 +108,7 @@ export function NumberPreview({ cue }: NumberPreviewProps) {
       if (!stale && generation === loadGenerationRef.current) setFailed(true);
     });
     return () => { stale = true; };
-  }, [item?.id, item?.cue_type, item?.file_path]);
+  }, [item?.id, item?.cue_type, item?.file_path, item?.media_source_revision]);
 
   useEffect(() => {
     // Do not let the previous layer keep playing audibly/visually while the
@@ -207,7 +207,7 @@ export function NumberPreview({ cue }: NumberPreviewProps) {
               <img src={renderAssetUrl} alt={renderItem.name} style={mediaStyle} />
             ) : (
               <video
-              key={`${renderItem?.id}\u0000${renderAssetUrl}`}
+              key={`${renderItem?.id}\u0000${renderItem?.media_source_revision ?? ""}\u0000${renderAssetUrl}`}
               ref={videoRef}
                 src={renderAssetUrl}
                 muted

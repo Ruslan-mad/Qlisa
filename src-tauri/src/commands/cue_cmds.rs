@@ -100,6 +100,10 @@ pub struct CueSummary {
     pub duration_ms: Option<u64>,
     /// Assigned file path for media cues, `None` for other cue types.
     pub file_path: Option<String>,
+    /// Runtime source fingerprint. This is derived from path, size and mtime;
+    /// it is never serialized into the project cue data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_source_revision: Option<String>,
     /// Resolved cue targets for Stop/Fade/Devamp/Command rows. `None` means
     /// this cue type has no target column content; an empty list means the
     /// command currently has no explicit targets.
@@ -633,6 +637,9 @@ fn summarise(
         file_path: cue
             .media_file_path()
             .map(|p| p.to_string_lossy().into_owned()),
+        media_source_revision: if matches!(cue.cue_type(), CueType::Audio | CueType::Video | CueType::Image) {
+            cue.media_file_path().and_then(|path| crate::engine::media_cache::media_source_revision(path, workspace_dir))
+        } else { None },
         target_cues,
         targets_all,
         memo_text: cue.memo_text().map(str::to_string),
@@ -969,7 +976,31 @@ pub fn get_cue(cue_id: String, state: State<'_, AppState>) -> Result<serde_json:
     let ws = state.workspace.lock().map_err(|e| e.to_string())?;
     let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
     let cue = cue_list.get_recursive(&id).ok_or("Cue not found")?;
-    Ok(cue.serialize())
+    let mut data = cue.serialize();
+    let project_dir = ws.file_path.as_deref().and_then(std::path::Path::parent);
+    let project_dir = project_dir.map(std::path::Path::to_path_buf);
+    drop(ws);
+    add_media_source_revisions(&mut data, project_dir.as_deref());
+    Ok(data)
+}
+
+fn add_media_source_revisions(value: &mut serde_json::Value, project_dir: Option<&std::path::Path>) {
+    let Some(object) = value.as_object_mut() else { return };
+    let media_cue = matches!(object.get("cue_type").and_then(serde_json::Value::as_str), Some("audio" | "video" | "image"));
+    if media_cue {
+      if let Some(path) = object.get("file_path").and_then(serde_json::Value::as_str) {
+        if let Some(revision) = crate::engine::media_cache::media_source_revision(std::path::Path::new(path), project_dir) {
+            object.insert("media_source_revision".into(), serde_json::Value::String(revision));
+        } else {
+            object.remove("media_source_revision");
+        }
+      }
+    } else {
+        object.remove("media_source_revision");
+    }
+    if let Some(children) = object.get_mut("children").and_then(serde_json::Value::as_array_mut) {
+        for child in children { add_media_source_revisions(child, project_dir); }
+    }
 }
 
 /// Return complete serialised data for several cues, preserving the requested
@@ -3928,47 +3959,60 @@ fn compute_waveform_bins(samples: &[f32], channels: usize, bins: usize) -> (Vec<
 /// `bins` controls the number of columns (typically 400–800 for UI use).
 /// Returns an error if the cue has not been decoded yet.
 #[tauri::command]
-pub fn get_waveform_peaks(
+pub async fn get_waveform_peaks(
     cue_id: String,
     bins: usize,
     state: State<'_, AppState>,
 ) -> Result<WaveformData, String> {
     let id: Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
 
-    // Hold the workspace lock only long enough to clone decoded samples and the
-    // source path. Number children can be moved into a Group without passing
-    // through the normal top-level preload queue, so a nested media cue may not
-    // have PCM in memory yet. Decode that source after releasing the lock below.
-    let (decoded, file_path) = {
+    // Hold the workspace lock only long enough to clone the source path and
+    // cache scope. On a cache miss, decode the current file so that cached
+    // peaks always match the source fingerprint used by the cache key.
+    let (file_path, cache_scope) = {
         let ws = state.workspace.lock().map_err(|e| e.to_string())?;
         let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
         let cue = cue_list.get_recursive(&id).ok_or("Cue not found")?;
-        (cue.extract_decoded_audio(), cue.media_file_path().map(std::path::Path::to_path_buf))
+        let scope = ws.media_cache_scope();
+        (cue.media_file_path().map(std::path::Path::to_path_buf), scope)
         // workspace lock dropped here
     };
-
-    let (samples, channels, _sample_rate, file_duration) = match decoded {
-        Some(decoded) => decoded,
-        None => {
-            let path = file_path.ok_or("Audio not loaded yet — assign a file first")?;
-            let (samples, channels, sample_rate) = crate::cue::media_decode::decode_audio_track_legacy(&path)
-                .map_err(|error| format!("Could not decode audio track: {error}"))?
-                .ok_or("Media has no audio track")?;
-            let duration = std::time::Duration::from_secs_f64(
-                samples.len() as f64 / channels.max(1) as f64 / sample_rate.max(1) as f64,
-            );
-            (std::sync::Arc::new(samples), channels, sample_rate, duration)
-        }
-    };
-
-    // Compute peaks + RMS outside the lock.
-    let (peaks, rms) = compute_waveform_bins(&samples, channels as usize, bins);
-
-    Ok(WaveformData {
-        peaks,
-        rms,
-        file_duration_s: file_duration.as_secs_f64(),
-    })
+    let path = file_path.ok_or("Audio not loaded yet — assign a file first")?;
+    let params = format!("bins={bins}");
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut generation_error = None;
+        let payload = cache_scope.get_or_generate_validated(
+            &path,
+            "waveform",
+            &params,
+            "waveform-json-v1",
+            |payload| payload == b"NO_AUDIO_TRACK" || serde_json::from_slice::<WaveformData>(payload).is_ok(),
+            || {
+                let decoded_audio = match crate::cue::media_decode::decode_audio_track_legacy(&path) {
+                    Ok(value) => value.map(|(samples, channels, sample_rate)| {
+                        let duration = std::time::Duration::from_secs_f64(
+                            samples.len() as f64 / channels.max(1) as f64 / sample_rate.max(1) as f64,
+                        );
+                        (std::sync::Arc::new(samples), channels, sample_rate, duration)
+                    }),
+                    Err(error) => {
+                        generation_error = Some(format!("Could not decode audio track: {error}"));
+                        return None;
+                    }
+                };
+                let Some((samples, channels, _sample_rate, file_duration)) = decoded_audio else {
+                    return Some(b"NO_AUDIO_TRACK".to_vec());
+                };
+                let (peaks, rms) = compute_waveform_bins(&samples, channels as usize, bins);
+                serde_json::to_vec(&WaveformData { peaks, rms, file_duration_s: file_duration.as_secs_f64() })
+                    .map_err(|error| generation_error = Some(format!("Could not encode waveform: {error}")))
+                    .ok()
+            },
+        );
+        let payload = payload.ok_or_else(|| generation_error.unwrap_or_else(|| "Could not prepare waveform".into()))?;
+        if payload == b"NO_AUDIO_TRACK" { return Err("Media has no audio track".into()); }
+        serde_json::from_slice(&payload).map_err(|error| format!("Invalid cached waveform: {error}"))
+    }).await.map_err(|error| error.to_string())?
 }
 
 /// Push a level change straight to a playing cue's voice, **without** touching
@@ -5148,12 +5192,13 @@ pub async fn get_media_thumbnail(
     seek_into: bool,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let lib = state
-        .output_engine
-        .try_mpv_lib_arc()
-        .ok_or_else(|| crate::engine::output_engine::NO_VIDEO_OUTPUT.to_string())?;
+    let cache_scope = {
+        let workspace = state.workspace.lock().map_err(|error| error.to_string())?;
+        workspace.media_cache_scope()
+    };
+    let lib = state.output_engine.try_mpv_lib_arc();
     tauri::async_runtime::spawn_blocking(move || {
-        crate::engine::thumbnails::media_thumbnail(&lib, std::path::Path::new(&path), seek_into)
+        crate::engine::thumbnails::media_thumbnail_in_scope(lib.as_deref(), std::path::Path::new(&path), seek_into, &cache_scope)
             .map_err(|e| e.to_string())
     })
     .await
@@ -5201,16 +5246,18 @@ pub async fn get_video_filmstrip(
     tile_width: u32,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
-    let lib = state
-        .output_engine
-        .try_mpv_lib_arc()
-        .ok_or_else(|| crate::engine::output_engine::NO_VIDEO_OUTPUT.to_string())?;
+    let cache_scope = {
+        let workspace = state.workspace.lock().map_err(|error| error.to_string())?;
+        workspace.media_cache_scope()
+    };
+    let lib = state.output_engine.try_mpv_lib_arc();
     tauri::async_runtime::spawn_blocking(move || {
-        crate::engine::thumbnails::video_filmstrip(
-            &lib,
+        crate::engine::thumbnails::video_filmstrip_in_scope(
+            lib.as_deref(),
             std::path::Path::new(&path),
             tiles,
             tile_width,
+            &cache_scope,
         )
         .map_err(|e| e.to_string())
     })
@@ -5229,18 +5276,20 @@ pub async fn get_video_filmstrip_range(
     tile_width: u32,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
-    let lib = state
-        .output_engine
-        .try_mpv_lib_arc()
-        .ok_or_else(|| crate::engine::output_engine::NO_VIDEO_OUTPUT.to_string())?;
+    let cache_scope = {
+        let workspace = state.workspace.lock().map_err(|error| error.to_string())?;
+        workspace.media_cache_scope()
+    };
+    let lib = state.output_engine.try_mpv_lib_arc();
     tauri::async_runtime::spawn_blocking(move || {
-        crate::engine::thumbnails::video_filmstrip_range(
-            &lib,
+        crate::engine::thumbnails::video_filmstrip_range_in_scope(
+            lib.as_deref(),
             std::path::Path::new(&path),
             start_s,
             end_s,
             tiles,
             tile_width,
+            &cache_scope,
         )
         .map_err(|e| e.to_string())
     })

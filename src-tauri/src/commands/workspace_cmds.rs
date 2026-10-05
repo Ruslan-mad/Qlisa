@@ -147,10 +147,16 @@ pub fn new_workspace(
 /// Save the workspace to the given path.
 #[tauri::command]
 pub fn save_workspace(path: String, state: State<'_, AppState>) -> Result<(), String> {
-    {
+    let (old_path, new_path, old_scope, new_scope) = {
         let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+        let old_path = ws.file_path.clone();
+        let old_scope = ws.media_cache_scope();
         ws.save(Some(PathBuf::from(path)))
             .map_err(|e| e.to_string())?;
+        (old_path, ws.file_path.clone(), old_scope, ws.media_cache_scope())
+    };
+    if old_path != new_path {
+        old_scope.promote_to(&new_scope);
     }
     // Work is now persisted to the real `.inkue` file — drop the crash-recovery
     // snapshot so a crash right after saving does not prompt a redundant restore.

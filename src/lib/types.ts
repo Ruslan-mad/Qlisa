@@ -237,6 +237,8 @@ export interface CueSummary {
   post_wait_ms: number;
   duration_ms: number | null;
   file_path: string | null;
+  /** Runtime revision of the assigned media source, used to invalidate derived previews. */
+  media_source_revision?: string;
   /** Resolved cue names and numbers for command cue Target cells. */
   target_cues?: CueTargetSummary[];
   /** Stop Cue with no explicit target means all cues. */

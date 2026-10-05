@@ -41,6 +41,7 @@ Use Qlisa to prepare and run a show from a cue list. Cues can play media, contro
 
 - Audio, Video, Image, Text, Memo, Wait, Fade, Stop, Group, and Number cues, with cue timing, fades, trims, seek, loops, Auto-Continue, and Auto-Follow.
 - Active Cues and Inspector panels, named display outputs, per-cue routing, audio mixing, and headphone preview.
+- Project-scoped waveform and media preview caches that persist across reopen.
 - MIDI, OSC, timecode, sACN/Art-Net lighting, SRT, and NDI input or output. NDI requires the separately installed NDI Runtime.
 - Media conversion for audio, video, and images. Conversion and media probing use FFmpeg and ffprobe.
 - QLab workspace import, English and Russian interface, diagnostics, and crash recovery.

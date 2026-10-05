@@ -253,6 +253,12 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Cache scope for derived media previews; separate from persisted show data.
+    pub fn media_cache_scope(&self) -> crate::engine::media_cache::CacheScope {
+        let identity = self.metadata.created_at.timestamp_nanos_opt().unwrap_or(0).to_string();
+        crate::engine::media_cache::CacheScope::from_workspace(self.file_path.as_deref(), &identity)
+    }
+
     /// Create a new, empty workspace with one default cue list.
     pub fn new(name: impl Into<String>) -> Self {
         Self::new_with_preferences(name, AppPreferences::default())
@@ -575,6 +581,17 @@ impl Workspace {
         let json = self.to_json_collected(&new_project_path, &path_map)?;
         std::fs::write(&new_project_path, json)
             .with_context(|| format!("Failed to write {}", new_project_path.display()))?;
+
+        // Cache transfer is best-effort and runs only after the project JSON
+        // is safely written. It copies derived data, never referenced media.
+        let source_scope = self.media_cache_scope();
+        let destination_scope = crate::engine::media_cache::CacheScope::for_project(&new_project_path);
+        let cache_path_map: HashMap<PathBuf, PathBuf> = path_map.iter().filter_map(|(source, relative)| {
+            let source = source.canonicalize().ok()?;
+            let destination = project_dir.join(relative).canonicalize().ok()?;
+            Some((source, destination))
+        }).collect();
+        source_scope.promote_collected(&destination_scope, &cache_path_map);
 
         Ok(CollectReport {
             workspace_path: new_project_path.to_string_lossy().into_owned(),

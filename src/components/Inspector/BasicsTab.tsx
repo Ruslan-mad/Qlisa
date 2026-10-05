@@ -71,8 +71,10 @@ export function BasicsTab({
         <Section title={t("inspector.media")}>
           {(isVideo || isImage) && cue.file_path && (
             <MediaPreview
+              key={`${cue.id}\u0000${cue.file_path}\u0000${cue.media_source_revision ?? ""}`}
               cueId={cue.id}
               path={cue.file_path}
+              sourceRevision={cue.media_source_revision}
               kind={resolveMediaPreviewKind(!!isVideo)}
               startMs={cue.start_time_ms ?? 0}
               durationMs={cue.cached_duration_ms ?? cue.file_duration_ms ?? cue.duration_ms ?? 0}

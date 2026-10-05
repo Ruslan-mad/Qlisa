@@ -216,6 +216,11 @@ start/pause/seek/loop/stop/EOF state aligned.
 
 ## Media, audio, video, and preview
 
+Derived preview assets use a project-scoped sidecar cache for saved workspaces.
+Waveform peaks and video/image JPEG previews persist across reopen and are
+invalidated by source file changes and request parameters. See the
+[media preview cache note](cache.md) for storage, promotion, and pruning rules.
+
 ### Audio engine
 
 `engine/audio_engine.rs` owns cpal output streams and the real-time callback;
