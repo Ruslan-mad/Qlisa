@@ -4529,6 +4529,7 @@ fn streaming_preview_voice(
     position_ms: Option<u64>,
     requested_end_ms: Option<u64>,
     sound_enabled: bool,
+    generation: u64,
     state: &PreviewTaskState,
 ) -> Result<Option<(Voice, PreviewTransport)>, String> {
     let (original_type, decoded, path, cue_type, json) = {
@@ -4588,6 +4589,24 @@ fn streaming_preview_voice(
             stream.keep_worker_for_loop();
         }
     }
+    let wait_result = wait_for_preview_stream_ready(
+        &stream,
+        std::time::Duration::from_secs(3),
+        || preview_request_is_current(state.preview_generation.load(Ordering::SeqCst), generation),
+    );
+    match wait_result {
+        Ok(()) => {}
+        Err(PreviewStreamWaitError::Superseded) => return Err("Preview request superseded".into()),
+        Err(PreviewStreamWaitError::Timeout) => {
+            return Err("Preview audio stream did not become ready within 3 seconds".into());
+        }
+        Err(PreviewStreamWaitError::Cancelled) => {
+            return Err("Preview audio stream was cancelled before becoming ready".into());
+        }
+        Err(PreviewStreamWaitError::EmptyEof) => {
+            return Err("Preview audio stream ended before producing audio".into());
+        }
+    }
     let voice = Voice::new_stream(
         stream,
         crate::cue::types::db_to_linear(json.get("volume_db").and_then(|value| value.as_f64()).unwrap_or(0.0)) as f32,
@@ -4603,6 +4622,55 @@ fn streaming_preview_voice(
         unsafe { *voice.inner.end_frame.get() = Some(end_frame); }
     }
     Ok(Some((voice, PreviewTransport { trim_start_ms, end_ms })))
+}
+
+/// Do not submit a newly-created preview stream to the output callback until
+/// its decoder has published the normal startup buffer. The wait runs on the
+/// command thread; the real-time callback remains non-blocking.
+#[derive(Debug, PartialEq, Eq)]
+enum PreviewStreamWaitError {
+    Superseded,
+    Timeout,
+    Cancelled,
+    EmptyEof,
+}
+
+fn wait_for_preview_stream_ready(
+    stream: &crate::cue::media_decode::StreamingAudioSource,
+    timeout: std::time::Duration,
+    mut is_current: impl FnMut() -> bool,
+) -> Result<(), PreviewStreamWaitError> {
+    let deadline = std::time::Instant::now() + timeout;
+    while !stream.is_ready() {
+        if !is_current() {
+            stream.cancel();
+            return Err(PreviewStreamWaitError::Superseded);
+        }
+        if stream.is_cancelled() {
+            return Err(PreviewStreamWaitError::Cancelled);
+        }
+        if stream.is_eof() && stream.buffered_samples() == 0 {
+            stream.cancel();
+            return Err(PreviewStreamWaitError::EmptyEof);
+        }
+        if std::time::Instant::now() >= deadline {
+            stream.cancel();
+            return Err(PreviewStreamWaitError::Timeout);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if !is_current() {
+        stream.cancel();
+        return Err(PreviewStreamWaitError::Superseded);
+    }
+    if stream.is_cancelled() {
+        return Err(PreviewStreamWaitError::Cancelled);
+    }
+    if stream.is_eof() && stream.buffered_samples() == 0 {
+        stream.cancel();
+        return Err(PreviewStreamWaitError::EmptyEof);
+    }
+    Ok(())
 }
 
 /// One audio-bearing Number child and its position on the Number clock.
@@ -4795,7 +4863,7 @@ fn start_cue_preview(
         });
         (generation, paused)
     };
-    let streaming_voice = streaming_preview_voice(cue_id, position_ms, end_ms, sound_enabled, state)?;
+    let streaming_voice = streaming_preview_voice(cue_id, position_ms, end_ms, sound_enabled, generation, state)?;
     let source_items = if streaming_voice.is_none() {
         number_preview_sources(cue_id, position_ms, state)?
     } else {
@@ -5978,7 +6046,9 @@ mod tests {
         preview_request_is_current, preview_session_matches, preserve_preview_pause,
         probe_media_metadata_file, set_file_path_resetting_clip, should_replace_generated_name,
         take_inactive_preview_session, take_preview_session_for_cue,
-        take_preview_session_for_voice, targeted_cue_accepts_target, targeted_cue_label,
+        take_preview_session_for_voice, wait_for_preview_stream_ready,
+        PreviewStreamWaitError,
+        targeted_cue_accepts_target, targeted_cue_label,
         targeted_cue_name, target_display_for_cue, update_auto_media_name,
         validate_video_preview_path, NumberPreviewSource, PreviewSession, PreviewSource,
         PreviewStartResult,
@@ -6648,6 +6718,121 @@ mod tests {
             .expect("secondary preview voice belongs to the session");
         assert_eq!(taken.all_voice_ids(), voices.as_slice());
         assert!(sessions.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn new_streamed_preview_waits_for_delayed_decoder_readiness() {
+        let pcm = [[0.25, -0.25]; 16];
+        let stream = crate::cue::media_decode::StreamingAudioSource::test_from_pcm(&pcm, true, false);
+        stream.request_seek(0);
+        stream.apply_seek_rt();
+        assert!(!stream.is_ready());
+        assert_eq!(stream.buffered_samples(), 0);
+
+        let producer_stream = Arc::clone(&stream);
+        let producer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            producer_stream.test_publish_ready_pcm(&pcm);
+        });
+
+        assert_eq!(
+            wait_for_preview_stream_ready(&stream, std::time::Duration::from_secs(1), || true),
+            Ok(()),
+        );
+        producer.join().unwrap();
+        assert!(stream.is_ready());
+    }
+
+    #[test]
+    fn stalled_initial_preview_times_out_and_cancels_before_voice_creation() {
+        let stream = crate::cue::media_decode::StreamingAudioSource::test_from_pcm(&[], false, false);
+        let result = wait_for_preview_stream_ready(
+            &stream,
+            std::time::Duration::from_millis(20),
+            || true,
+        );
+        assert_eq!(result, Err(PreviewStreamWaitError::Timeout));
+        assert!(stream.is_cancelled());
+        assert!(!stream.is_ready());
+    }
+
+    #[test]
+    fn superseded_preview_cancels_without_waiting_for_timeout() {
+        let stream = crate::cue::media_decode::StreamingAudioSource::test_from_pcm(&[], false, false);
+        let started = std::time::Instant::now();
+        let result = wait_for_preview_stream_ready(
+            &stream,
+            std::time::Duration::from_secs(2),
+            || false,
+        );
+        assert_eq!(result, Err(PreviewStreamWaitError::Superseded));
+        assert!(stream.is_cancelled());
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn ready_short_eof_preview_is_accepted() {
+        let pcm = [[0.25, -0.25]; 16];
+        let stream = crate::cue::media_decode::StreamingAudioSource::test_from_pcm(&pcm, true, true);
+        assert!(stream.is_eof());
+        assert_eq!(stream.buffered_samples(), pcm.len() * 2);
+        assert_eq!(
+            wait_for_preview_stream_ready(&stream, std::time::Duration::from_secs(1), || true),
+            Ok(()),
+        );
+    }
+
+    #[test]
+    fn empty_eof_preview_fails_immediately() {
+        let stream = crate::cue::media_decode::StreamingAudioSource::test_from_pcm(&[], false, true);
+        let started = std::time::Instant::now();
+        let result = wait_for_preview_stream_ready(
+            &stream,
+            std::time::Duration::from_secs(2),
+            || true,
+        );
+        assert_eq!(result, Err(PreviewStreamWaitError::EmptyEof));
+        assert!(stream.is_cancelled());
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn cancelled_preview_fails_immediately() {
+        let stream = crate::cue::media_decode::StreamingAudioSource::test_from_pcm(&[], false, false);
+        stream.cancel();
+        let started = std::time::Instant::now();
+        let result = wait_for_preview_stream_ready(
+            &stream,
+            std::time::Duration::from_secs(2),
+            || true,
+        );
+        assert_eq!(result, Err(PreviewStreamWaitError::Cancelled));
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn loop_setup_readiness_waits_for_final_start_position() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tiny_slice.mp3");
+        let info = crate::cue::media_decode::probe_audio_track(&path)
+            .expect("probe MP3 preview fixture")
+            .expect("fixture has an audio track");
+        let total_frames = info.total_frames.expect("fixture frame count");
+        let start_frame = total_frames / 2;
+        let stream = crate::cue::media_decode::StreamingAudioSource::start_at(
+            path, info, start_frame,
+        )
+        .expect("start streamed preview");
+
+        assert!(stream.enable_trimmed_loop(0, total_frames));
+        assert!(!stream.is_ready(), "loop setup publishes a new generation");
+        assert_eq!(
+            wait_for_preview_stream_ready(&stream, std::time::Duration::from_secs(3), || true),
+            Ok(()),
+        );
+        assert!(stream.is_ready());
+        assert!(stream.buffered_samples() > 0);
+        stream.cancel();
     }
 
     #[test]
