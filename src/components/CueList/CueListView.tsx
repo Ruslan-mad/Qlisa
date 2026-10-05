@@ -13,6 +13,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { CueRow } from "./CueRow";
+import { buildTreeLineInfo } from "./treeLines";
 import { prepareBackgroundSelection } from "./backgroundSelection";
 import { fileDropPathAllowedForTarget, fileDropTargetForCue } from "./fileDragModel";
 import {
@@ -433,6 +434,9 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
     () => flattenVisibleCueTree(cues, expandedGroupIds),
     [cues, expandedGroupIds],
   );
+
+  // Tree lines are presentation metadata over the existing flattened order.
+  const treeLineInfo = useMemo(() => buildTreeLineInfo(flatItems), [flatItems]);
 
   // Number children have no independent pre-wait clock. Show their authored
   // position on the Number timeline in that column instead of the child cue's
@@ -1703,6 +1707,13 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
               outputStatuses={outputStatuses}
               defaultOutputId={displayPrefs.default_output_id}
               numberTimelineStartMs={numberTimelineStartByChildId.get(cue.id)}
+              ancestorTreeContinuations={treeLineInfo.get(cue.id)?.ancestors}
+              hasNextTreeSibling={treeLineInfo.get(cue.id)?.hasNextSibling}
+              treeParentColor={treeLineInfo.get(cue.id)?.parentColor}
+              hasVisibleTreeChildren={
+                (cue.cue_type === "group" || cue.cue_type === "number") &&
+                expandedGroupIds.has(cue.id) && !!cue.children?.length
+              }
             />
           </Fragment>
         ))}

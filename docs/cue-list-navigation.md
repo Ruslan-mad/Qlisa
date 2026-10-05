@@ -15,3 +15,9 @@ Creating a Number from selected cues inserts it at the root-level position of
 the first selected cue in list order. The children retain cue-list order even
 when selection order differs. Backend cue moves preserve the existing nested
 membership and undo snapshots.
+
+## Tree appearance
+
+Groups and Numbers show thin tree lines in the cue list. Each child row branches from its parent, and a branch ends at the last visible child. Nested branches continue while an ancestor has later siblings. Collapsing a container hides its child lines with the rows.
+
+Number container rows use a subtle surface tint to distinguish them from ordinary cue rows while keeping the table columns aligned.

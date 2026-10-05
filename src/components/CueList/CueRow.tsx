@@ -172,6 +172,11 @@ interface Props {
   defaultOutputId?: string | null;
   /** Number children show their timeline offset in the Pre-Wait column. */
   numberTimelineStartMs?: number;
+  /** Decorative tree stems for containing rows that still have later siblings. */
+  ancestorTreeContinuations?: Array<{ continues: boolean; color?: string | null }>;
+  hasNextTreeSibling?: boolean;
+  hasVisibleTreeChildren?: boolean;
+  treeParentColor?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +211,10 @@ function CueRowImpl({
   outputStatuses = [],
   defaultOutputId,
   numberTimelineStartMs,
+  ancestorTreeContinuations = [],
+  hasNextTreeSibling = false,
+  hasVisibleTreeChildren = false,
+  treeParentColor,
 }: Props) {
   const { locale, t } = useLocale();
   const timing = useTimingStore((s) => s.timings[cue.id]);
@@ -323,6 +332,7 @@ function CueRowImpl({
   const stickyBg = isRunning  ? "var(--wc-bg-running)"
     : isPaused ? "var(--wc-bg-paused)"
     : isSelected ? "var(--wc-accent-dim)"
+    : cue.cue_type === "number" ? fullRowTint ?? "var(--wc-bg-surface)"
     : isGroup  ? "var(--wc-bg-group)"
     : "var(--wc-bg-app)";
 
@@ -341,6 +351,8 @@ function CueRowImpl({
     cursor: isDragSource ? "none" : "pointer",
     userSelect: "none",
     background: isDragSource ? "transparent"
+      : cue.cue_type === "number" && !isDragOver && !isRunning && !isPaused && !isSelected
+        ? fullRowTint ?? "var(--wc-bg-surface)"
       : isGroup && !isSelected ? (bg === "transparent" ? "var(--wc-bg-group)" : bg) : bg,
     borderBottom: isDragSource ? "1px dashed var(--wc-border)"
       : isDragOver ? "1px solid var(--wc-accent)" : "1px solid var(--wc-border)",
@@ -531,7 +543,17 @@ function CueRowImpl({
 
       case "name":
         return (
-          <div style={{ position: "relative", overflow: "hidden", minWidth: 0 }}>
+          <div style={{ position: "relative", overflow: "visible", minWidth: 0, height: "100%", clipPath: "inset(-2px 0 -3px 0)" }}>
+            {(depth > 0 || hasVisibleTreeChildren) && (
+              <svg aria-hidden="true" width={Math.max(24, 20 + depth * 20)} viewBox={`0 0 ${Math.max(24, 20 + depth * 20)} 100`} preserveAspectRatio="none"
+                style={{ position: "absolute", left: 0, top: -2, width: Math.max(24, 20 + depth * 20), height: "calc(100% + 5px)", pointerEvents: "none", zIndex: 0, overflow: "visible" }}>
+                {ancestorTreeContinuations.map(({ continues, color }, level) => continues ? (
+                  <path key={level} d={`M ${4 + level * 20} 0 V 100`} fill="none" stroke={COLOR_SWATCHES[color ?? ""] && COLOR_SWATCHES[color ?? ""] !== "transparent" ? COLOR_SWATCHES[color ?? ""] : "var(--wc-border-strong)"} strokeWidth="1" vectorEffect="non-scaling-stroke" opacity="0.72" />
+                ) : null)}
+                {depth > 0 && <path d={`M ${4 + (depth - 1) * 20} 0 V ${hasNextTreeSibling ? "100" : "50"} M ${4 + (depth - 1) * 20} 50 h 10`} fill="none" stroke={COLOR_SWATCHES[treeParentColor ?? ""] && COLOR_SWATCHES[treeParentColor ?? ""] !== "transparent" ? COLOR_SWATCHES[treeParentColor ?? ""] : "var(--wc-border-strong)"} strokeWidth="1" vectorEffect="non-scaling-stroke" opacity="0.82" />}
+                {hasVisibleTreeChildren && <path d={`M ${4 + depth * 20} 50 V 100`} fill="none" stroke={COLOR_SWATCHES[cue.color] && COLOR_SWATCHES[cue.color] !== "transparent" ? COLOR_SWATCHES[cue.color] : "var(--wc-border-strong)"} strokeWidth="1" vectorEffect="non-scaling-stroke" opacity="0.82" />}
+              </svg>
+            )}
             <span
               style={{
                 position: "relative",
@@ -922,7 +944,7 @@ function CueRowImpl({
             alignSelf: "stretch",
           } : {
             minWidth: 0,
-            overflow: col.id === "playhead" && isGroup ? "visible" : "hidden",
+            overflow: col.id === "name" || (col.id === "playhead" && isGroup) ? "visible" : "hidden",
             position: "relative",
             zIndex: col.id === "playhead" && isGroup ? 3 : 1,
             alignSelf: "stretch",
