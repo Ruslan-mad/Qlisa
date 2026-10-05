@@ -146,12 +146,16 @@ export function FitByOutputRows({
   geometryByOutput,
   fallback,
   disabled = false,
+  mixedOutputIds = [],
+  mixedLabel,
   onSelect,
 }: {
   outputs: Array<{ id: string; name: string }>;
   geometryByOutput: Record<string, VideoGeometry>;
   fallback: VideoGeometry;
   disabled?: boolean;
+  mixedOutputIds?: readonly string[];
+  mixedLabel?: string;
   onSelect: (outputId: string, fitMode: FitMode) => void;
 }) {
   const { locale } = useLocale();
@@ -165,13 +169,16 @@ export function FitByOutputRows({
   const modeTitle: Record<FitMode, string> = locale === "ru"
     ? { fit: "Сохранить пропорции, добавить поля", fill: "Сохранить пропорции, обрезать выходящее за границы", stretch: "Игнорировать соотношение сторон" }
     : { fit: "Keep aspect ratio and add bars", fill: "Keep aspect ratio and crop overflow", stretch: "Ignore aspect ratio" };
+  const mixed = new Set(mixedOutputIds);
   return <div style={{ display: "grid", gap: 6 }}>
     {outputs.map((output) => {
       const value = geometryByOutput[output.id] ?? fallback;
+      const isMixed = mixed.has(output.id);
       return <div key={output.id} style={{ display: "grid", gridTemplateColumns: "minmax(64px, 0.8fr) 2fr", gap: 6, alignItems: "center" }}>
         <span title={output.name} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, color: "var(--wc-text-muted)" }}>{output.name}</span>
         <div style={{ display: "flex", gap: 3 }}>
-          {FIT_MODES.map((mode) => <button key={mode.value} type="button" disabled={disabled} aria-label={`${output.name}: ${localeLabel(mode.value, locale)}`} title={`${localeLabel(mode.value, locale)} — ${modeTitle[mode.value]}`} aria-pressed={value.fit_mode === mode.value} style={buttonStyle(value.fit_mode === mode.value)} onClick={() => onSelect(output.id, mode.value)}>{localeLabel(mode.value, locale)}</button>)}
+          {FIT_MODES.map((mode) => <button key={mode.value} type="button" disabled={disabled} aria-label={`${output.name}: ${localeLabel(mode.value, locale)}`} title={`${localeLabel(mode.value, locale)} — ${modeTitle[mode.value]}`} aria-pressed={!isMixed && value.fit_mode === mode.value} style={buttonStyle(!isMixed && value.fit_mode === mode.value)} onClick={() => onSelect(output.id, mode.value)}>{localeLabel(mode.value, locale)}</button>)}
+          {isMixed && mixedLabel && <span role="status" style={{ alignSelf: "center", fontSize: 10, color: "var(--wc-text-muted)" }}>{mixedLabel}</span>}
         </div>
       </div>;
     })}

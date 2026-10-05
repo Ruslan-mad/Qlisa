@@ -1,4 +1,4 @@
-import type { BulkEditMetadata, CueColor, CueSummary, CueType, FadeCurve } from "../../lib/types";
+import type { BulkEditMetadata, CueColor, CueSummary, CueType, FadeCurve, VideoGeometry } from "../../lib/types";
 
 export type MultiCueRecord = CueSummary & Record<string, unknown> & {
   _bulk_edit?: BulkEditMetadata;
@@ -132,6 +132,59 @@ export function getMultiCueCapabilities(types: readonly CueType[]): MultiCueCapa
     visual: hasSelection && types.every((type) => type === "video" || type === "image" || type === "camera"),
     outputs: hasSelection && types.every((type) => type === "video" || type === "image" || type === "camera" || type === "text"),
   };
+}
+
+export interface MultiQuickCapabilities {
+  loop: boolean;
+  mute: boolean;
+  fit: boolean;
+}
+
+export function getMultiQuickCapabilities(types: readonly CueType[]): MultiQuickCapabilities {
+  const all = (allowed: readonly CueType[]) => types.length > 0 && types.every((type) => allowed.includes(type));
+  return {
+    loop: all(["audio", "video"]),
+    mute: all(["audio", "video", "camera"]),
+    fit: all(["video", "image", "camera"]),
+  };
+}
+
+export function getCueBooleanState(cues: readonly MultiCueRecord[], key: string): ValueState<boolean> {
+  if (cues.length === 0 || cues.some((cue) => typeof cue[key] !== "boolean")) return { kind: "empty" };
+  return getValueState(cues.map((cue) => cue[key] as boolean));
+}
+
+export function buildQuickCuePatch(cue: MultiCueRecord, field: "loop_count" | "muted" | "continue_mode", value: unknown): Record<string, unknown> {
+  const allowed = field === "loop_count" ? ["audio", "video"]
+    : field === "muted" ? ["audio", "video", "camera"] : null;
+  if ((allowed && !allowed.includes(cue.cue_type)) || !(field in cue)) return {};
+  return { [field]: value };
+}
+
+/** Build per-cue fit updates without replacing unrelated output geometry. */
+export function buildMultiCueFitUpdates(
+  cues: readonly MultiCueRecord[],
+  outputId: string,
+  fitMode: "fit" | "fill" | "stretch",
+  fallback: VideoGeometry,
+  outputIdsByCue: ReadonlyMap<string, readonly string[]>,
+): BulkCueUpdate[] {
+  return cues.flatMap((cue) => {
+    if (!(cue.cue_type === "video" || cue.cue_type === "image" || cue.cue_type === "camera")) return [];
+    const routes = outputIdsByCue.get(cue.id) ?? [];
+    if (!routes.includes(outputId)) return [];
+    const overrides = (cue.geometry_by_output && typeof cue.geometry_by_output === "object"
+      ? cue.geometry_by_output as Record<string, Record<string, unknown>> : {});
+    const existing = {
+      ...fallback,
+      ...((cue.geometry as Record<string, unknown> | undefined) ?? {}),
+      ...(overrides[outputId] ?? {}),
+    };
+    return [{ cueId: cue.id, properties: { geometry_by_output: {
+      ...overrides,
+      [outputId]: { ...existing, fit_mode: fitMode },
+    } } }];
+  });
 }
 
 export type FadeFamily = "audio" | "visual";

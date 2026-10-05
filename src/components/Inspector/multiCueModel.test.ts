@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { CueSummary } from "../../lib/types";
+import type { CueSummary, VideoGeometry } from "../../lib/types";
+import { displayedOutputIds } from "./OutputSelector";
 import {
   buildBulkCueUpdates,
+  buildMultiCueFitUpdates,
+  buildQuickCuePatch,
+  getCueBooleanState,
   getCuePropertyState,
   getFadeValueState,
   getMultiCueCapabilities,
+  getMultiQuickCapabilities,
   findCueSummaryById,
   hasDirtyFadeFields,
   isCurrentApplyRequest,
@@ -49,6 +54,45 @@ function cue(id: string, cue_type: CueSummary["cue_type"], extra: Record<string,
 }
 
 describe("multi-cue Inspector model", () => {
+  it("exposes only shared quick-control capabilities and reports mixed values", () => {
+    expect(getMultiQuickCapabilities(["audio", "video"])).toEqual({ loop: true, mute: true, fit: false });
+    expect(getMultiQuickCapabilities(["video", "camera"])).toEqual({ loop: false, mute: true, fit: true });
+    expect(getMultiQuickCapabilities(["image", "camera"])).toEqual({ loop: false, mute: false, fit: true });
+    const cues = [cue("a", "audio", { muted: false }), cue("b", "video", { muted: true })];
+    expect(getCueBooleanState(cues, "muted")).toEqual({ kind: "mixed" });
+    expect(getCueBooleanState(cues.map((item) => ({ ...item, muted: true })), "muted")).toEqual({ kind: "uniform", value: true });
+  });
+
+  it("builds quick patches only for cue types that support the field", () => {
+    expect(buildQuickCuePatch(cue("audio", "audio", { loop_count: 0 }), "loop_count", 4294967295)).toEqual({ loop_count: 4294967295 });
+    expect(buildQuickCuePatch(cue("camera", "camera", { muted: false }), "loop_count", 4294967295)).toEqual({});
+    expect(buildQuickCuePatch(cue("image", "image", { muted: false }), "muted", true)).toEqual({});
+    expect(buildQuickCuePatch(cue("image", "image", { continue_mode: "do_not_continue" }), "continue_mode", "auto_continue")).toEqual({ continue_mode: "auto_continue" });
+  });
+
+  it("fits only routed cues and preserves each cue's output and geometry fields", () => {
+    const fallback = { fit_mode: "fit", pan_x: 0, crop_left: 0, scale: 1 } as VideoGeometry;
+    const cues = [
+      cue("video", "video", { geometry: { ...fallback, pan_x: 0.2 }, geometry_by_output: { led: { crop_left: 0.3 } } }),
+      cue("image", "image", { geometry: { ...fallback, pan_x: -0.4 }, geometry_by_output: { tv: { crop_left: 0.1 } } }),
+    ];
+    const updates = buildMultiCueFitUpdates(cues, "led", "fill", fallback, new Map([["video", ["led"]], ["image", ["tv"]]]));
+    expect(updates).toEqual([{ cueId: "video", properties: { geometry_by_output: {
+      led: { ...fallback, pan_x: 0.2, crop_left: 0.3, fit_mode: "fill" },
+    } } }]);
+    expect(buildMultiCueFitUpdates(cues, "tv", "stretch", fallback, new Map([["video", ["led"]], ["image", ["tv"]]]))[0].properties.geometry_by_output)
+      .toMatchObject({ tv: { fit_mode: "stretch", pan_x: -0.4, crop_left: 0.1 } });
+  });
+
+  it("uses the existing implicit default route when building per-output fit patches", () => {
+    const main = { id: "main", name: "Main" } as import("../../lib/types").OutputDestination;
+    const cueData = cue("implicit", "video", { geometry: { fit_mode: "fit", pan_x: 0.15, crop_left: 0 } as VideoGeometry });
+    const ids = displayedOutputIds(cueData, new Set([main.id]), main.id);
+    const updates = buildMultiCueFitUpdates([cueData], "main", "fill", { fit_mode: "fit", pan_x: 0, crop_left: 0 } as VideoGeometry, new Map([[cueData.id, ids]]));
+    expect(ids).toEqual(["main"]);
+    expect(updates[0].properties.geometry_by_output).toMatchObject({ main: { fit_mode: "fill", pan_x: 0.15 } });
+  });
+
   it("distinguishes uniform, mixed and empty values, including null", () => {
     expect(getValueState([4, 4])).toEqual({ kind: "uniform", value: 4 });
     expect(getValueState([null, null])).toEqual({ kind: "uniform", value: null });

@@ -17,6 +17,8 @@
 - [Audio bus routing](audio-bus-routing.md) — routing rules for cue audio.
 - [Multi-output behavior](qlisa-multi-output.md) — display/network destinations,
   routing, delivery, and platform limits.
+- [Inspector quick controls](inspector-quick-controls.md) — single and multi-cue
+  actions, shared capabilities, mixed values, Fit routing, and loop restrictions.
 - [Network I/O](network-io-design.md) — current network worker behavior and
   implementation caveats.
 - [Runtime control audit](runtime-control-audit.md) — current transport fixes,

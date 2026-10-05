@@ -4,10 +4,13 @@ import type {
   CueType,
   FadeCurve,
   OutputPatch,
+  ContinueMode,
+  FitMode,
 } from "../../lib/types";
 import {
   DEFAULT_GEOMETRY,
   DEFAULT_LAYER_STYLE,
+  getDefaultOutputDestination,
 } from "../../lib/types";
 import { bulkUpdateCues, getCues, getOutputPatchTable } from "../../lib/commands";
 import { useLocale } from "../../i18n";
@@ -20,6 +23,9 @@ import { ColorPicker } from "./ColorPicker";
 import { Field, Grid2, MiniField, Section, inputStyle } from "./Field";
 import { LevelMatrixGrid } from "./LevelMatrixGrid";
 import { OutputSelector } from "./OutputSelector";
+import { displayedOutputIds } from "./OutputSelector";
+import type { OutputSelectableCue } from "./OutputSelector";
+import { MultiBasicQuickControls } from "./BasicQuickControls";
 import { LayerEditor } from "./LayerTab";
 import { GeometryEditor, type GeometryEditorState } from "./GeometryTab";
 import {
@@ -32,6 +38,10 @@ import {
 import {
   findCueSummaryById,
   getMultiCueCapabilities,
+  getMultiQuickCapabilities,
+  getCueBooleanState,
+  buildMultiCueFitUpdates,
+  buildQuickCuePatch,
   isCurrentApplyRequest,
   nextGeneration,
   shouldRefreshFadeCapabilities,
@@ -368,6 +378,7 @@ export function MultiCueInspector({ cueIds }: { cueIds: string[] }) {
   const types = cues?.map((cue) => cue.cue_type) ?? [];
   const allSameType = types.length > 0 && types.every((type) => type === types[0]);
   const capabilities = getMultiCueCapabilities(types);
+  const quickCapabilities = getMultiQuickCapabilities(types);
   const allLevels = capabilities.levels;
   const allVisual = capabilities.visual;
   const allOutput = capabilities.outputs;
@@ -478,8 +489,37 @@ export function MultiCueInspector({ cueIds }: { cueIds: string[] }) {
 
   const renderBasics = () => {
     const fileState = fieldState<string | null>(cues, "file_path");
+    const outputs = displayPrefs.output_destinations ?? [];
+    const outputIdsByCue = new Map(cues.map((cue) => [cue.id, displayedOutputIds({
+      id: cue.id,
+      cue_type: cue.cue_type,
+      output_id: cue.output_id as string | null | undefined,
+      output_ids: cue.output_ids as string[] | undefined,
+      output_surface_id: cue.output_surface_id as string | null | undefined,
+    } as OutputSelectableCue, new Set(outputs.map((output) => output.id)), getDefaultOutputDestination(outputs, displayPrefs.default_output_id)?.id)]));
+    const continueState = fieldState<ContinueMode>(cues, "continue_mode");
+    const infiniteState = deepState(cues.map((cue) => Number(cue.loop_count) === LOOP_INFINITE));
+    const mutedState = getCueBooleanState(cues, "muted");
+    const displayedLoopState = quickCapabilities.loop ? infiniteState : { kind: "empty" as const };
+    const displayedMuteState = quickCapabilities.mute ? mutedState : { kind: "empty" as const };
     return (
       <>
+        <MultiBasicQuickControls
+          cues={cues}
+          outputs={outputs}
+          outputIdsByCue={outputIdsByCue}
+          loopState={displayedLoopState}
+          muteState={displayedMuteState}
+          continueState={continueState}
+          disabled={saving}
+          loopDisabled={!allRebuildEditable}
+          fitEnabled={quickCapabilities.fit}
+          mixedLabel={mixedLabel}
+          onLoop={(enabled) => void save((cue) => buildQuickCuePatch(cue, "loop_count", enabled ? LOOP_INFINITE : 0), true)}
+          onMute={(muted) => void save((cue) => buildQuickCuePatch(cue, "muted", muted))}
+          onContinue={(continue_mode) => void save((cue) => buildQuickCuePatch(cue, "continue_mode", continue_mode))}
+          onFit={(outputId, fitMode: FitMode) => void save((cue) => buildMultiCueFitUpdates([cue], outputId, fitMode, DEFAULT_GEOMETRY, outputIdsByCue)[0]?.properties ?? {})}
+        />
         <Section title={t("inspector.identity")}>
           <Grid2>
             <MiniField label="Cue #"><MixedTextInput state={fieldState(cues, "number")} mixedLabel={mixedLabel} disabled={saving} onCommit={(number) => void save({ number: number || null })} /></MiniField>
@@ -497,11 +537,6 @@ export function MultiCueInspector({ cueIds }: { cueIds: string[] }) {
           </Section>
         )}
         <Section title={t("inspector.flow")}>
-          <Field label="Continue">
-            <Select style={inputStyle} value={uniformValue(fieldState<string>(cues, "continue_mode")) ?? MIXED} disabled={saving} onChange={(event) => { if (event.target.value !== MIXED) void save({ continue_mode: event.target.value }); }}>
-              <option value={MIXED} disabled>{mixedLabel}</option><option value="do_not_continue">{t("inspector.doNotContinue")}</option><option value="auto_continue">Auto-Continue</option><option value="auto_follow">Auto-Follow</option>
-            </Select>
-          </Field>
           <MixedCheckbox state={fieldState(cues, "is_disabled")} label={t("sweepUi.disableCue")} mixedLabel={mixedLabel} disabled={saving} onChange={(is_disabled) => void save({ is_disabled })} />
         </Section>
       </>
