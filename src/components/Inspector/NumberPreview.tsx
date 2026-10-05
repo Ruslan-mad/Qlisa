@@ -7,6 +7,7 @@ import { useNumberPreviewStore } from "../../stores/numberPreviewStore";
 import { numberMasterDuration, numberPreviewItem, numberPreviewSourcePosition, numberPreviewSourceWindow, shouldRetainNumberPreviewAsset, type NumberVisualAction } from "../Editor/numberTimelineModel";
 import { toMediaAssetUrl } from "./mediaPreviewModel";
 import { useLocale } from "../../i18n";
+import { stepPreviewAndSyncHeadphones } from "../Editor/headphonePreviewTransport";
 
 type NumberPreviewProps = { cue: NumberCueData };
 
@@ -17,11 +18,15 @@ export function NumberPreviewControls({
   durationMs,
   available,
   buttonStyle,
+  onTransportToggle,
+  onSeek,
 }: {
   numberId: string;
   durationMs: number;
   available: boolean;
   buttonStyle: React.CSSProperties;
+  onTransportToggle?: (playing: boolean) => void;
+  onSeek?: (positionMs: number, pauseBeforeSeek?: boolean) => void;
 }) {
   const { t } = useLocale();
   const playing = useNumberPreviewStore((state) => state.numberId === numberId && state.playing);
@@ -38,7 +43,10 @@ export function NumberPreviewControls({
         title={canUse
           ? (playing ? t("editorUi.videoPreviewPause") : t("editorUi.videoPreviewPlay"))
           : t("editorUi.videoPreviewUnavailable")}
-        onClick={() => action.toggle(numberId, durationMs)}
+        onClick={() => {
+          action.toggle(numberId, durationMs);
+          onTransportToggle?.(playing);
+        }}
         style={disabledStyle}
       >{playing ? "❚❚" : "▶"}</button>
       <button
@@ -46,7 +54,12 @@ export function NumberPreviewControls({
         disabled={!canUse}
         aria-label={t("editorUi.videoPreviewPrevFrame")}
         title={canUse ? t("editorUi.videoPreviewPrevFrame") : t("editorUi.videoPreviewUnavailable")}
-        onClick={() => action.stepFrame(numberId, -1, 30, durationMs)}
+        onClick={() => {
+          stepPreviewAndSyncHeadphones(() => {
+            action.stepFrame(numberId, -1, 30, durationMs);
+            return useNumberPreviewStore.getState().positionMs;
+          }, onSeek);
+        }}
         style={disabledStyle}
       >|◀</button>
       <button
@@ -54,7 +67,12 @@ export function NumberPreviewControls({
         disabled={!canUse}
         aria-label={t("editorUi.videoPreviewNextFrame")}
         title={canUse ? t("editorUi.videoPreviewNextFrame") : t("editorUi.videoPreviewUnavailable")}
-        onClick={() => action.stepFrame(numberId, 1, 30, durationMs)}
+        onClick={() => {
+          stepPreviewAndSyncHeadphones(() => {
+            action.stepFrame(numberId, 1, 30, durationMs);
+            return useNumberPreviewStore.getState().positionMs;
+          }, onSeek);
+        }}
         style={disabledStyle}
       >▶|</button>
     </div>
@@ -86,6 +104,12 @@ export function NumberPreview({ cue }: NumberPreviewProps) {
   useEffect(() => {
     useNumberPreviewStore.getState().select(cue.id, durationMs);
   }, [cue.id, durationMs]);
+
+  useEffect(() => {
+    const store = useNumberPreviewStore.getState();
+    store.setClockManaged(cue.id, true);
+    return () => useNumberPreviewStore.getState().setClockManaged(cue.id, false);
+  }, [cue.id]);
 
   useEffect(() => {
     const generation = ++loadGenerationRef.current;

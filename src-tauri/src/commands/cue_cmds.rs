@@ -4503,6 +4503,9 @@ struct NumberPreviewSource {
     source: PreviewSource,
     offset_ms: u64,
     is_master: bool,
+    /// True when the requested position uses the Number clock. Standalone cue
+    /// previews already receive file-relative source time.
+    number_clock_position: bool,
 }
 
 /// Pure timing/gating rule shared by Number preview selection and its tests.
@@ -4550,6 +4553,18 @@ fn number_source_elapsed_ms(source: &PreviewSource, elapsed_ms: u64) -> Option<u
     Some(start.saturating_add(source_offset).min(end))
 }
 
+fn preview_source_position_ms(item: &NumberPreviewSource, position_ms: Option<u64>) -> Result<u64, String> {
+    if item.number_clock_position {
+        number_source_elapsed_ms(
+            &item.source,
+            position_ms.unwrap_or(0).saturating_sub(item.offset_ms),
+        )
+        .ok_or_else(|| "Preview position is outside this cue's clip range".to_string())
+    } else {
+        Ok(position_ms.unwrap_or_else(|| item.source.trim_start_ms.unwrap_or(0)))
+    }
+}
+
 /// Collect every direct Number child that has an enabled audio track. The
 /// first entry is always the master so its voice remains the session clock.
 fn number_preview_sources(
@@ -4571,6 +4586,7 @@ fn number_preview_sources(
             source: preview_source(cue_id, state)?,
             offset_ms: 0,
             is_master: true,
+            number_clock_position: false,
         }]);
     }
     let (children, master_id, offsets) = {
@@ -4628,7 +4644,7 @@ fn number_preview_sources(
         let Some(source_position_ms) = number_source_elapsed_ms(&source, clock_ms.saturating_sub(offset_ms)) else {
             continue;
         };
-        sources.push(NumberPreviewSource { source, offset_ms, is_master });
+        sources.push(NumberPreviewSource { source, offset_ms, is_master, number_clock_position: true });
         // Keep the calculated position in the source's trim start marker by
         // storing it in a temporary local below; this branch only collects
         // sources and the caller calculates it again deterministically.
@@ -4645,22 +4661,32 @@ fn start_cue_preview(
     cue_id: Uuid,
     position_ms: Option<u64>,
     end_ms: Option<u64>,
+    start_paused: bool,
+    expected_session: Option<(Uuid, u64)>,
     state: &AppState,
 ) -> Result<PreviewStartResult, String> {
     // Reserve the request before decoding. Decode can take hundreds of ms and
     // Tauri may run several pointer-up replacements concurrently.
-    let generation = state
-        .preview_generation
-        .fetch_add(1, Ordering::SeqCst)
-        .wrapping_add(1);
+    let (generation, paused) = {
+        let session = state.preview_session.lock().map_err(|e| e.to_string())?;
+        let mut paused = start_paused;
+        if let Some((expected_cue_id, expected_generation)) = expected_session {
+            if !preview_session_matches(session.as_ref(), expected_cue_id, expected_generation) {
+                return Err("Headphone preview session changed before seek".into());
+            }
+            let current = session.as_ref().expect("validated session");
+            paused = preserve_preview_pause(
+                start_paused,
+                state.audio_engine.preview_voice_is_alive(current.voice_id),
+                state.audio_engine.preview_voice_is_playing(current.voice_id),
+            );
+        }
+        (state.preview_generation.fetch_add(1, Ordering::SeqCst).wrapping_add(1), paused)
+    };
     let source_items = number_preview_sources(cue_id, position_ms, state)?;
     let mut voices = Vec::with_capacity(source_items.len());
     for item in source_items {
-        let source_position_ms = number_source_elapsed_ms(
-            &item.source,
-            position_ms.unwrap_or(0).saturating_sub(item.offset_ms),
-        )
-        .ok_or_else(|| "Preview position is outside this cue's clip range".to_string())?;
+        let source_position_ms = preview_source_position_ms(&item, position_ms)?;
         let requested_end_ms = end_ms.or(item.source.trim_end_ms);
         voices.push(build_preview_voice(
             item.source,
@@ -4679,7 +4705,11 @@ fn start_cue_preview(
     }
     let mut voice_ids = Vec::with_capacity(voices.len());
     for voice in voices {
-        match state.audio_engine.play_preview_voice(voice) {
+        match if paused {
+            state.audio_engine.play_preview_voice_paused(voice)
+        } else {
+            state.audio_engine.play_preview_voice(voice)
+        } {
             Ok(voice_id) => voice_ids.push(voice_id),
             Err(error) => {
                 for voice_id in &voice_ids {
@@ -4701,6 +4731,14 @@ fn start_cue_preview(
 
 fn preview_request_is_current(current: u64, request: u64) -> bool {
     current == request
+}
+
+fn preview_session_matches(session: Option<&PreviewSession>, cue_id: Uuid, generation: u64) -> bool {
+    session.is_some_and(|session| session.cue_id == cue_id && session.generation == generation)
+}
+
+fn preserve_preview_pause(requested_paused: bool, voice_alive: bool, voice_playing: bool) -> bool {
+    requested_paused || (voice_alive && !voice_playing)
 }
 
 /// Atomically detach the only preview session. The caller receives an owned
@@ -4810,10 +4848,11 @@ pub fn preview_cue(
     cue_id: String,
     start_ms: Option<u64>,
     end_ms: Option<u64>,
+    start_paused: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<PreviewStartResult, String> {
     let id: Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
-    start_cue_preview(id, start_ms, end_ms, &state)
+    start_cue_preview(id, start_ms, end_ms, start_paused.unwrap_or(false), None, &state)
 }
 
 /// Stop whichever cue currently owns the headphone preview session. This is
@@ -4857,12 +4896,80 @@ pub fn toggle_cue_preview(
             generation: None,
         });
     }
-    let started = start_cue_preview(id, position_ms, end_ms, &state)?;
+    let started = start_cue_preview(id, position_ms, end_ms, false, None, &state)?;
     Ok(PreviewToggleResult {
         playing: true,
         voice_id: Some(started.voice_id),
         generation: Some(started.generation),
     })
+}
+
+/// Pause, resume, or seek the isolated headphone preview session.
+#[tauri::command]
+pub fn control_cue_preview(
+    cue_id: String,
+    action: String,
+    position_ms: Option<u64>,
+    end_ms: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<PreviewToggleResult, String> {
+    let id: Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+    let session = state.preview_session.lock().map_err(|e| e.to_string())?
+        .as_ref().filter(|session| session.cue_id == id).cloned();
+    let Some(session) = session else {
+        return Ok(PreviewToggleResult { playing: false, voice_id: None, generation: None });
+    };
+    match action.as_str() {
+        "pause" | "resume" => {
+            let paused = action == "pause";
+            let slot = state.preview_session.lock().map_err(|e| e.to_string())?;
+            if slot.as_ref() != Some(&session) {
+                return Ok(PreviewToggleResult { playing: false, voice_id: None, generation: None });
+            }
+            // Cancel any seek decode started from this session. The current
+            // voices keep their original lifecycle generation.
+            state.preview_generation.fetch_add(1, Ordering::SeqCst);
+            for voice_id in session.all_voice_ids() {
+                state.audio_engine.set_preview_voice_paused(*voice_id, paused);
+            }
+            Ok(PreviewToggleResult {
+                playing: !paused,
+                voice_id: Some(session.voice_id.to_string()),
+                generation: Some(session.generation),
+            })
+        }
+        "seek" | "seek_paused" => {
+            let pause_before_seek = action == "seek_paused";
+            if pause_before_seek {
+                let slot = state.preview_session.lock().map_err(|e| e.to_string())?;
+                if slot.as_ref() != Some(&session) {
+                    return Ok(PreviewToggleResult { playing: false, voice_id: None, generation: None });
+                }
+                // Pause the current mix first and invalidate other pending
+                // work. The replacement is submitted already paused below.
+                state.preview_generation.fetch_add(1, Ordering::SeqCst);
+                for voice_id in session.all_voice_ids() {
+                    state.audio_engine.set_preview_voice_paused(*voice_id, true);
+                }
+            }
+            let started = start_cue_preview(
+                id,
+                position_ms,
+                end_ms,
+                pause_before_seek,
+                Some((session.cue_id, session.generation)),
+                &state,
+            )?;
+            let started_id: Uuid = started.voice_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+            let playing = state.audio_engine.preview_voice_is_playing(started_id);
+            Ok(PreviewToggleResult {
+                playing,
+                voice_id: Some(started.voice_id),
+                generation: Some(started.generation),
+            })
+        }
+        _ => Err("Unknown headphone preview action".into()),
+    }
 }
 
 /// Legacy explicit-stop wrapper retained for existing callers. It only stops
@@ -5628,13 +5735,14 @@ mod tests {
         finish_context_target,
         generated_media_cue_name, index_cue_targets, number_audio_should_be_master,
         apply_new_cue_output_defaults, new_cue_output_ids_for_type,
-        number_preview_child_is_active, number_source_elapsed_ms,
-        preview_request_is_current,
+        number_preview_child_is_active, number_source_elapsed_ms, preview_source_position_ms,
+        preview_request_is_current, preview_session_matches, preserve_preview_pause,
         probe_media_metadata_file, set_file_path_resetting_clip, should_replace_generated_name,
         take_inactive_preview_session, take_preview_session_for_cue,
         take_preview_session_for_voice, targeted_cue_accepts_target, targeted_cue_label,
         targeted_cue_name, target_display_for_cue, update_auto_media_name,
-        validate_video_preview_path, PreviewSession, PreviewSource, PreviewStartResult,
+        validate_video_preview_path, NumberPreviewSource, PreviewSession, PreviewSource,
+        PreviewStartResult,
     };
     use crate::cue::{
         audio_cue::AudioCue,
@@ -6130,6 +6238,48 @@ mod tests {
     }
 
     #[test]
+    fn standalone_preview_position_is_already_file_relative() {
+        let item = NumberPreviewSource {
+            source: PreviewSource {
+                samples: std::sync::Arc::new(vec![0.0; 10_000]),
+                channels: 1,
+                sample_rate: 1_000,
+                volume_db: 0.0,
+                pan: 0.0,
+                trim_start_ms: Some(1_000),
+                trim_end_ms: Some(8_000),
+                rate: 2.0,
+                loop_count: 0,
+            },
+            offset_ms: 0,
+            is_master: true,
+            number_clock_position: false,
+        };
+        assert_eq!(preview_source_position_ms(&item, Some(1_500)).unwrap(), 1_500);
+    }
+
+    #[test]
+    fn number_preview_position_still_maps_clock_through_rate_and_offset() {
+        let item = NumberPreviewSource {
+            source: PreviewSource {
+                samples: std::sync::Arc::new(vec![0.0; 10_000]),
+                channels: 1,
+                sample_rate: 1_000,
+                volume_db: 0.0,
+                pan: 0.0,
+                trim_start_ms: Some(1_000),
+                trim_end_ms: Some(8_000),
+                rate: 2.0,
+                loop_count: 0,
+            },
+            offset_ms: 500,
+            is_master: false,
+            number_clock_position: true,
+        };
+        assert_eq!(preview_source_position_ms(&item, Some(1_000)).unwrap(), 2_000);
+    }
+
+    #[test]
     fn preview_uses_the_requested_file_position_inside_the_clip_window() {
         let voice = build_preview_voice(
             PreviewSource {
@@ -6265,6 +6415,33 @@ mod tests {
     fn stale_preview_decode_cannot_install_after_newer_request() {
         assert!(!preview_request_is_current(12, 11));
         assert!(preview_request_is_current(12, 12));
+    }
+
+    #[test]
+    fn pause_or_stop_generation_cancels_a_preview_seek_decode() {
+        let request_generation = 17;
+        let after_pause = 18;
+        let after_stop = 19;
+        assert!(!preview_request_is_current(after_pause, request_generation));
+        assert!(!preview_request_is_current(after_stop, request_generation));
+    }
+
+    #[test]
+    fn frame_step_seek_stays_paused_when_previous_voice_reached_eof() {
+        assert!(preserve_preview_pause(true, false, false));
+        assert!(preserve_preview_pause(true, true, false));
+        assert!(!preserve_preview_pause(false, true, true));
+        assert!(preserve_preview_pause(false, true, false));
+    }
+
+    #[test]
+    fn a_seek_cannot_replace_a_session_that_changed_cue_or_generation() {
+        let cue_id = Uuid::new_v4();
+        let current = PreviewSession::new(cue_id, vec![Uuid::new_v4()], 9).unwrap();
+        assert!(preview_session_matches(Some(&current), cue_id, 9));
+        assert!(!preview_session_matches(Some(&current), cue_id, 8));
+        assert!(!preview_session_matches(Some(&current), Uuid::new_v4(), 9));
+        assert!(!preview_session_matches(None, cue_id, 9));
     }
 
     #[test]

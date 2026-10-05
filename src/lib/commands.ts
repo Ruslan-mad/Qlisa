@@ -294,20 +294,22 @@ export interface PreviewStartResult {
   generation: number;
 }
 
-export const previewCue = (cueId: CueId, startMs?: number, endMs?: number) =>
+export const previewCue = (cueId: CueId, startMs?: number, endMs?: number, startPaused = false) =>
   invoke<PreviewStartResult>("preview_cue", {
     cueId,
     startMs: startMs != null ? Math.round(startMs) : null,
     endMs: endMs != null ? Math.round(endMs) : null,
+    startPaused,
   });
 
 /** Explicit headphone-preview API for Live and future cue controls. `positionMs`
  * is file time; preview never falls back to the program/PA output. */
-export const previewCueOnHeadphones = (cueId: CueId, positionMs?: number, endMs?: number) =>
+export const previewCueOnHeadphones = (cueId: CueId, positionMs?: number, endMs?: number, startPaused = false) =>
   invoke<PreviewStartResult>("preview_cue", {
     cueId,
     startMs: positionMs != null ? Math.round(positionMs) : null,
     endMs: endMs != null ? Math.round(endMs) : null,
+    startPaused,
   });
 
 export interface CuePreviewToggleResult {
@@ -322,6 +324,18 @@ export const toggleCuePreview = (cueId: CueId, positionMs?: number, endMs?: numb
     positionMs: positionMs != null ? Math.round(positionMs) : null,
     endMs: endMs != null ? Math.round(endMs) : null,
   });
+
+export const controlCuePreview = (
+  cueId: CueId,
+  action: "pause" | "resume" | "seek" | "seek_paused",
+  positionMs?: number,
+  endMs?: number,
+) => invoke<CuePreviewToggleResult>("control_cue_preview", {
+  cueId,
+  action,
+  positionMs: positionMs != null ? Math.round(positionMs) : null,
+  endMs: endMs != null ? Math.round(endMs) : null,
+});
 
 /** Stop the single active headphone preview, including one opened by another panel. */
 export const stopCuePreview = () => invoke<void>("stop_cue_preview");

@@ -1,13 +1,18 @@
 import type { CSSProperties } from "react";
 import { useLocale } from "../../i18n";
 import { useVideoPreviewTransport } from "./mediaPreviewTransport";
+import { stepPreviewAndSyncHeadphones } from "../Editor/headphonePreviewTransport";
 
 export function VideoPreviewControls({
   identity,
   buttonStyle,
+  onTransportToggle,
+  onSeek,
 }: {
   identity: string;
   buttonStyle: CSSProperties;
+  onTransportToggle?: (playing: boolean) => void;
+  onSeek?: (positionMs: number, pauseBeforeSeek?: boolean) => void;
 }) {
   const { t } = useLocale();
   const transport = useVideoPreviewTransport((state) => state.identity === identity ? state : null);
@@ -25,7 +30,11 @@ export function VideoPreviewControls({
         title={available
           ? (playing ? t("editorUi.videoPreviewPause") : t("editorUi.videoPreviewPlay"))
           : unavailableTitle}
-        onClick={() => useVideoPreviewTransport.getState().toggle(identity)}
+        onClick={() => {
+          const state = useVideoPreviewTransport.getState();
+          state.toggle(identity);
+          onTransportToggle?.(state.playing);
+        }}
         style={{ ...buttonStyle, opacity: available ? 1 : 0.5, cursor: available ? "pointer" : "default" }}
       >
         {playing ? "❚❚" : "▶"}
@@ -35,7 +44,13 @@ export function VideoPreviewControls({
         disabled={!available}
         aria-label={t("editorUi.videoPreviewPrevFrame")}
         title={available ? t("editorUi.videoPreviewPrevFrame") : unavailableTitle}
-        onClick={() => useVideoPreviewTransport.getState().stepFrame(identity, -1, transport?.frameRate)}
+        onClick={() => {
+          const state = useVideoPreviewTransport.getState();
+          stepPreviewAndSyncHeadphones(() => {
+            state.stepFrame(identity, -1, transport?.frameRate);
+            return useVideoPreviewTransport.getState().positionMs;
+          }, onSeek);
+        }}
         style={{ ...buttonStyle, opacity: available ? 1 : 0.5, cursor: available ? "pointer" : "default" }}
       >
         |◀
@@ -45,7 +60,13 @@ export function VideoPreviewControls({
         disabled={!available}
         aria-label={t("editorUi.videoPreviewNextFrame")}
         title={available ? t("editorUi.videoPreviewNextFrame") : unavailableTitle}
-        onClick={() => useVideoPreviewTransport.getState().stepFrame(identity, 1, transport?.frameRate)}
+        onClick={() => {
+          const state = useVideoPreviewTransport.getState();
+          stepPreviewAndSyncHeadphones(() => {
+            state.stepFrame(identity, 1, transport?.frameRate);
+            return useVideoPreviewTransport.getState().positionMs;
+          }, onSeek);
+        }}
         style={{ ...buttonStyle, opacity: available ? 1 : 0.5, cursor: available ? "pointer" : "default" }}
       >
         ▶|

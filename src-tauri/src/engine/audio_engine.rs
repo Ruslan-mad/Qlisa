@@ -1328,10 +1328,20 @@ impl AudioEngine {
     /// open, an unconfigured output, or selecting the main PA all return an
     /// error; callers must present silence rather than falling back to PA.
     pub fn play_preview_voice(&self, voice: Voice) -> Result<VoiceId> {
+        self.play_preview_voice_with_state(voice, false)
+    }
+
+    /// Submit a headphone voice already paused. Used by paused scrubs so a
+    /// seek never produces an audible fragment while replacing the session.
+    pub fn play_preview_voice_paused(&self, voice: Voice) -> Result<VoiceId> {
+        self.play_preview_voice_with_state(voice, true)
+    }
+
+    fn play_preview_voice_with_state(&self, voice: Voice, paused: bool) -> Result<VoiceId> {
         let mut voice = voice;
         voice.preview_only = true;
         self.apply_preview_gain(&mut voice);
-        self.play_preview_voice_on_route(voice, self.preview_route()?)
+        self.play_preview_voice_on_route(voice, self.preview_route()?, paused)
     }
 
     /// Play a one-shot test voice using a draft preview route. This keeps the
@@ -1355,7 +1365,7 @@ impl AudioEngine {
         let mut voice = voice;
         voice.preview_only = true;
         self.apply_preview_gain_for_db(&mut voice, config.preview_gain_db);
-        self.play_preview_voice_on_route(voice, self.preview_route_for_config(&config)?)
+        self.play_preview_voice_on_route(voice, self.preview_route_for_config(&config)?, false)
     }
 
     fn apply_preview_gain(&self, voice: &mut Voice) {
@@ -1447,7 +1457,7 @@ impl AudioEngine {
         }
     }
 
-    fn play_preview_voice_on_route(&self, voice: Voice, route: PreviewRoute) -> Result<VoiceId> {
+    fn play_preview_voice_on_route(&self, voice: Voice, route: PreviewRoute, paused: bool) -> Result<VoiceId> {
         match route {
             PreviewRoute::Disabled => anyhow::bail!(
                 "Preview/headphones output is not configured. Choose one in Settings > Audio."
@@ -1470,15 +1480,17 @@ impl AudioEngine {
                 voice.preview_only = true;
                 let id = voice.id;
                 let arc = Arc::new(voice);
-                arc.set_playing();
+                if paused { arc.set_paused(); } else { arc.set_playing(); }
                 self.voices
                     .push(Arc::clone(&arc))
                     .map_err(|_| anyhow!("preview voice pool poisoned"))?;
-                self.send_command(AudioCommand::Play { voice_id: id })?;
+                if !paused {
+                    self.send_command(AudioCommand::Play { voice_id: id })?;
+                }
                 Ok(id)
             }
             PreviewRoute::Aux(device_id) => self
-                .submit_to_aux(voice, &device_id, true, false, false)
+                .submit_to_aux(voice, &device_id, !paused, false, false)
                 .map_err(|(_, error)| anyhow!(
                     "Preview/headphones output '{device_id}' could not be opened; preview was kept silent: {error}"
                 )),
@@ -2079,6 +2091,29 @@ impl AudioEngine {
     /// UI/session owners self-heal after natural EOF even before the next GC.
     pub fn preview_voice_is_alive(&self, voice_id: VoiceId) -> bool {
         self.voice_is_alive(voice_id)
+    }
+
+    /// Pause or resume one voice owned by the isolated headphone preview.
+    pub fn set_preview_voice_paused(&self, voice_id: VoiceId, paused: bool) -> bool {
+        self.with_voice(voice_id, |voice| {
+            if !voice.preview_only {
+                return false;
+            }
+            match (voice.voice_state(), paused) {
+                (VoiceState::Playing, true) => voice.set_paused(),
+                (VoiceState::Paused, false) => voice.set_playing(),
+                _ => return false,
+            }
+            true
+        }).unwrap_or(false)
+    }
+
+    /// Whether a preview voice is currently advancing its audio cursor.
+    pub fn preview_voice_is_playing(&self, voice_id: VoiceId) -> bool {
+        self.with_voice(voice_id, |voice| {
+            voice.preview_only && voice.voice_state() == VoiceState::Playing
+        })
+            .unwrap_or(false)
     }
 
     /// Whether a voice is still playing, paused, or fading. Completion logic
@@ -6041,6 +6076,28 @@ mod tests {
                 .map(|voice| voice.preview_only && voice.patched)
         }).flatten();
         assert_eq!(isolated, Some(true));
+    }
+
+    #[test]
+    fn preview_transport_helpers_never_control_program_voices() {
+        let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
+        let mut preview = Voice::new(Arc::new(vec![0.0; 8]), 2, 48_000, 1.0, 0.0);
+        preview.preview_only = true;
+        preview.set_playing();
+        let preview_id = preview.id;
+        assert!(engine.voices.push(Arc::new(preview)).is_ok());
+
+        let mut program = Voice::new(Arc::new(vec![0.0; 8]), 2, 48_000, 1.0, 0.0);
+        program.set_playing();
+        let program_id = program.id;
+        assert!(engine.voices.push(Arc::new(program)).is_ok());
+
+        assert!(engine.set_preview_voice_paused(preview_id, true));
+        assert!(!engine.preview_voice_is_playing(preview_id));
+        assert!(!engine.set_preview_voice_paused(program_id, true));
+        assert!(!engine.preview_voice_is_playing(program_id));
+        let program_state = engine.with_voice(program_id, |voice| voice.voice_state());
+        assert_eq!(program_state, Some(VoiceState::Playing));
     }
 
     #[test]

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use commands::{
     cue_cmds::{
         add_cue, add_cue_to_group, add_number_action, add_targeted_cue, bulk_update_cues,
-        clear_cue_numbers, duplicate_cue, duplicate_cues, get_all_cues, get_cue, get_cues,
+        clear_cue_numbers, control_cue_preview, duplicate_cue, duplicate_cues, get_all_cues, get_cue, get_cues,
         get_media_thumbnail, get_normalize_db, get_output_window_visible, get_playhead,
         get_video_filmstrip, get_video_filmstrip_range, get_waveform_peaks, group_cues,
         identify_output_screen, list_camera_devices, list_ndi_sources, list_video_screens,
@@ -670,6 +670,7 @@ pub fn run() {
             stop_cue_preview,
             stop_preview,
             toggle_cue_preview,
+            control_cue_preview,
             toggle_output_window,
             get_output_window_visible,
             get_media_thumbnail,

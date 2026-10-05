@@ -26,4 +26,16 @@ describe("numberPreviewStore", () => {
     expect(useNumberPreviewStore.getState().playing).toBe(false);
     expect(useNumberPreviewStore.getState().positionMs).toBeCloseTo(533.333, 2);
   });
+
+  it("assigns the shared clock to only the selected Inspector Number", () => {
+    const store = useNumberPreviewStore.getState();
+    store.clear();
+    store.select("number-a", 1000);
+    store.setClockManaged("number-a", true);
+    expect(useNumberPreviewStore.getState().clockManagedNumberId).toBe("number-a");
+    store.select("number-b", 1000);
+    expect(useNumberPreviewStore.getState().clockManagedNumberId).toBeNull();
+    store.setClockManaged("number-a", false);
+    expect(useNumberPreviewStore.getState().clockManagedNumberId).toBeNull();
+  });
 });

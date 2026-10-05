@@ -9,9 +9,11 @@ interface NumberPreviewState {
   numberId: string | null;
   positionMs: number;
   playing: boolean;
+  clockManagedNumberId: string | null;
   select: (numberId: string, durationMs: number) => void;
   setPosition: (numberId: string, positionMs: number, durationMs?: number) => void;
   setPlaying: (numberId: string, playing: boolean) => void;
+  setClockManaged: (numberId: string, managed: boolean) => void;
   toggle: (numberId: string, durationMs: number) => void;
   stepFrame: (numberId: string, direction: -1 | 1, frameRate?: number, durationMs?: number) => void;
   clear: (numberId?: string) => void;
@@ -25,11 +27,13 @@ export const useNumberPreviewStore = create<NumberPreviewState>((set) => ({
   numberId: null,
   positionMs: 0,
   playing: false,
+  clockManagedNumberId: null,
 
   select: (numberId, durationMs) => set((state) => ({
     numberId,
     positionMs: state.numberId === numberId ? clamp(state.positionMs, durationMs) : 0,
     playing: state.numberId === numberId ? state.playing : false,
+    clockManagedNumberId: state.numberId === numberId ? state.clockManagedNumberId : null,
   })),
 
   setPosition: (numberId, positionMs, durationMs = Number.MAX_SAFE_INTEGER) => set((state) =>
@@ -39,6 +43,11 @@ export const useNumberPreviewStore = create<NumberPreviewState>((set) => ({
 
   setPlaying: (numberId, playing) => set((state) =>
     state.numberId === numberId ? { ...state, playing } : state),
+
+  setClockManaged: (numberId, managed) => set((state) => {
+    if (managed) return { ...state, clockManagedNumberId: numberId };
+    return state.clockManagedNumberId === numberId ? { ...state, clockManagedNumberId: null } : state;
+  }),
 
   toggle: (numberId, durationMs) => set((state) => {
     if (state.numberId !== numberId) return state;
@@ -64,6 +73,6 @@ export const useNumberPreviewStore = create<NumberPreviewState>((set) => ({
 
   clear: (numberId) => set((state) =>
     numberId == null || state.numberId === numberId
-      ? { numberId: null, positionMs: 0, playing: false }
+      ? { numberId: null, positionMs: 0, playing: false, clockManagedNumberId: null }
       : state),
 }));

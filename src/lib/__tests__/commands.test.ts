@@ -128,6 +128,7 @@ describe("command wrappers forward the correct name + args", () => {
       cueId: "cue-1",
       startMs: 13,
       endMs: 40,
+      startPaused: false,
     });
   });
 
@@ -137,6 +138,7 @@ describe("command wrappers forward the correct name + args", () => {
       cueId: "cue-1",
       startMs: null,
       endMs: null,
+      startPaused: false,
     });
   });
 
@@ -155,6 +157,7 @@ describe("command wrappers forward the correct name + args", () => {
       cueId: "cue-1",
       startMs: 13,
       endMs: 40,
+      startPaused: false,
     });
   });
 
@@ -163,6 +166,31 @@ describe("command wrappers forward the correct name + args", () => {
     await expect(cmd.previewCueOnHeadphones("cue-1", 500)).resolves.toEqual({
       voice_id: "voice-1",
       generation: 17,
+    });
+  });
+
+  it("can start a headphone preview paused when the visual editor is paused", async () => {
+    await cmd.previewCueOnHeadphones("cue-1", 500, 900, true);
+    expect(invokeMock).toHaveBeenCalledWith("preview_cue", {
+      cueId: "cue-1",
+      startMs: 500,
+      endMs: 900,
+      startPaused: true,
+    });
+  });
+
+  it("sends headphone play, pause, and seek edges to the isolated session", async () => {
+    await cmd.controlCuePreview("cue-1", "pause");
+    await cmd.controlCuePreview("cue-1", "seek", 1500.6, 9000);
+    await cmd.controlCuePreview("cue-1", "seek_paused", 1750);
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "control_cue_preview", {
+      cueId: "cue-1", action: "pause", positionMs: null, endMs: null,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "control_cue_preview", {
+      cueId: "cue-1", action: "seek", positionMs: 1501, endMs: 9000,
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(3, "control_cue_preview", {
+      cueId: "cue-1", action: "seek_paused", positionMs: 1750, endMs: null,
     });
   });
 

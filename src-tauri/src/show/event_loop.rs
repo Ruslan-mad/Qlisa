@@ -481,7 +481,8 @@ fn publish_preview_playhead(
             emit_preview_playhead(handle, previous, None, false, false);
         }
     }
-    emit_preview_playhead(handle, session, position, true, true);
+    let playing = audio_engine.preview_voice_is_playing(session.voice_id);
+    emit_preview_playhead(handle, session, position, playing, true);
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AudioCueData, NumberCueData, SliceList, VideoCueData, WaveformData } from "../../lib/types";
 import { PLAY_COUNT_INFINITE } from "../../lib/types";
-import { getCue, getVideoFilmstrip, getVideoFilmstripRange, getWaveformPeaks, previewCueOnHeadphones, stopCuePreview, toggleCuePreview, seekCue, seekCueMedia, updateCue, setNumberActionOffset } from "../../lib/commands";
+import { getCue, getVideoFilmstrip, getVideoFilmstripRange, getWaveformPeaks, previewCueOnHeadphones, stopCuePreview, controlCuePreview, seekCue, seekCueMedia, updateCue, setNumberActionOffset } from "../../lib/commands";
 import { SliceTimeline } from "./SliceTimeline";
 import { LiveTimeline, type NumberTimelineTrack } from "./LiveTimeline";
 import type { TrimPainter, TrimView } from "../Inspector/TrimStrip";
@@ -24,6 +24,7 @@ import { NumberPreviewControls } from "../Inspector/NumberPreview";
 import { useVideoPreviewTransport } from "../Inspector/mediaPreviewTransport";
 import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, numberActionDuration, numberActionLooped, numberGroupTimelineActions, numberMasterDuration, numberMediaLayoutSignature, numberMediaSourceSignature, numberVisualActions, snapNumberTime } from "./numberTimelineModel";
 import { useNumberPreviewStore } from "../../stores/numberPreviewStore";
+import { editorPreviewCursorPosition, headphonePreviewStartPosition, mirrorHeadphonePlayback, seekHeadphonePreview, stepPreviewAndSyncHeadphones } from "./headphonePreviewTransport";
 import {
   CLIP_EDITOR_BODY_PADDING_BOTTOM,
   CLIP_EDITOR_BODY_PADDING_TOP,
@@ -133,7 +134,6 @@ export function ClipEditorDock({
   const [localActiveTab, setLocalActiveTab] = useState<"Live" | "Slice">("Live");
   const previewActiveRef = useRef(false);
   const previewRequestRef = useRef(0);
-  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const cueLoadGenerationRef = useRef(0);
   const cueDataTargetRef = useRef<string | null>(null);
   const assetGenerationRef = useRef(0);
@@ -144,6 +144,7 @@ export function ClipEditorDock({
   const saveCueIdRef = useRef(cueId);
   const [saveError, setSaveError] = useState<string | null>(null);
   const displayedCueIdRef = useRef(cueId);
+  const seekAuditionHandlerRef = useRef<(positionMs: number, pauseBeforeSeek?: boolean) => void>(() => {});
   const timing = useTimingStore((state) => cueId ? state.timings[cueId] : undefined);
   const previewStoreEvent = useTimingStore((state) => state.previewPlayhead);
   const previewStoreGeneration = useTimingStore((state) => state.previewPlayheadGeneration);
@@ -160,6 +161,10 @@ export function ClipEditorDock({
   const numberPreviewPositionMs = useNumberPreviewStore((state) =>
     isNumber && state.numberId === cueId ? state.positionMs : 0,
   );
+  const numberPreviewPlaying = useNumberPreviewStore((state) =>
+    isNumber && state.numberId === cueId && state.playing,
+  );
+  const numberClockManagedByInspector = useNumberPreviewStore((state) => state.clockManagedNumberId === cueId);
   const mediaIdentity = isVideo && cue?.file_path
     ? createMediaPreviewIdentity(cueId ?? "", cue.file_path)
     : null;
@@ -193,7 +198,12 @@ export function ClipEditorDock({
       const state = useVideoPreviewTransport.getState();
       if (state.identity !== mediaIdentity || !state.mounted || !state.ready || !state.visible) return;
       event.preventDefault();
-      state.stepFrame(mediaIdentity, event.key === "ArrowLeft" ? -1 : 1, state.frameRate);
+      stepPreviewAndSyncHeadphones(() => {
+        state.stepFrame(mediaIdentity, event.key === "ArrowLeft" ? -1 : 1, state.frameRate);
+        return useVideoPreviewTransport.getState().positionMs;
+      }, (steppedPosition) => {
+        seekAuditionHandlerRef.current(steppedPosition, true);
+      });
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -222,8 +232,6 @@ export function ClipEditorDock({
     const endedUi = ui.generation != null && previewStoreGeneration === ui.generation;
     if (!endedUi) return;
     previewActiveRef.current = false;
-    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-    previewTimerRef.current = null;
     setPreviewUi((current) => current?.cueId === ui.cueId
       && current.generation === ui.generation
       && current.voiceId === ui.voiceId
@@ -468,8 +476,6 @@ export function ClipEditorDock({
     return () => {
       ++previewRequestRef.current;
       previewActiveRef.current = false;
-      if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-      previewTimerRef.current = null;
       void stopCuePreview().catch(() => {});
     };
   }, []);
@@ -479,8 +485,6 @@ export function ClipEditorDock({
     displayedCueIdRef.current = cueId;
     ++previewRequestRef.current;
     previewActiveRef.current = false;
-    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-    previewTimerRef.current = null;
     setPreviewUi(null);
     void stopCuePreview().catch(() => {});
   }, [cueId]);
@@ -491,8 +495,6 @@ export function ClipEditorDock({
     if (activeTab !== "Live" || !showLivePanel) {
       ++previewRequestRef.current;
       previewActiveRef.current = false;
-      if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-      previewTimerRef.current = null;
       setPreviewUi(null);
       void stopCuePreview().catch(() => {});
     }
@@ -747,11 +749,30 @@ export function ClipEditorDock({
   );
 
   // ── Dedicated headphone preview (never the main program output) ───────────
-  const previewAt = async (positionMs: number) => {
+  const previewAt = async (positionMs: number, pauseBeforeSeek = false) => {
     if (!cueId || !cue) return;
     const request = ++previewRequestRef.current;
     const ticket = { requestSequence: request, cueId };
     const clamped = Math.max(0, Math.min(durationMs || Number.MAX_SAFE_INTEGER, Math.round(positionMs)));
+    if (previewActiveRef.current) {
+      try {
+        const result = await controlCuePreview(cueId, pauseBeforeSeek ? "seek_paused" : "seek", clamped, cue.end_time_ms ?? undefined);
+        if (!isCurrentPreviewStart(ticket, previewRequestRef.current, displayedCueIdRef.current)) return;
+        if (result.voice_id) {
+          setPreviewUi((prev) => ({
+            ...(prev?.cueId === cueId ? prev : { cueId, voiceId: null, positionMs: null, error: null }),
+            voiceId: result.voice_id!,
+            generation: result.generation ?? null,
+            positionMs: clamped,
+            error: null,
+          }));
+        }
+      } catch (error) {
+        if (request !== previewRequestRef.current) return;
+        setPreviewUi((prev) => ({ ...(prev ?? { cueId, voiceId: null, positionMs: null }), error: String(error) }));
+      }
+      return;
+    }
     setPreviewUi((prev) => ({
       ...(prev?.cueId === cueId ? prev : { cueId, voiceId: null, positionMs: null, error: null }),
       generation: null,
@@ -783,25 +804,11 @@ export function ClipEditorDock({
     }
   };
 
-  const schedulePreviewAt = (positionMs: number, immediate = false) => {
-    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-    if (immediate) {
-      void previewAt(positionMs);
-      return;
-    }
-    previewTimerRef.current = setTimeout(() => {
-      previewTimerRef.current = null;
-      void previewAt(positionMs);
-    }, 120);
-  };
-
   const toggleAudition = async () => {
     if (!cueId || !cue) return;
-    if (previewVoice) {
+    if (previewVoice && previewActiveRef.current) {
       ++previewRequestRef.current;
       previewActiveRef.current = false;
-      if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
-      previewTimerRef.current = null;
       setPreviewUi((prev) => prev?.cueId === cueId ? { ...prev, voiceId: null, error: null } : prev);
       await stopCuePreview().catch(() => {});
       return;
@@ -814,10 +821,21 @@ export function ClipEditorDock({
       error: null,
     }));
     try {
-      const start = timing?.media_position_ms ?? previewPosition ?? cue?.start_time_ms ?? 0;
-      const result = await toggleCuePreview(cueId, start, cue?.end_time_ms ?? undefined);
+      const start = headphonePreviewStartPosition(
+        isNumber,
+        numberPreviewPositionMs,
+        editorPreviewCursorPosition(isVideo, videoTransport?.positionMs ?? null, previewPosition),
+        runtimeCueState === "running" || runtimeCueState === "paused" ? timing?.media_position_ms ?? null : null,
+        cue.start_time_ms,
+      );
+      const editorPlaying = isNumber
+        ? useNumberPreviewStore.getState().playing
+        : mediaIdentity
+          ? useVideoPreviewTransport.getState().playing
+          : true;
+      const result = await previewCueOnHeadphones(cueId, start, cue.end_time_ms ?? undefined, !editorPlaying);
       if (request !== previewRequestRef.current) return;
-      if (result.playing && result.voice_id) {
+      if (result.voice_id) {
         previewActiveRef.current = true;
         setPreviewUi((prev) => ({
           ...(prev?.cueId === cueId ? prev : { cueId, voiceId: null, positionMs: null, error: null }),
@@ -825,9 +843,6 @@ export function ClipEditorDock({
           generation: result.generation ?? null,
           error: null,
         }));
-      } else {
-        previewActiveRef.current = false;
-        setPreviewUi((prev) => prev?.cueId === cueId ? { ...prev, voiceId: null, error: null } : prev);
       }
     } catch (error) {
       if (request !== previewRequestRef.current) return;
@@ -838,6 +853,25 @@ export function ClipEditorDock({
       }));
     }
   };
+
+  const syncAuditionPlayback = (visualPlaying: boolean) => {
+    if (!cueId) return;
+    mirrorHeadphonePlayback(visualPlaying, Boolean(previewVoice && previewActiveRef.current), (action) =>
+      controlCuePreview(cueId, action).catch((error) => {
+      setPreviewUi((prev) => prev?.cueId === cueId ? { ...prev, error: String(error) } : prev);
+      }),
+    );
+  };
+
+  const seekAuditionFromControl = (positionMs: number, pauseBeforeSeek = false) => {
+    seekHeadphonePreview(
+      Boolean(previewActiveRef.current),
+      positionMs,
+      (position, pause) => previewAt(position, pause),
+      pauseBeforeSeek,
+    );
+  };
+  seekAuditionHandlerRef.current = seekAuditionFromControl;
 
   const tabControls = (
     <div role="tablist" aria-label="Clip editor view" style={{ display: "flex", gap: 2 }}>
@@ -860,9 +894,28 @@ export function ClipEditorDock({
 
   const numberCue = isNumber && cue ? cue as NumberCueData : null;
   const timelineDurationMs = numberCue ? numberMasterDuration(numberCue) : durationMs;
+  const numberMaster = numberCue?.children.find((child) => child.id === numberCue.number_master_id);
+  const numberHasAudioPreview = !!numberMaster
+    && (numberMaster.cue_type === "audio" || numberMaster.cue_type === "video")
+    && !!numberMaster.file_path;
   const numberHasVisualPreview = !!numberCue?.children.some((child) =>
     (child.cue_type === "video" || child.cue_type === "image") && !!child.file_path,
   );
+  useEffect(() => {
+    if (!numberCue || !numberPreviewPlaying || numberClockManagedByInspector) return;
+    const timer = window.setInterval(() => {
+      const state = useNumberPreviewStore.getState();
+      if (state.numberId !== numberCue.id || !state.playing) return;
+      const next = state.positionMs + 33;
+      if (next >= timelineDurationMs && timelineDurationMs > 0) {
+        state.setPosition(numberCue.id, timelineDurationMs, timelineDurationMs);
+        state.setPlaying(numberCue.id, false);
+      } else {
+        state.setPosition(numberCue.id, next, timelineDurationMs);
+      }
+    }, 33);
+    return () => window.clearInterval(timer);
+  }, [numberCue?.id, timelineDurationMs, numberPreviewPlaying, numberClockManagedByInspector]);
   useEffect(() => {
     if (!numberCue) {
       if (cueId) useNumberPreviewStore.getState().clear(cueId);
@@ -1004,10 +1057,21 @@ export function ClipEditorDock({
           {activeTab === "Live" || isNumber ? (
             <>
               {mediaIdentity
-                ? <div style={videoControlsGroup}><VideoPreviewControls identity={mediaIdentity} buttonStyle={headerBtn} /></div>
+                ? <div style={videoControlsGroup}><VideoPreviewControls identity={mediaIdentity} buttonStyle={headerBtn} onTransportToggle={syncAuditionPlayback} onSeek={seekAuditionFromControl} /></div>
                 : isNumber
-                  ? <div style={videoControlsGroup}><NumberPreviewControls numberId={cueId} durationMs={timelineDurationMs} available={numberHasVisualPreview} buttonStyle={headerBtn} /></div>
-                : <span aria-hidden="true" style={{ display: "block", width: VIDEO_CONTROLS_SLOT_WIDTH, flex: `0 0 ${VIDEO_CONTROLS_SLOT_WIDTH}px` }} />}
+                  ? <div style={videoControlsGroup}><NumberPreviewControls numberId={cueId} durationMs={timelineDurationMs} available={numberHasVisualPreview || numberHasAudioPreview} buttonStyle={headerBtn} onTransportToggle={(playing) => {
+                    if (numberHasAudioPreview && !numberHasVisualPreview && !previewActiveRef.current && !playing) void toggleAudition();
+                    else syncAuditionPlayback(playing);
+                  }} onSeek={seekAuditionFromControl} /></div>
+                  : <button
+                    type="button"
+                    onClick={() => previewVoice && previewActiveRef.current
+                      ? syncAuditionPlayback(previewPlayhead?.playing ?? true)
+                      : void toggleAudition()}
+                    aria-label={previewVoice ? (previewPlayhead?.playing === false ? t("editorUi.videoPreviewPlay") : t("editorUi.videoPreviewPause")) : t("editorUi.videoPreviewPlay")}
+                    title={previewVoice ? (previewPlayhead?.playing === false ? t("editorUi.videoPreviewPlay") : t("editorUi.videoPreviewPause")) : t("editorUi.videoPreviewPlay")}
+                    style={headerBtn}
+                  >{previewVoice && previewPlayhead?.playing !== false ? "❚❚" : "▶"}</button>}
               <button
                 onClick={() => void toggleAudition()}
                 style={{ ...headerBtn, color: previewVoice ? "#4ade80" : "var(--wc-text)" }}
@@ -1103,9 +1167,8 @@ export function ClipEditorDock({
                     error: String(err),
                   }));
                 });
-                if (!isVideo && previewActiveRef.current) schedulePreviewAt(ms);
               }}
-              onSeekEnd={(ms) => { if (!isVideo && previewActiveRef.current) schedulePreviewAt(ms, true); }}
+              onSeekEnd={seekAuditionFromControl}
               onPreviewPosition={(ms) => {
                 if (isNumber) {
                   useNumberPreviewStore.getState().setPosition(cueId, ms, timelineDurationMs);
@@ -1119,14 +1182,14 @@ export function ClipEditorDock({
                   ...(prev?.cueId === cueId ? prev : { cueId, voiceId: null, positionMs: null, error: null }),
                   positionMs: ms,
                 }));
-                if (previewActiveRef.current) schedulePreviewAt(ms);
               }}
               onPreviewPositionEnd={(ms) => {
                 if (isNumber) {
                   useNumberPreviewStore.getState().setPosition(cueId, ms, timelineDurationMs);
+                  seekAuditionFromControl(ms);
                   return;
                 }
-                if (!isVideo && previewActiveRef.current) schedulePreviewAt(ms, true);
+                seekAuditionFromControl(ms);
               }}
               onZoomDetail={() => setWantDetail(true)}
               onViewChange={setZoomView}

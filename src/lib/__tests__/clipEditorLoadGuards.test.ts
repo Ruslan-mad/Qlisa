@@ -68,6 +68,18 @@ describe("clip editor async load guards", () => {
     expect(previewUiForCue(newUi, "cue-a", state.previewPlayhead, state.previewPlayheadGeneration)?.voiceId).toBe("voice-new");
   });
 
+  it("clears the voice after a keyboard seek replaces its session generation", () => {
+    let ui = { cueId: "cue-a", voiceId: "voice-before-seek", positionMs: 500, error: null as string | null, generation: 4 };
+    // Keyboard frame-step uses the same seek handler as the timeline. Its
+    // command response replaces both the voice ID and authoritative generation.
+    ui = { ...ui, voiceId: "voice-after-seek", positionMs: 533, generation: 5 };
+    useTimingStore.setState({ previewPlayhead: null, previewPlayheadGeneration: -1 });
+    useTimingStore.getState().setPreviewPlayhead({ cue_id: "cue-a", media_position_ms: 533, playing: false, active: true, generation: 5 });
+    useTimingStore.getState().setPreviewPlayhead({ cue_id: "cue-a", media_position_ms: null, playing: false, active: false, generation: 5 });
+    const state = useTimingStore.getState();
+    expect(previewUiForCue(ui, "cue-a", state.previewPlayhead, state.previewPlayheadGeneration)?.voiceId).toBeNull();
+  });
+
   it("commits a replacement start after the old voice reaches EOF", async () => {
     let currentRequestSequence = 8;
     let previewActive = true;
