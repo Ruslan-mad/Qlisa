@@ -452,17 +452,36 @@ fn main() -> Result<()> {
     let app = builder.build(context)?;
     if webview {
         let handle = app.handle().clone();
-        let run_output = app.state::<BenchState>().output.clone();
-        let frontend = app.state::<BenchState>().frontend.clone();
-        let run_for = Duration::from_secs(seconds);
         let worker_handle = handle.clone();
-        let worker_output = run_output.clone();
         let worker = thread::spawn(move || {
-            run_webview_benchmark(worker_handle, worker_output, frontend, seconds, layers, mode, is_image)
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(state) = worker_handle.try_state::<BenchState>() {
+                        return run_webview_benchmark(
+                            worker_handle.clone(),
+                            state.output.clone(),
+                            state.frontend.clone(),
+                            seconds,
+                            layers,
+                            mode,
+                            is_image,
+                        );
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(anyhow!("Tauri setup did not register benchmark state within 10 seconds"));
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }))
+            .unwrap_or_else(|_| Err(anyhow!("webview benchmark worker panicked")));
+            if result.is_err() {
+                worker_handle.exit(1);
+            }
+            result
         });
         app.run(|_, _| {});
         worker.join().map_err(|_| anyhow!("webview benchmark worker panicked"))??;
-        let _ = run_for;
         return Ok(());
     }
     let app_handle = app.handle().clone();
