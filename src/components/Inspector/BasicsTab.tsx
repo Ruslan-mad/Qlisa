@@ -6,6 +6,7 @@ import { ColorPicker } from "./ColorPicker";
 import { MediaPreview } from "./MediaThumbnail";
 import { resolveMediaPreviewKind } from "./mediaPreviewModel";
 import { useLocale } from "../../i18n";
+import { cueNotesText, cueNotesUpdate } from "../../lib/cueNotes";
 
 export function BasicsTab({
   cue,
@@ -60,8 +61,8 @@ export function BasicsTab({
         <Field label="Notes">
           <textarea
             style={{ ...inputStyle, resize: "vertical", minHeight: 56 }}
-            defaultValue={cue.notes ?? ""}
-            onBlur={(e) => onSave({ notes: e.target.value })}
+            defaultValue={cueNotesText(cue)}
+            onBlur={(e) => onSave(cueNotesUpdate(cue, e.target.value))}
           />
         </Field>
       </Section>

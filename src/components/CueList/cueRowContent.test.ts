@@ -2,10 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { CueSummary } from "../../lib/types";
 import {
   cueFileName,
-  cueNotesProperty,
-  cueNotesText,
   formatTargetCues,
 } from "./cueRowContent";
+import { cueNotesText, cueNotesUpdate } from "../../lib/cueNotes";
 
 function summary(overrides: Partial<CueSummary>): CueSummary {
   return {
@@ -44,11 +43,11 @@ describe("cue row file, notes, and target content", () => {
   it("uses Memo text in Notes and saves it through memo_text", () => {
     const memo = summary({ cue_type: "memo", notes: "old note", memo_text: "Scene change" });
     expect(cueNotesText(memo)).toBe("Scene change");
-    expect(cueNotesProperty(memo)).toBe("memo_text");
+    expect(cueNotesUpdate(memo, "Changed")).toEqual({ memo_text: "Changed" });
 
     const audio = summary({ notes: "Keep the room quiet" });
     expect(cueNotesText(audio)).toBe("Keep the room quiet");
-    expect(cueNotesProperty(audio)).toBe("notes");
+    expect(cueNotesUpdate(audio, "Changed")).toEqual({ notes: "Changed" });
   });
 
   it("shows one target with its number and name and exposes the full text as a title", () => {

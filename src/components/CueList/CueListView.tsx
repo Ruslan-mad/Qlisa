@@ -13,6 +13,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { CueRow } from "./CueRow";
+import { prepareBackgroundSelection } from "./backgroundSelection";
 import { fileDropPathAllowedForTarget, fileDropTargetForCue } from "./fileDragModel";
 import {
   DEFAULT_COLUMNS,
@@ -1000,12 +1001,11 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
 
   function startBackgroundSelection(e: React.MouseEvent) {
     if (e.button !== 0) return;
-    const target = e.target as HTMLElement;
-    if (
-      target.closest("[data-cue-id]") ||
-      target.closest("button, input, textarea, select, [contenteditable], [data-resize], [data-selection-gutter]")
-    ) return;
-    e.preventDefault();
+    if (!prepareBackgroundSelection(
+      e.target as HTMLElement,
+      document.activeElement instanceof HTMLElement ? document.activeElement : null,
+      () => e.preventDefault(),
+    )) return;
     startSelectionDrag(e, null);
   }
 

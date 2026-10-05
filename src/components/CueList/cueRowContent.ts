@@ -5,14 +5,6 @@ export function cueFileName(cue: Pick<CueSummary, "cue_type" | "file_path">): st
   return cue.file_path.split(/[\\/]/).pop() ?? cue.file_path;
 }
 
-export function cueNotesText(cue: Pick<CueSummary, "cue_type" | "memo_text" | "notes">): string {
-  return cue.cue_type === "memo" ? cue.memo_text ?? "" : cue.notes ?? "";
-}
-
-export function cueNotesProperty(cue: Pick<CueSummary, "cue_type">): "memo_text" | "notes" {
-  return cue.cue_type === "memo" ? "memo_text" : "notes";
-}
-
 function targetLabel(target: CueTargetSummary): string {
   return [target.number?.trim(), target.name.trim()].filter(Boolean).join(" ");
 }

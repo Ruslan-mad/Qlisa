@@ -198,6 +198,10 @@ the Playhead.
 - **Cue number** is a string (`"1"`, `"1.5"`, `"Intro"`); selection is separate
   from the Playhead. Do not treat list position or displayed cue number as a
   stable cue identity; use UUID `CueId`.
+- Inspector edits commit on blur. When a background click clears cue selection,
+  blur the active editor before changing selection so the edit saves against
+  the cue that was selected when editing began. Memo text in Basics, the Memo
+  tab, and the cue-list Notes column all use the single `memo_text` field.
 - Group modes are Simultaneous, Sequential, Playlist (exclusive child at a
   time, optional wrap), and Start Random (shuffle-bag). A group may own multiple
   child voices. Targeting/stopping/fading a group must resolve child voices

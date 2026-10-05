@@ -15,7 +15,8 @@ import { canEditCueDuration, emptyCueDurationValue } from "./inlineTimeModel";
 import { CueTypeIcon } from "../common/CueTypeIcon";
 import { durationProgressPercent } from "./durationProgress";
 import { formatCueDuration } from "./formatDuration";
-import { cueFileName, cueNotesProperty, cueNotesText, formatTargetCues } from "./cueRowContent";
+import { cueFileName, formatTargetCues } from "./cueRowContent";
+import { cueNotesText, cueNotesUpdate } from "../../lib/cueNotes";
 import {
   assessFileSize,
   assessResolution,
@@ -216,7 +217,7 @@ function CueRowImpl({
 
   async function commitInlineEdit() {
     if (!editingCell) return;
-    await updateCue(cue.id, { [cueNotesProperty(cue)]: editingValue }).catch(console.error);
+    await updateCue(cue.id, cueNotesUpdate(cue, editingValue)).catch(console.error);
     onRefresh?.();
     setEditingCell(null);
   }
