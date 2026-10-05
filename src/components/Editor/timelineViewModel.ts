@@ -51,3 +51,22 @@ export function mediaSourceMsAtPixel(
   const ratio = Math.max(0, Math.min(1, (timelineMs - mediaStartMs) / mediaSpan));
   return sourceStartMs + ratio * Math.max(0, sourceEndMs - sourceStartMs);
 }
+
+/** Map absolute source time to a peak bin in the cached full-file waveform. */
+export function waveformBinAtSourceMs(sourceMs: number, fileDurationMs: number, peakCount: number): number {
+  if (peakCount <= 0 || fileDurationMs <= 0) return 0;
+  return Math.max(0, Math.min(peakCount - 1, Math.floor((sourceMs / fileDurationMs) * peakCount)));
+}
+
+/** Keep a short final repeat pass on the matching prefix of its source crop. */
+export function sourceRangeForTimelinePass(
+  passStartMs: number,
+  passEndMs: number,
+  sourceStartMs: number,
+  sourceEndMs: number,
+): TimelineViewRange {
+  return {
+    startMs: sourceStartMs,
+    endMs: Math.min(sourceEndMs, sourceStartMs + Math.max(0, passEndMs - passStartMs)),
+  };
+}

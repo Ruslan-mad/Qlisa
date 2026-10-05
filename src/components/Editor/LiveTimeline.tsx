@@ -7,7 +7,7 @@ import type { TrimPainter } from "../Inspector/TrimStrip";
 import type { TrimView } from "../Inspector/TrimStrip";
 import { useCanvasWidth } from "../Inspector/TrimStrip";
 import { applyNumberDragSnap, numberDragRange } from "./numberTimelineModel";
-import { mediaSourceMsAtPixel, panTimelineView, zoomTimelineView } from "./timelineViewModel";
+import { mediaSourceMsAtPixel, panTimelineView, sourceRangeForTimelinePass, waveformBinAtSourceMs, zoomTimelineView } from "./timelineViewModel";
 import { useTimelineEditorStore } from "../../stores/timelineEditorStore";
 import { useLocale } from "../../i18n";
 import { formatDurationMs } from "../CueList/formatDuration";
@@ -262,7 +262,9 @@ export function LiveTimeline({
             ctx.fillStyle = "rgba(34,197,94,.72)";
             for (let x = Math.floor(fromX); x <= Math.ceil(toXEnd); x++) {
               const sourceMs = mediaSourceMsAtPixel(x, width, mediaStart, mediaEnd, visible.s, visible.e, sourceStart, sourceEnd);
-              const h = Math.max(1, (peaks[Math.min(peaks.length - 1, Math.floor((sourceMs / Math.max(1, sourceEnd)) * peaks.length))] ?? 0) * amp);
+              const fileDurationMs = (media?.waveform?.file_duration_s ?? 0) * 1000;
+              const bin = waveformBinAtSourceMs(sourceMs, fileDurationMs, peaks.length);
+              const h = Math.max(1, (peaks[bin] ?? 0) * amp);
               ctx.fillRect(x, mid - h, 1, h * 2);
             }
           }
@@ -286,17 +288,20 @@ export function LiveTimeline({
         const waveformHeight = hasVideoWaveform ? Math.max(8, Math.floor(contentHeight * 0.36)) : contentHeight;
         const visualHeight = hasVideoWaveform ? Math.max(2, contentHeight - waveformHeight - 1) : contentHeight;
         const waveformTop = hasVideoWaveform ? contentTop + visualHeight + 1 : contentTop;
-        const drawPass = (passStart: number, passEnd: number) => drawMedia(
-          track.media,
-          passStart,
-          passEnd,
-          sourceStart,
-          sourceEnd,
-          contentTop,
-          visualHeight,
-          waveformTop,
-          waveformHeight,
-        );
+        const drawPass = (passStart: number, passEnd: number) => {
+          const sourceRange = sourceRangeForTimelinePass(passStart, passEnd, sourceStart, sourceEnd);
+          drawMedia(
+            track.media,
+            passStart,
+            passEnd,
+            sourceRange.startMs,
+            sourceRange.endMs,
+            contentTop,
+            visualHeight,
+            waveformTop,
+            waveformHeight,
+          );
+        };
         if (track.looped && track.endMs > track.startMs) {
           // Keep each pass at source duration. A short looping video therefore
           // reads as repeated filmstrip blocks/waveforms instead of a fake

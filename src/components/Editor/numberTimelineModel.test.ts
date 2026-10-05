@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, groupAudioSegments, groupDurationMs, numberActionDuration, numberActionLooped, numberChildTimelineStartMs, numberDragRange, numberMasterDuration, numberMediaLayoutSignature, numberMediaSourceSignature, numberPreviewItem, numberPreviewSourcePosition, numberPreviewSourceWindow, numberVisualActions, shouldRetainNumberPreviewAsset, snapNumberTime } from "./numberTimelineModel";
-import { mediaSourceMsAtPixel } from "./timelineViewModel";
+import { mediaSourceMsAtPixel, sourceRangeForTimelinePass, waveformBinAtSourceMs } from "./timelineViewModel";
 
 const child = (id: string, type: "video" | "image", extra: Record<string, unknown> = {}) => ({
   id, cue_type: type, name: id, duration_ms: 4000, file_duration_ms: 5000,
@@ -70,6 +70,47 @@ describe("numberTimelineModel", () => {
     expect(numberPreviewSourcePosition(actions.trimmed, 5_000)).toBe(2_000);
     expect(numberPreviewSourcePosition(actions.trimmed, 6_999)).toBe(3_999);
     expect(actions.trimmed.timeline_end_ms).toBeLessThan(20_000);
+  });
+
+  it("maps serialized trim windows and finite repeat passes into reused full-file peaks", () => {
+    const peaks = [1, 1, 1, 1, 1, 1, 0, 0, 0, 0];
+    const waveform = { peaks, rms: peaks, file_duration_s: 10 };
+    const cachedAsset = { cueId: "action", filePath: "audio.wav", waveform };
+    const cases = [
+      { trim: { start_time_ms: null, end_time_ms: 6_000 }, passEndBins: [5, 3] },
+      { trim: { start_time_ms: 6_000, end_time_ms: null }, passEndBins: [9, 9, 7] },
+      { trim: { start_time_ms: 2_000, end_time_ms: 6_000 }, passEndBins: [5, 5, 3] },
+    ];
+
+    for (const { trim, passEndBins } of cases) {
+      const actionCue = {
+        id: "action", cue_type: "audio", name: "action", cached_duration_ms: 10_000,
+        loop_count: 2, ...trim,
+      } as any;
+      const cue = {
+        number_master_id: "master", number_action_offsets_ms: { action: 0 },
+        children: [
+          { id: "master", cue_type: "audio", name: "master", cached_duration_ms: 10_000 },
+          actionCue,
+        ],
+      } as any;
+      const source = cueSourceWindow(actionCue);
+      const onePassMs = source.endMs - source.startMs;
+      const masterMs = numberMasterDuration(cue);
+      const action = numberVisualActions(cue)[0];
+      expect(action.timeline_end_ms).toBe(Math.min(masterMs, onePassMs * 3));
+
+      const sampledBins: number[] = [];
+      for (let passStart = 0; passStart < action.timeline_end_ms!; passStart += onePassMs) {
+        const passEnd = Math.min(action.timeline_end_ms!, passStart + onePassMs);
+        const passSource = sourceRangeForTimelinePass(passStart, passEnd, source.startMs, source.endMs);
+        const sourceMs = mediaSourceMsAtPixel(999, 1000, passStart, passEnd, passStart, passEnd, passSource.startMs, passSource.endMs);
+        sampledBins.push(waveformBinAtSourceMs(sourceMs, waveform.file_duration_s * 1000, peaks.length));
+      }
+      expect(sampledBins).toEqual(passEndBins);
+      expect(canReuseNumberWaveformAsset(cachedAsset, "action", "audio.wav")).toBe(true);
+      expect(cachedAsset.waveform).toBe(waveform);
+    }
   });
 
   it("ends a trimmed Number Video action after its finite Time-tab repeats", () => {
