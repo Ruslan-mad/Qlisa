@@ -1,87 +1,125 @@
-<p align="right"><strong>English</strong> | <a href="README.ru.md">Русский</a></p>
+<p align="right"><strong>Русский</strong> | <a href="README.en.md">English</a></p>
 
 <p align="center">
-  <img src="docs/assets/readme/qlisa-header.svg" alt="Qlisa — cue-based playback for live shows on Windows" width="820">
+  <img src="docs/assets/readme/qlisa-header.svg" alt="Qlisa" width="820">
 </p>
 
 <p align="center">
-  <a href="https://github.com/Ruslan-mad/Qlisa/releases/latest"><img alt="Windows" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white"></a>
-  <a href="https://github.com/Ruslan-mad/Qlisa/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Ruslan-mad/Qlisa?label=latest%20release"></a>
+  <a href="https://github.com/Ruslan-mad/Qlisa/releases/latest"><img alt="Windows 10 и 11" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4?logo=windows&logoColor=white"></a>
+  <a href="https://github.com/Ruslan-mad/Qlisa/releases/latest"><img alt="Последний релиз" src="https://img.shields.io/github/v/release/Ruslan-mad/Qlisa?label=latest%20release"></a>
   <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue"></a>
-  <a href="https://www.rust-lang.org/"><img alt="Rust" src="https://img.shields.io/badge/Rust-stable-orange?logo=rust&logoColor=white"></a>
-  <a href="https://v2.tauri.app/"><img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/Ruslan-mad/Qlisa/releases/latest"><strong>Download Qlisa for Windows</strong></a> ·
-  <a href="https://github.com/Ruslan-mad/Qlisa/releases">All releases</a> ·
-  <a href="docs/README.md">Documentation</a> ·
-  <a href="#screenshots">Screenshots</a> ·
-  <a href="https://github.com/Ruslan-mad/Qlisa/issues">Report a bug</a> ·
-  <a href="https://github.com/Ruslan-mad/Qlisa">Source code</a>
+  <a href="https://github.com/Ruslan-mad/Qlisa/releases/latest"><strong>⬇ Скачать Qlisa для Windows</strong></a> ·
+  <a href="#скриншоты">Скриншоты</a> ·
+  <a href="docs/README.md">Документация</a> ·
+  <a href="https://github.com/Ruslan-mad/Qlisa/issues">Сообщить об ошибке</a>
 </p>
 
-Qlisa is cue-based playback software for live shows and stage production on Windows. Build a cue list, select the next cue with the Playhead, and start it with **GO**. Audio, video, images, groups, timing, and output routing share one show workspace.
+# Qlisa
 
-Qlisa is a community-maintained derivative of [Inkue by FonograF](https://github.com/FonograF/Inkue). New projects use `.qlisa`; legacy `.inkue` projects remain supported, and both extensions use the same JSON workspace format. The `.qlisa` Windows file association was added in 1.5.8. This source tree targets Qlisa 1.5.10; see [Releases](https://github.com/Ruslan-mad/Qlisa/releases) for binary availability.
+**Qlisa помогает запускать звук, видео, изображения и другие команды во время концертов, спектаклей, презентаций и других живых мероприятий.** Подготовьте последовательность действий заранее, а во время шоу запускайте её кнопкой **GO**.
 
-## About
+Вместо отдельных плееров и папок со случайно названными файлами шоу хранится в одном проекте. Например, один Cue может запустить музыку, следующий — вывести заставку, а после ролика автоматически начнётся следующий номер.
 
-Use Qlisa to prepare and run a show from a cue list. Cues can play media, control other cues, wait for timing, or send messages to connected systems. The Playhead selects the next cue; **GO**, **STOP**, and the transport controls run the show.
+Во время шоу Qlisa помогает:
 
-## Screenshots
+- включить музыкальный трек;
+- запустить видео или показать изображение и текст;
+- плавно изменить громкость или вывести звук на нужное устройство;
+- автоматически запустить следующий Cue;
+- отправить команду другому оборудованию или программе;
+- вывести разный контент на несколько экранов.
 
-![Qlisa main window with a cue list](docs/screenshots/main-window.png)
+## Как работает Cue List и GO
 
-| Active Cues | Inspector |
+**Cue** — это одно действие шоу: например, воспроизвести аудио, показать видео или текст, подождать, изменить уровень звука или отправить команду внешней системе. **Cue List** — упорядоченный список таких действий. В нём можно подготовить весь ход шоу и настроить файлы, уровни, выходы и задержки.
+
+**Playhead** указывает Cue, который запустится при следующем нажатии **GO**. После запуска Playhead переходит дальше по списку. Панель **Active Cues** показывает уже запущенные Cue и их состояние. **STOP** останавливает выбранное воспроизведение по его обычным правилам; для немедленной остановки есть Hard Stop.
+
+Для автоматического перехода можно выбрать режим продолжения. **Auto-Continue** запускает следующий Cue после заданной задержки, отсчитываемой от начала текущего действия; поэтому Cue могут перекрываться. **Auto-Follow** запускает следующий Cue после завершения текущего действия и его задержки.
+
+## Скриншоты
+
+![Главное окно Qlisa со списком Cue](docs/screenshots/main-window.png)
+
+| Активные Cue | Инспектор Cue |
 | --- | --- |
-| ![Active Cues with playback progress and controls](docs/screenshots/active-cues.png) | ![Cue inspector](docs/screenshots/inspector.png) |
+| ![Панель Active Cues](docs/screenshots/active-cues.png) | ![Настройки Cue в Inspector](docs/screenshots/inspector.png) |
 
-## Features
+## Возможности
 
-- Audio, Video, Image, Text, Memo, Wait, Fade, Stop, Group, and Number cues, with cue timing, fades, trims, seek, loops, Auto-Continue, and Auto-Follow.
-- Active Cues and Inspector panels, named display outputs, per-cue routing, audio mixing, and headphone preview.
-- Compact Inspector controls for loops, mute, continuation, and per-output Fit; visual cues can keep separate geometry for each output.
-- Enabling Loop for Audio and Video starts infinite looping. Their cue-list duration shows `∞`; finite repeats remain configurable.
-- Project-scoped waveform and media preview caches that persist across reopen.
-- MIDI, OSC, timecode, sACN/Art-Net lighting, SRT, and NDI input or output. NDI requires the separately installed NDI Runtime.
-- Media conversion for audio, video, and images. Conversion and media probing use FFmpeg and ffprobe.
-- QLab workspace import, English and Russian interface, diagnostics, and crash recovery.
+### Звук, видео и изображения
 
-## Installation
+- Воспроизведение аудио и видео, показ изображений и текста.
+- Громкость, плавное появление и затухание, обрезка начала и конца, перемотка и циклическое воспроизведение.
+- Выбор аудиоустройств, микширование и прослушивание в наушниках.
+- Несколько экранных выходов и маршрутизация визуальных Cue на нужные выходы.
+- Отдельная геометрия изображения для разных выходов.
 
-1. Open [the latest Qlisa release](https://github.com/Ruslan-mad/Qlisa/releases/latest).
-2. Download the Windows installer and run it. Windows may ask for administrator approval to install Qlisa for all users.
-3. Start Qlisa. On first launch, it downloads and verifies the pinned media runtime components.
+### Типы Cue и управление шоу
 
-NDI is optional. Install the official [NDI Runtime](https://ndi.video/) separately only if you use NDI sources or destinations. Qlisa does not distribute or install it.
+Доступны Audio, Video, Image, Text, Memo, Wait, Fade, Stop, Group, Number и другие Cue. Есть задержки до и после действия, циклы, управление другими Cue и группы с последовательным или параллельным запуском.
 
-## Media runtime and updates
+Настраиваемые автоматические переходы дополняют управление через Playhead, GO, STOP и панель Active Cues. Рядом с проектом сохраняются кэш waveform и предпросмотра медиа.
 
-On first launch, Qlisa downloads the pinned FFmpeg, ffprobe, and libmpv runtime components from their upstream release URLs. It verifies their SHA-256 hashes and stores them under `%LOCALAPPDATA%\Qlisa\runtime`. Later launches check the installed runtime and repair missing or damaged files when needed. See [Windows runtime notes](docs/windows-network-runtime.md) for technical details.
+### Подключение к другим системам
 
-Qlisa checks for signed application updates through GitHub Releases. You start an update from the app. Qlisa does not install an update while cues are active.
+Qlisa поддерживает MIDI, OSC, Timecode, sACN, Art-Net, NDI и SRT. Cue может запускать медиа и отправлять команды совместимой программе или системе.
 
-## Build from source
+Для работы с NDI установите официальный [NDI Runtime](https://ndi.video/) отдельно. Qlisa не включает его в установщик.
 
-The supported development and packaging target is Windows 10 or 11. You need Rust stable, Node.js, pnpm, Tauri 2 prerequisites, Visual Studio C++ Build Tools, and the Windows SDK. Install dependencies with `pnpm install`; see the [project guide](docs/PROJECT_GUIDE.md) for build commands and setup details.
+### Конвертация и импорт
 
-## Project status
+Встроенные инструменты конвертируют аудио, видео и изображения; для обработки и анализа медиа используются FFmpeg и ffprobe. Поддерживается импорт проектов QLab для переноса подготовленных списков Cue.
 
-Qlisa is actively developed for Windows. macOS and Linux are not supported release targets.
+## Установка
 
-## Origin and license
+Qlisa предназначена для **Windows 10 и Windows 11**. Установщик устанавливает программу для всех пользователей компьютера в `C:\Program Files\Qlisa` и может запросить права администратора.
 
-Qlisa is a derivative work of [Inkue](https://github.com/FonograF/Inkue) by FonograF. Thank you to the Inkue contributors for the project Qlisa grew from.
+1. Откройте [страницу последнего релиза](https://github.com/Ruslan-mad/Qlisa/releases/latest) и скачайте установщик Windows.
 
-Qlisa is licensed under [GPL-3.0-or-later](LICENSE). Third-party software has separate notices and terms in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+2. Запустите установщик и завершите установку.
 
-## Documentation
+3. Запустите Qlisa. Для первого запуска нужен интернет: программа загрузит компоненты Media Runtime.
 
-- [Documentation index](docs/README.md)
-- [Project guide](docs/PROJECT_GUIDE.md)
-- [Release preparation](docs/RELEASING.md)
-- [Release notes for 1.5.10](docs/RELEASE_NOTES_1.5.10.md)
-- [Release notes for 1.5.9](docs/RELEASE_NOTES_1.5.9.md) — previous release.
-- [Release notes for 1.5.6](docs/RELEASE_NOTES_1.5.6.md)
-- [License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+NDI Runtime требуется только при использовании NDI. Установите его отдельно с [сайта NDI](https://ndi.video/).
+
+## Проекты
+
+Новые проекты используют расширение `.qlisa`. Qlisa также открывает проекты `.inkue`; оба расширения используют одну структуру рабочего пространства. Храните файлы медиа в доступных местах и проверьте пути к ним при переносе проекта на другой компьютер.
+
+## Обновления и Media Runtime
+
+Qlisa проверяет обновления приложения через GitHub Releases. Обновление запускает пользователь из программы. Пока воспроизводятся Cue, установка обновления откладывается.
+
+При первом запуске Qlisa скачивает FFmpeg, ffprobe и libmpv напрямую из закреплённых выпусков upstream-проектов, проверяет контрольные суммы SHA-256 и сохраняет компоненты в `%LOCALAPPDATA%\Qlisa\runtime`. При последующих запусках программа проверяет файлы и скачивает их заново, если они отсутствуют или повреждены. Если загрузка не удаётся, Qlisa показывает причину и кнопку «Повторить». Выбирать FFmpeg или libmpv вручную не нужно. Для первой загрузки и восстановления нужен интернет. Установщик Qlisa не содержит эти компоненты.
+
+Подробнее: [Media Runtime в Windows](docs/windows-network-runtime.md).
+
+## Состояние проекта
+
+Qlisa активно развивается. Интерфейс доступен на русском и английском. Основная платформа релизов — Windows 10 и Windows 11. Официальные версии для macOS и Linux не выпускаются. Сообщайте об ошибках и предлагайте улучшения в [GitHub Issues](https://github.com/Ruslan-mad/Qlisa/issues).
+
+## Разработка
+
+Для сборки нужны Windows 10 или 11, Rust stable, Node.js, pnpm, компоненты Tauri 2, Visual Studio C++ Build Tools и Windows SDK. Инструкции по настройке, сборке и устройству проекта находятся в [руководстве разработчика](docs/PROJECT_GUIDE.md).
+
+## Проект Inkue
+
+Qlisa создана на основе открытого проекта [Inkue от FonograF](https://github.com/FonograF/Inkue). Благодарим автора и участников Inkue за исходный проект.
+
+## Лицензия
+
+Qlisa распространяется по лицензии [GPL-3.0-or-later](LICENSE). Для сторонних компонентов действуют отдельные лицензии и уведомления: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Документация
+
+Технические руководства в docs пока доступны на английском; заметки о версии 1.5.10 опубликованы на русском и английском.
+
+- [Документация Qlisa](docs/README.md)
+- [Руководство разработчика](docs/PROJECT_GUIDE.md)
+- [Подготовка релиза](docs/RELEASING.md)
+- [Список изменений версии 1.5.10](docs/RELEASE_NOTES_1.5.10.md)
+- [Лицензия](LICENSE) · [Сторонние компоненты](THIRD_PARTY_NOTICES.md)
