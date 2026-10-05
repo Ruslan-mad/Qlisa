@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CueSummary } from "../../lib/types";
-import { canAddCuesToNumber, numberTargets } from "./numberContextMenu";
+import { canAddCuesToNumber, numberTargets, orderCueIdsByList, rootInsertionIndexForCueIds } from "./numberContextMenu";
 
 function cue(id: string, cue_type: CueSummary["cue_type"]): CueSummary {
   return { id, cue_type, name: id, number: null, notes: "", state: "idle", continue_mode: "do_not_continue", color: "none", pre_wait_ms: 0, post_wait_ms: 0, duration_ms: null, file_path: null, target_cues: undefined, file_size_bytes: null, media_width: null, media_height: null, media_file_missing: false, is_loading: false, is_disabled: false, is_broken: false, is_warning: false, file_duration_ms: null };
@@ -18,5 +18,11 @@ describe("Number context-menu targets", () => {
   it("returns only Number targets", () => {
     const cues = [cue("number", "number"), cue("audio", "audio"), cue("group", "group")];
     expect(numberTargets(cues).map((target) => target.id)).toEqual(["number"]);
+  });
+
+  it("orders Number children by cue-list order and inserts before the first selected root", () => {
+    const cues = [cue("before", "audio"), cue("first", "audio"), cue("middle", "image"), cue("last", "video")];
+    expect(orderCueIdsByList(cues, ["last", "middle", "first"])).toEqual(["first", "middle", "last"]);
+    expect(rootInsertionIndexForCueIds(cues, ["last", "first"])).toBe(1);
   });
 });

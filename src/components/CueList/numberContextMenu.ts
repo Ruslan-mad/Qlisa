@@ -18,3 +18,16 @@ export function canAddCuesToNumber(cues: readonly CueSummary[], cueIds: readonly
 export function numberTargets(cues: readonly CueSummary[]): CueSummary[] {
   return cues.filter((cue) => cue.cue_type === "number");
 }
+
+/** Keep Number children in the same order as the cue list, independent of selection order. */
+export function orderCueIdsByList(cues: readonly CueSummary[], cueIds: readonly string[]): string[] {
+  const wanted = new Set(cueIds);
+  return cues.filter((cue) => wanted.has(cue.id)).map((cue) => cue.id);
+}
+
+/** Find the top-level insertion point for the first selected cue in list order. */
+export function rootInsertionIndexForCueIds(cues: readonly CueSummary[], cueIds: readonly string[]): number {
+  const wanted = new Set(cueIds);
+  const index = cues.findIndex((cue) => wanted.has(cue.id));
+  return index < 0 ? -1 : index;
+}

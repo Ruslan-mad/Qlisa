@@ -1,5 +1,29 @@
 import type { CueId } from "../../lib/types";
 
+let queuedPlayheadUpdate: Promise<void> = Promise.resolve();
+let queuedPlayheadUpdateGeneration = 0;
+
+/** Serialize keyboard Playhead writes so a following Space GO sees the last arrow selection. */
+export function queueCueListPlayheadUpdate(update: () => Promise<void>): Promise<void> {
+  queuedPlayheadUpdateGeneration += 1;
+  const pending = queuedPlayheadUpdate.catch(() => undefined).then(update);
+  queuedPlayheadUpdate = pending;
+  return pending;
+}
+
+export function waitForCueListPlayheadUpdate(): Promise<void> {
+  const pending = queuedPlayheadUpdate;
+  const generation = queuedPlayheadUpdateGeneration;
+  return pending.catch((error) => {
+    // The first GO consumes a completed navigation failure. Keep newer queued
+    // navigation intact if it replaced this snapshot while GO was waiting.
+    if (queuedPlayheadUpdate === pending && queuedPlayheadUpdateGeneration === generation) {
+      queuedPlayheadUpdate = Promise.resolve();
+    }
+    throw error;
+  });
+}
+
 export interface KeyboardCueNode {
   id: CueId;
   cue_type: string;
@@ -53,14 +77,18 @@ export function moveCueSelectionByArrow(
   extendRange: boolean,
   cues: readonly KeyboardCueNode[],
 ): ArrowSelection | null {
-  if (visibleIds.length === 0 || selectedCueId == null) return null;
+  if (visibleIds.length === 0) return null;
   const visibleSet = new Set(visibleIds);
   const currentId = movingEndCueId && visibleSet.has(movingEndCueId)
     ? movingEndCueId
-    : visibleSet.has(selectedCueId)
+    : selectedCueId != null && visibleSet.has(selectedCueId)
       ? selectedCueId
-      : visibleAncestorOf(selectedCueId, cues, visibleSet);
-  if (!currentId) return null;
+      : selectedCueId != null ? visibleAncestorOf(selectedCueId, cues, visibleSet) : null;
+  // With no selection, either direction starts at the first visible row.
+  if (!currentId) {
+    const firstId = visibleIds[0];
+    return { selectedCueId: firstId, selectedCueIds: [firstId], anchorCueId: firstId, endCueId: firstId };
+  }
 
   const currentIndex = visibleIds.indexOf(currentId);
   const nextIndex = currentIndex + (direction === "down" ? 1 : -1);

@@ -34,9 +34,9 @@ import { cueRangeFromVisibleOrder, cueSelectionFromSweep, flattenVisibleCueTree,
 import { AUDIO_EXTS, VIDEO_EXTS, IMAGE_EXTS, MIDI_EXTS, extensionOf } from "../../lib/mediaTypes";
 import { buildContinueModeUpdates, resolveContinueModeTargets } from "./continueModeMenu";
 import { canTargetCueType, resolveContextCueInsert } from "./contextCueInsert";
-import { canAddCuesToNumber, numberTargets } from "./numberContextMenu";
+import { canAddCuesToNumber, numberTargets, orderCueIdsByList, rootInsertionIndexForCueIds } from "./numberContextMenu";
 import { numberChildTimelineStartMs } from "../Editor/numberTimelineModel";
-import { consumeCueListStopShortcut, isCueListShortcutBlocked, moveCueSelectionByArrow, stopSelectedCueSet } from "./cueListKeyboard";
+import { consumeCueListStopShortcut, isCueListShortcutBlocked, moveCueSelectionByArrow, queueCueListPlayheadUpdate, stopSelectedCueSet } from "./cueListKeyboard";
 import { CueTypeIcon } from "../common/CueTypeIcon";
 import { MediaConverterDialog } from "../MediaConversion/MediaConverterDialog";
 import { useMediaConversionStore } from "../../stores/mediaConversionStore";
@@ -1257,10 +1257,13 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
   };
   const ctxCreateNumber = async (cueIds: string[]) => {
     closeCtx();
-    if (!canAddCuesToNumber(cuesRef.current, cueIds)) return;
-    const numberId = await addCue("number", -1).catch(() => null);
+    const cueTree = cuesRef.current;
+    if (!canAddCuesToNumber(cueTree, cueIds)) return;
+    const orderedIds = orderCueIdsByList(cueTree, cueIds);
+    const insertionIndex = rootInsertionIndexForCueIds(cueTree, orderedIds);
+    const numberId = await addCue("number", insertionIndex).catch(() => null);
     if (!numberId) return;
-    for (const cueId of cueIds) {
+    for (const cueId of orderedIds) {
       await addCueToGroup(cueId, numberId, -1).catch(console.error);
     }
     await onRefresh();
@@ -1290,7 +1293,13 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
       ));
       if (isCueListShortcutBlocked(event.target, modalOpen)) return;
 
+      const target = event.target as HTMLElement | null;
+      const row = target?.closest<HTMLElement>("[data-cue-id]");
+      const cueListFocused = Boolean(target && rowsScrollRef.current?.contains(target));
+      const documentRootFocused = target === document.body || target === document.documentElement;
+
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (!cueListFocused && !documentRootFocused) return;
         if (event.altKey || event.ctrlKey || event.metaKey) return;
         const next = moveCueSelectionByArrow(
           flatItemsRef.current.map((item) => item.cue.id),
@@ -1303,9 +1312,34 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
         );
         if (!next) return;
         event.preventDefault();
+        Array.from(rowsScrollRef.current?.querySelectorAll<HTMLElement>("[data-cue-id]") ?? [])
+          .find((element) => element.dataset.cueId === next.selectedCueId)?.focus();
         setCueSelection(next.selectedCueId, next.selectedCueIds);
         anchorCueIdRef.current = next.anchorCueId;
         selectionEndRef.current = next.endCueId;
+        const parentGroupId = flatItemsRef.current.find((item) => item.cue.id === next.selectedCueId)?.parentGroupId;
+        setPlayheadCueId(parentGroupId ?? next.selectedCueId);
+        void queueCueListPlayheadUpdate(() => setPlayhead(next.selectedCueId)).catch(console.error);
+        return;
+      }
+
+      if ((event.key === "ArrowLeft" || event.key === "ArrowRight")
+        && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+        if (!row || !rowsScrollRef.current?.contains(row)) return;
+        const cueId = row.dataset.cueId;
+        const cue = cueId && flatItemsRef.current.find((item) => item.cue.id === cueId)?.cue;
+        if (cue && (cue.cue_type === "group" || cue.cue_type === "number")) {
+          event.preventDefault();
+          const expanded = expandedGroupIds.has(cue.id);
+          if (event.key === "ArrowRight" ? !expanded : expanded) {
+            setExpandedGroupIds((previous) => {
+              const next = new Set(previous);
+              if (event.key === "ArrowRight") next.add(cue.id);
+              else next.delete(cue.id);
+              return next;
+            });
+          }
+        }
         return;
       }
 
@@ -1321,7 +1355,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
 
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [setCueSelection]);
+  }, [setCueSelection, setPlayheadCueId, expandedGroupIds]);
 
   // ---------------------------------------------------------------------------
   // Render

@@ -1,6 +1,7 @@
 // Global keyboard shortcut handler, mirroring QLab's key bindings.
 
 import { useEffect, useRef } from "react";
+import { waitForCueListPlayheadUpdate } from "../components/CueList/cueListKeyboard";
 
 const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
 const cmdOrCtrl = (e: KeyboardEvent) => isMac ? e.metaKey : e.ctrlKey;
@@ -169,6 +170,13 @@ export function useKeyboardShortcuts(
         const protection = generalPrefs.double_go_protection_ms;
         if (protection > 0 && now - lastGoRef.current < protection) return;
         lastGoRef.current = now;
+        try {
+          await waitForCueListPlayheadUpdate();
+        } catch (error) {
+          console.error(error);
+          window.dispatchEvent(new CustomEvent("inkue:transport-error", { detail: String(error) }));
+          return;
+        }
         await go().then(() => {
           window.dispatchEvent(new CustomEvent("inkue:transport-error", { detail: null }));
         }).catch((error) => {

@@ -5,8 +5,10 @@ import {
   consumeCueListStopShortcutEvent,
   isStopSelectionShortcut,
   moveCueSelectionByArrow,
+  queueCueListPlayheadUpdate,
   stopSelectedCueSet,
   topLevelSelectedStopIds,
+  waitForCueListPlayheadUpdate,
   type KeyboardCueNode,
 } from "./cueListKeyboard";
 
@@ -23,6 +25,32 @@ const cues: KeyboardCueNode[] = [
 ];
 
 describe("cue-list keyboard navigation", () => {
+  it("queues Playhead updates in key order so GO can await the final selection", async () => {
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const first = queueCueListPlayheadUpdate(() => new Promise<void>((resolve) => {
+      releaseFirst = () => { order.push("first"); resolve(); };
+    }));
+    const second = queueCueListPlayheadUpdate(async () => { order.push("second"); });
+    const waiting = waitForCueListPlayheadUpdate();
+    expect(order).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseFirst();
+    await Promise.all([first, second, waiting]);
+    expect(order).toEqual(["first", "second"]);
+  });
+
+  it("rejects GO for a failed arrow update, then clears the failure for a later Playhead placement", async () => {
+    const failure = new Error("Playhead update failed");
+    const settledFailure = queueCueListPlayheadUpdate(async () => { throw failure; });
+    await expect(settledFailure).rejects.toBe(failure);
+    // The backend failure has already settled before the first GO checks it.
+    await expect(waitForCueListPlayheadUpdate()).rejects.toBe(failure);
+    // Manual row clicks use the normal setPlayhead path and must not inherit a
+    // stale rejection from the previous arrow navigation.
+    await expect(waitForCueListPlayheadUpdate()).resolves.toBeUndefined();
+  });
+
   it("moves plain Up/Down one row and collapses a multi-selection", () => {
     expect(moveCueSelectionByArrow(["a", "b", "d"], "b", "b", "a", "down", false, cues))
       .toEqual({ selectedCueId: "d", selectedCueIds: ["d"], anchorCueId: "d", endCueId: "d" });
@@ -42,9 +70,10 @@ describe("cue-list keyboard navigation", () => {
       .toEqual({ selectedCueId: "d", selectedCueIds: ["d"], anchorCueId: "d", endCueId: "d" });
   });
 
-  it("does nothing at the ends of the visible list or with no primary selection", () => {
+  it("does nothing at the ends and starts from the first visible cue without a selection", () => {
     expect(moveCueSelectionByArrow(["a", "b"], "a", "a", "a", "up", false, cues)).toBeNull();
-    expect(moveCueSelectionByArrow(["a", "b"], null, null, null, "down", false, cues)).toBeNull();
+    expect(moveCueSelectionByArrow(["a", "b"], null, null, null, "down", false, cues))
+      .toEqual({ selectedCueId: "a", selectedCueIds: ["a"], anchorCueId: "a", endCueId: "a" });
   });
 });
 
