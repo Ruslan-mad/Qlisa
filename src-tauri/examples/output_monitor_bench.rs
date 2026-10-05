@@ -301,6 +301,90 @@ fn video_runtime_summary(output: &OutputEngine) -> serde_json::Value {
     })
 }
 
+fn is_image_path(path: &Path) -> bool {
+    matches!(path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase).as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "tif" | "tiff"))
+}
+
+fn configure_output(output: &OutputEngine, path: &Path, layers: u32, is_image: bool) -> Result<()> {
+    for layer in 0..layers {
+        output.show_content(ContentRequest {
+            file_path: path,
+            is_image,
+            fade_in_ms: 500,
+            loop_count: u32::MAX,
+            initial_seek_action_ms: None,
+            start_ms: None,
+            end_ms: None,
+            screen_index: None,
+            output_id: None,
+            audio_voice_id: None,
+            display_duration_ms: None,
+            hold_last_frame: true,
+            geometry: VideoGeometry::default(),
+            live_source: false,
+            layer_style: LayerStyle { layer: Some(layer + 1), ..LayerStyle::default() },
+            slices: Vec::new(),
+            preload: false,
+        })?;
+    }
+    output.set_output_transform(OutputTransform {
+        scale: 0.98,
+        corners: [[0.005, 0.005], [-0.005, 0.005], [0.005, -0.005], [-0.005, -0.005]],
+        ..OutputTransform::default()
+    });
+    Ok(())
+}
+
+fn run_webview_benchmark(
+    handle: tauri::AppHandle,
+    output: Arc<OutputEngine>,
+    frontend: Arc<std::sync::Mutex<FrontendAggregate>>,
+    seconds: u64,
+    layers: u32,
+    mode: String,
+    is_image: bool,
+) -> Result<()> {
+    thread::sleep(Duration::from_millis(500));
+    let open_started = Instant::now();
+    loop {
+        let _ = handle.emit("output-monitor-opened", ());
+        thread::sleep(Duration::from_millis(250));
+        let has_report = frontend.lock().map(|metrics| metrics.samples > 0).unwrap_or(false);
+        if has_report || open_started.elapsed() >= Duration::from_secs(2) { break; }
+    }
+
+    let started = Instant::now();
+    let run_for = Duration::from_secs(seconds);
+    let (_, ram_start) = process_metrics();
+    let video_start = video_runtime_summary(&output);
+    let mut cpu_total = 0.0;
+    let mut cpu_max = 0.0_f64;
+    let mut cpu_samples = 0_u64;
+    let mut ram_max = 0_u64;
+    while started.elapsed() < run_for {
+        let (cpu, ram) = process_metrics();
+        if let Some(value) = cpu { cpu_total += value; cpu_max = cpu_max.max(value); cpu_samples += 1; }
+        if let Some(value) = ram { ram_max = ram_max.max(value); }
+        thread::sleep(Duration::from_secs(1));
+    }
+    let (_, ram_end) = process_metrics();
+    let frontend_summary = frontend.lock().map(|metrics| metrics.summary()).unwrap_or_else(|_| json!({"error":"metrics lock poisoned"}));
+    let video_end = video_runtime_summary(&output);
+    output.panic_stop();
+    println!("{}", json!({
+        "mode": mode, "durationSeconds": seconds, "layers": layers, "imageInput": is_image,
+        "processCpuAveragePercent": (cpu_samples > 0).then(|| cpu_total / cpu_samples as f64),
+        "processCpuMaximumPercent": (cpu_samples > 0).then_some(cpu_max),
+        "workingSetStartBytes": ram_start, "workingSetEndBytes": ram_end,
+        "workingSetMaximumBytes": (ram_max > 0).then_some(ram_max),
+        "videoRuntimeStart": video_start, "videoRuntimeEnd": video_end,
+        "frontend": frontend_summary, "includesIpcOrWebView": true,
+    }));
+    handle.exit(0);
+    Ok(())
+}
+
 #[cfg(not(windows))]
 fn process_metrics() -> (Option<f64>, Option<u64>) {
     (None, None)
@@ -323,6 +407,8 @@ fn main() -> Result<()> {
     if !video_path.is_file() {
         return Err(anyhow!("video file does not exist: {}", video_path.display()));
     }
+    let video_path = video_path.to_path_buf();
+    let is_image = is_image_path(&video_path);
 
     // Keep Tauri's profile writes out of the operator's real Preferences.
     let isolated_profile = env::temp_dir().join(format!("QlisaOutputMonitorBench-{}", std::process::id()));
@@ -345,6 +431,7 @@ fn main() -> Result<()> {
     }
     let mut builder = tauri::Builder::default();
     if webview {
+        let webview_video_path = video_path.clone();
         builder = builder
             .invoke_handler(tauri::generate_handler![
                 list_output_monitor_sources,
@@ -355,7 +442,7 @@ fn main() -> Result<()> {
             .setup(move |app| {
                 let audio = AudioEngine::new_silent(&MachineAudioConfig::default());
                 let output = Arc::new(OutputEngine::new(audio, app.handle().clone())?);
-                configure_output(&output, video_path, layers, is_image)?;
+                configure_output(&output, &webview_video_path, layers, is_image)?;
                 output.set_output_timer(Some("Output Monitor Bench"));
                 output.set_output_monitor_source(Some("default"), 1)?;
                 app.manage(BenchState { output, frontend: Arc::default() });
@@ -381,7 +468,7 @@ fn main() -> Result<()> {
     let app_handle = app.handle().clone();
     let audio = AudioEngine::new_silent(&MachineAudioConfig::default());
     let output = Arc::new(OutputEngine::new(audio, app_handle)?);
-    configure_output(&output, video_path, layers, is_image)?;
+    configure_output(&output, &video_path, layers, is_image)?;
     output.set_output_timer(Some("Output Monitor Bench"));
     if capture_fps.is_some() {
         output.set_output_monitor_source(Some("default"), 1)?;
