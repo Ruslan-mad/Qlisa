@@ -17,7 +17,17 @@ manual checks to run; an unchecked item is not a pass. / Эти изменени
   ten times in quick succession and confirm the final cursor and audio position
   match without a full-file decode on each seek. Seek while paused and confirm
   audio stays paused; frame-step must also seek audio and remain paused. Check
-  EOF recovery and a Number timeline with offset/trim actions.
+  EOF recovery and a Number timeline with offset/trim actions. Restart at a
+  nonzero cursor several times; confirm startup has no yellow underrun warning,
+  the voice starts after its initial buffer is ready, and later real underruns
+  are still reported.
+- [ ] **Video thumbnail visibility / Видимость видео-превью.** Start video
+  playback and scroll the Inspector thumbnail out of view, then back. Confirm
+  Play/Pause and frame-step controls remain enabled, active video and headphone
+  audio stay aligned, and the elapsed cursor keeps updating. Mute and unmute
+  headphones during playback. Switch away from the editor or close it and
+  confirm the preview stops. Trigger or select a video source error and confirm
+  its controls stay disabled.
 - [ ] **Cue List arrows and GO / Стрелки Cue List и GO.** With a row focused,
   move Up/Down through visible rows and confirm both selection and Playhead
   move. Repeat with no selection and with nested Group rows. Press Space after

@@ -23,15 +23,25 @@ starts a fresh voice only when a command resumes or seeks an existing session
 whose voice has already ended. Number seeks retain the Number mix behavior and
 rebuild its sources.
 
+A new streamed preview waits for its decoder to prepare the normal startup
+buffer before the backend publishes its voice to the output callback. The wait
+runs off the real-time audio thread and has a timeout. A superseded preview
+cancels its wait and stream. This startup gate does not suppress underruns that
+occur after playback begins.
+
+The Inspector video thumbnail may scroll out of view while Clip Editor controls
+remain usable. Scrolling does not pause an explicitly started video or stop its
+cursor updates. Hiding the application pauses visual preview playback. Closing
+the editor or changing the source still stops and releases the preview. A media
+source error keeps video controls disabled.
+
 The preview session remains outside workspace cue state. Its audio is routed
 through the configured preview output, excluded from the program mix and taps,
 and stopped when its owning editor closes or its cue is removed.
 
 ## Verification limits
 
-The Rust preview library tests passed: 38 passed, including WAV/MP3 streaming
-and repeated-seek coverage. Run the manual checks in
-[the follow-up regression checklist](BUGFIXES_NEXT.md) for transport, mute,
-repeated seek, paused seek, EOF, and Number behavior. Physical output routing
-and manual UI playback require a configured audio device and have not been
-confirmed by this document update.
+Run the manual checks in [the follow-up regression checklist](BUGFIXES_NEXT.md)
+for startup buffering, viewport scrolling, transport, mute, repeated seek,
+paused seek, EOF, and Number behavior. These UI and physical output checks are
+not confirmed by this document update.
