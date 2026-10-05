@@ -18,7 +18,7 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. This source tree targets Qlisa 1.5.9; see [its release notes](RELEASE_NOTES_1.5.9.md)
+1.5.8. This source tree targets Qlisa 1.5.10; see [its release notes](RELEASE_NOTES_1.5.10.md)
 and the [Releases page](https://github.com/Ruslan-mad/Qlisa/releases) for binary
 availability. This is not an official
 upstream Inkue release checkout. The source repository is public at
@@ -49,6 +49,17 @@ Features represented in the current tree include:
 - Audio trim/rate/loop/slices, fades and levels; video/image geometry/layers,
   output routing and fades; headphone preview; NDI/SRT input and output;
   MIDI/OSC/timecode triggers; sACN/Art-Net lighting; QLab workspace import.
+- Inspector Basics has compact loop, mute, Continue, and per-output Fit controls.
+  Video, Image, and Camera geometry can be overridden per destination; missing
+  overrides use cue-level geometry. Newly created visual cues can route to the
+  enabled displays selected in Preferences → Display. Browser uses only the
+  first selected display; if none is enabled, the regular default output applies.
+- Enabling Loop in the Audio or Video Time tab starts infinite playback; its
+  infinity control switches between infinite looping and one finite extra
+  repeat. The compact Basics Loop control toggles between infinite looping and
+  off. The cue-list duration shows `∞` for infinite Audio/Video loops. A mute flag is saved on
+  Audio, Video, and Camera cues; it silences playback without changing authored
+  levels or playback position.
 - Number cues have a shared editable timeline, nested Group tracks, Group or
   media masters, offsets, fades, and start/finish flow actions. Media conversion
   supports queued Audio/Video/Image jobs. Audio, video, and network diagnostics
@@ -187,7 +198,7 @@ the Playhead.
   is `DEFAULT_FADE_OUT_MS = 500`; a cue may have its own stop semantics.
 - **Hard Stop** cuts the selected cue immediately. **Hard Stop All** is the
   global panic path: it hard-stops active cues in every cue list, resets cue
-  bookkeeping, and clears engine voices/output. The UI maps double Escape to
+  bookkeeping across all lists, and clears engine voices/output. The UI maps double Escape to
   this action.
 - **Pause/resume** retains elapsed/action/media position. Seek is allowed for
   supported media cues while paused. Audio callback state is changed by queued
@@ -202,6 +213,10 @@ the Playhead.
   blur the active editor before changing selection so the edit saves against
   the cue that was selected when editing began. Memo text in Basics, the Memo
   tab, and the cue-list Notes column all use the single `memo_text` field.
+- Basics quick controls are available for single and multiple cue selections.
+  Multi-cue actions appear only when every selected cue supports them; mixed
+  values are shown explicitly. A loop edit requires every selected media cue to
+  be safe to rebuild. Per-output Fit updates preserve other geometry fields.
 - Group modes are Simultaneous, Sequential, Playlist (exclusive child at a
   time, optional wrap), and Start Random (shuffle-bag). A group may own multiple
   child voices. Targeting/stopping/fading a group must resolve child voices
@@ -216,7 +231,7 @@ start/pause/seek/loop/stop/EOF state aligned.
 
 ## Media, audio, video, and preview
 
-Derived preview assets use a project-scoped sidecar cache for saved workspaces.
+Derived preview assets use a persistent project-scoped sidecar cache for saved workspaces.
 Waveform peaks and video/image JPEG previews persist across reopen and are
 invalidated by source file changes and request parameters. See the
 [media preview cache note](cache.md) for storage, promotion, and pruning rules.
@@ -674,6 +689,13 @@ from the master timeline; child pre-waits are normalized to zero. Equal offsets
 start together, and natural master completion stops temporary media actions.
 The timeline cursor previews the active Video/Image action; Number audio can be
 previewed on headphones without routing it to program output.
+
+Audio and Video Number tracks account for finite extra repeats (`loop_count` N
+means N + 1 total plays); infinite loops fill the remaining Number timeline.
+Finite repeats of an Audio or Video master extend the Number duration. Trimmed
+waveforms use absolute source time and the full source duration for bin mapping,
+so silent file tails do not stretch the visible crop; a short final pass shows
+the matching prefix of the source crop.
 
 The Number inspector configures a fade-in/fade-out envelope, a stop-on-start
 mode (none, all, audio, video, or selected cues), and cues to start when Number

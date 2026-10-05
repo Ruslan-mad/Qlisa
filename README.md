@@ -23,7 +23,7 @@
 
 Qlisa is cue-based playback software for live shows and stage production on Windows. Build a cue list, select the next cue with the Playhead, and start it with **GO**. Audio, video, images, groups, timing, and output routing share one show workspace.
 
-Qlisa is a community-maintained derivative of [Inkue by FonograF](https://github.com/FonograF/Inkue). New projects use `.qlisa`; legacy `.inkue` projects remain supported, and both extensions use the same JSON workspace format. The `.qlisa` Windows file association was added in 1.5.8. This source tree targets Qlisa 1.5.9; see [Releases](https://github.com/Ruslan-mad/Qlisa/releases) for binary availability.
+Qlisa is a community-maintained derivative of [Inkue by FonograF](https://github.com/FonograF/Inkue). New projects use `.qlisa`; legacy `.inkue` projects remain supported, and both extensions use the same JSON workspace format. The `.qlisa` Windows file association was added in 1.5.8. This source tree targets Qlisa 1.5.10; see [Releases](https://github.com/Ruslan-mad/Qlisa/releases) for binary availability.
 
 ## About
 
@@ -41,6 +41,8 @@ Use Qlisa to prepare and run a show from a cue list. Cues can play media, contro
 
 - Audio, Video, Image, Text, Memo, Wait, Fade, Stop, Group, and Number cues, with cue timing, fades, trims, seek, loops, Auto-Continue, and Auto-Follow.
 - Active Cues and Inspector panels, named display outputs, per-cue routing, audio mixing, and headphone preview.
+- Compact Inspector controls for loops, mute, continuation, and per-output Fit; visual cues can keep separate geometry for each output.
+- Enabling Loop for Audio and Video starts infinite looping. Their cue-list duration shows `∞`; finite repeats remain configurable.
 - Project-scoped waveform and media preview caches that persist across reopen.
 - MIDI, OSC, timecode, sACN/Art-Net lighting, SRT, and NDI input or output. NDI requires the separately installed NDI Runtime.
 - Media conversion for audio, video, and images. Conversion and media probing use FFmpeg and ffprobe.
@@ -79,6 +81,7 @@ Qlisa is licensed under [GPL-3.0-or-later](LICENSE). Third-party software has se
 - [Documentation index](docs/README.md)
 - [Project guide](docs/PROJECT_GUIDE.md)
 - [Release preparation](docs/RELEASING.md)
-- [Release notes for 1.5.9](docs/RELEASE_NOTES_1.5.9.md)
+- [Release notes for 1.5.10](docs/RELEASE_NOTES_1.5.10.md)
+- [Release notes for 1.5.9](docs/RELEASE_NOTES_1.5.9.md) — previous release.
 - [Release notes for 1.5.6](docs/RELEASE_NOTES_1.5.6.md)
 - [License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)
