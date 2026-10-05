@@ -13,31 +13,26 @@ const ALL_CUE_TYPES = [
 ] as const satisfies readonly CueType[];
 
 describe("CueTypeIcon", () => {
-  it("has an explicit SVG specification for every CueType", () => {
+  it("has an explicit Phosphor icon for every CueType", () => {
     expect(Object.keys(CUE_TYPE_ICON_SPECS).sort()).toEqual([...ALL_CUE_TYPES].sort());
     expect(ALL_CUE_TYPES).toHaveLength(28);
 
     for (const type of ALL_CUE_TYPES) {
-      expect(CUE_TYPE_ICON_SPECS[type].paths.length, `${type} should have a shape`).toBeGreaterThan(0);
-      for (const path of CUE_TYPE_ICON_SPECS[type].paths) {
-        expect(path.trim(), `${type} should not contain an empty path`).not.toBe("");
-      }
+      expect(CUE_TYPE_ICON_SPECS[type], `${type} should have an icon`).toBeTruthy();
     }
   });
 
   it("gives every cue type a distinct shape", () => {
-    const signatures = ALL_CUE_TYPES.map((type) => CUE_TYPE_ICON_SPECS[type].paths.join("|"));
+    const signatures = ALL_CUE_TYPES.map((type) => CUE_TYPE_ICON_SPECS[type]);
     expect(new Set(signatures).size).toBe(ALL_CUE_TYPES.length);
   });
 
-  it.each(ALL_CUE_TYPES)("renders %s as path-only inline SVG", (type) => {
+  it.each(ALL_CUE_TYPES)("renders %s as a Phosphor icon", (type) => {
     const html = renderToStaticMarkup(createElement(CueTypeIcon, { type }));
 
     expect(html).toContain("<svg");
-    expect(html).toContain('viewBox="0 0 24 24"');
     expect(html).toContain(`data-cue-type="${type}"`);
-    expect(html).toContain("<path");
-    expect(html).not.toContain("<text");
+    expect(html).toContain('viewBox="0 0 256 256"');
     expect(html.replace(/<[^>]+>/g, "")).toBe("");
   });
 
@@ -67,9 +62,9 @@ describe("CueTypeIcon", () => {
     const typed = renderToStaticMarkup(createElement(CueTypeIcon, { type: "audio", tone: "type" }));
     const inherited = renderToStaticMarkup(createElement(CueTypeIcon, { type: "audio", tone: "inherit" }));
 
-    expect(neutral).toContain('color="var(--wc-text-bright)"');
-    expect(typed).toContain(`color="${CUE_TYPE_COLORS.audio}"`);
-    expect(inherited).toContain('color="currentColor"');
+    expect(neutral).toContain('fill="var(--wc-text-bright)"');
+    expect(typed).toContain(`fill="${CUE_TYPE_COLORS.audio}"`);
+    expect(inherited).toContain('fill="currentColor"');
   });
 
   it("uses 16px by default and honours an explicit size", () => {

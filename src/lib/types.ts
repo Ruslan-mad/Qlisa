@@ -1285,8 +1285,8 @@ export interface DisplayPreferences {
   timer_margin: number;
   /** When true (and show_output_timer is true), show timer as floating Win32 window instead of OSD overlay. */
   timer_floating: boolean;
-  /** UI colour theme: "dark", "light", or "system". */
-  theme: "dark" | "light" | "system";
+  /** UI colour theme. */
+  theme: "dark" | "navy" | "stage" | "light" | "system";
   /** How a cue's colour tag is rendered in the Cue List. */
   cue_color_style: CueColorStyle;
   /** Global projector-alignment transform, composed on top of per-cue geometry. */
@@ -1579,7 +1579,7 @@ export interface TestPattern {
 }
 
 export const DEFAULT_DISPLAY_PREFS: Pick<DisplayPreferences, "theme" | "cue_color_style"> = {
-  theme: "system",
+  theme: "stage",
   cue_color_style: "full_row",
 };
 

@@ -1340,6 +1340,7 @@ function PersonalizationContent({
           >
             <option value="dark">{t("preferences.dark")}</option>
             <option value="navy">{t("preferencesLabels.navy")}</option>
+            <option value="stage">{t("preferences.stage")}</option>
             <option value="light">{t("preferences.light")} ({t("preferencesLabels.warmCream")})</option>
             <option value="system">{t("preferences.system")} ({t("preferencesLabels.followOs")})</option>
           </Select>
@@ -1699,6 +1700,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
   useEffect(() => {
     if (!standalone) return;
     const root = document.documentElement;
+    const previousTheme = root.getAttribute("data-theme");
     const t = draftTheme.theme ?? "system";
     if (t === "system") {
       const mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1706,9 +1708,17 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
       apply(mq.matches);
       const h = (e: MediaQueryListEvent) => apply(e.matches);
       mq.addEventListener("change", h);
-      return () => mq.removeEventListener("change", h);
+      return () => {
+        mq.removeEventListener("change", h);
+        if (previousTheme) root.setAttribute("data-theme", previousTheme);
+        else root.removeAttribute("data-theme");
+      };
     } else {
       root.setAttribute("data-theme", t);
+      return () => {
+        if (previousTheme) root.setAttribute("data-theme", previousTheme);
+        else root.removeAttribute("data-theme");
+      };
     }
   }, [standalone, draftTheme.theme]);
 

@@ -73,12 +73,20 @@ export const DEFAULT_COLUMN_CONFIG: ColumnConfig = {
   order: DEFAULT_ORDER,
 };
 
-const LS_KEY = "inkue_column_config_v2";
+export const STAGE_DEFAULT_COLUMN_CONFIG: ColumnConfig = {
+  widths: { name: 300, notes: 130, type: 28, number: 44, duration: 72, file_size: 72, resolution: 94 },
+  hidden: { file: true, target: true, output: true, outputs: true, pre_wait: true, post_wait: true },
+  order: DEFAULT_ORDER,
+};
 
-export function loadColumnConfig(): ColumnConfig {
+const LS_KEY = "inkue_column_config_v2";
+const STAGE_LS_KEY = "qlisa_stage_column_config_v1";
+
+export function loadColumnConfig(theme?: string): ColumnConfig {
   try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return DEFAULT_COLUMN_CONFIG;
+    const isStage = theme === "stage";
+    const raw = localStorage.getItem(isStage ? STAGE_LS_KEY : LS_KEY);
+    if (!raw) return isStage ? STAGE_DEFAULT_COLUMN_CONFIG : DEFAULT_COLUMN_CONFIG;
     const parsed = JSON.parse(raw) as Partial<ColumnConfig>;
     // Older layouts used `target` to show media filenames. Keep that saved
     // slot, width and visibility as `file`, then add the newly separated true
@@ -160,9 +168,9 @@ export function loadColumnConfig(): ColumnConfig {
   }
 }
 
-export function saveColumnConfig(c: ColumnConfig): void {
+export function saveColumnConfig(c: ColumnConfig, theme?: string): void {
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify(c));
+    localStorage.setItem(theme === "stage" ? STAGE_LS_KEY : LS_KEY, JSON.stringify(c));
   } catch {
     // ignore (private / storage-full)
   }

@@ -1,6 +1,7 @@
 // Bottom transport bar: GO / STOP + running cue info + horizontal VU-meter + volume slider.
 
 import { useEffect, useRef, useState } from "react";
+import { Pause, Play, SpeakerHigh, Stop } from "@phosphor-icons/react";
 import { go, stopAll, pauseCue, resumeCue, setMasterVolume, getPreferences, openMixerWindow } from "../../lib/commands";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTransportStore } from "../../stores/transportStore";
@@ -56,10 +57,10 @@ const DB_TICKS = [0, -6, -12, -18, -24, -36];
 // Meter + slider section — all rows share the same layout grid
 // ---------------------------------------------------------------------------
 
-const BAR_W = 220;
 const BAR_H = 9;
 const LABEL_W = 10;
 const GAP = 5;
+const METER_WIDTH = "clamp(150px, 16vw, 220px)";
 
 const METER_GRADIENT =
   "linear-gradient(to right, #4ade80 0%, #84cc16 55%, #facc15 72%, #f97316 85%, #ef4444 100%)";
@@ -88,7 +89,7 @@ function MeterRow({ label, fillPct, holdPct }: MeterRowProps) {
       </span>
       <div
         style={{
-          width: BAR_W,
+          width: METER_WIDTH,
           height: BAR_H,
           background: "var(--wc-bg-app)",
           borderRadius: 2,
@@ -105,7 +106,7 @@ function MeterRow({ label, fillPct, holdPct }: MeterRowProps) {
             inset: 0,
             right: `${100 - fillPct}%`,
             background: METER_GRADIENT,
-            backgroundSize: `${BAR_W}px ${BAR_H}px`,
+            backgroundSize: `${METER_WIDTH} ${BAR_H}px`,
           }}
         />
         {/* Peak-hold needle */}
@@ -131,7 +132,7 @@ function TickRow() {
   return (
     <div style={{ display: "flex", alignItems: "flex-end", gap: GAP }}>
       <div style={{ width: LABEL_W, flexShrink: 0 }} />
-      <div style={{ width: BAR_W, position: "relative", height: 14, flexShrink: 0 }}>
+      <div style={{ width: METER_WIDTH, position: "relative", height: 14, flexShrink: 1, minWidth: 120 }}>
         {DB_TICKS.map((db) => (
           <div
             key={db}
@@ -172,7 +173,7 @@ function VolumeRow({
         value={valueDb}
         onChange={(e) => onChange(Number(e.target.value))}
         style={{
-          width: BAR_W,
+          width: METER_WIDTH,
           margin: 0,
           padding: 0,
           flexShrink: 0,
@@ -313,7 +314,7 @@ export function TransportBar({ onRefresh }: Props) {
   const hasRunning = cues.some((c) => c.state === "running");
   const hasPaused = cues.some((c) => c.state === "paused");
   const pauseDisabled = !hasRunning && !hasPaused;
-  const pauseLabel = hasRunning ? "⏸ PAUSE" : hasPaused ? "▶ RESUME" : "⏸ PAUSE";
+  const pauseLabel = hasRunning ? "PAUSE" : hasPaused ? "RESUME" : "PAUSE";
 
   const handlePauseToggle = async () => {
     try {
@@ -330,11 +331,12 @@ export function TransportBar({ onRefresh }: Props) {
 
   return (
     <div
+      className="stage-transport"
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 12,
-        padding: "0 16px",
+        gap: 10,
+        padding: "8px 14px",
         background: "var(--wc-bg-deepest)",
         borderTop: "2px solid var(--wc-border)",
         height: 96,
@@ -354,22 +356,24 @@ export function TransportBar({ onRefresh }: Props) {
           onRefresh();
         }}
         title={t("editUi.goSpace")}
+        className="stage-transport-button stage-transport-go"
         style={{
-          padding: "14px 36px",
-          fontSize: 22,
+          width: 118, height: 72, padding: "7px 12px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+          fontSize: 19,
           fontWeight: 700,
-          background: "#16a34a",
+          background: "#15803d",
           color: "white",
           border: "none",
           borderRadius: 8,
           cursor: "pointer",
           letterSpacing: "0.12em",
-          boxShadow: "0 2px 12px #16a34a99",
-          minWidth: 100,
+          boxShadow: "0 2px 12px #15803d99",
+          minWidth: 118,
           flexShrink: 0,
         }}
       >
-        GO
+        <Play size={24} weight="fill" aria-hidden="true" />
+        <span>GO</span><small style={{ fontSize: 10, fontWeight: 500, letterSpacing: 0 }}>Space</small>
       </button>
 
       {/* STOP */}
@@ -384,9 +388,10 @@ export function TransportBar({ onRefresh }: Props) {
         }}
         onClick={async () => { await stopAll().catch(console.error); onRefresh(); }}
         title={t("inspector.stop") + " — " + t("editUi.stopSelected") + " · " + (locale === "ru" ? "Остановить всё (Escape) · Перетащите в список cue для вставки cue остановки" : t("components.stopAll"))}
+        className="stage-transport-button stage-transport-stop"
         style={{
-          padding: "14px 22px",
-          fontSize: 18,
+          width: 118, height: 72, padding: "7px 12px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+          fontSize: 15,
           fontWeight: 600,
           background: "#991b1b",
           color: "white",
@@ -397,40 +402,43 @@ export function TransportBar({ onRefresh }: Props) {
           userSelect: "none",
         }}
       >
-        ■ STOP
+        <Stop size={22} weight="fill" aria-hidden="true" />
+        <span>STOP</span><small style={{ fontSize: 10, fontWeight: 500, letterSpacing: 0 }}>Esc</small>
       </button>
 
       {/* PAUSE / RESUME (toggle) */}
       <button
         onClick={handlePauseToggle}
         disabled={pauseDisabled}
-        title={t("components.pauseResumeAll")}
+        title={`${t("components.pauseResumeAll")} · ${t("transport.pauseShortcutSelected")}`}
+        className="stage-transport-button stage-transport-pause"
         style={{
-          padding: "14px 22px",
-          fontSize: 18,
+          width: 118, height: 72, padding: "7px 12px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+          fontSize: 15,
           fontWeight: 600,
-          background: pauseDisabled ? "var(--wc-bg-surface)" : "#38bdf8",
+          background: pauseDisabled ? "var(--wc-bg-surface)" : "#0369a1",
           color: pauseDisabled ? "var(--wc-text-faint)" : "white",
           border: "none",
           borderRadius: 8,
           cursor: pauseDisabled ? "default" : "pointer",
-          boxShadow: pauseDisabled ? "none" : "0 2px 12px #38bdf899",
+          boxShadow: pauseDisabled ? "none" : "0 2px 12px #0369a199",
           flexShrink: 0,
           userSelect: "none",
         }}
       >
-        {pauseLabel}
+        {hasPaused && !hasRunning ? <Play size={22} weight="fill" aria-hidden="true" /> : <Pause size={22} weight="fill" aria-hidden="true" />}
+        <span>{pauseLabel}</span><small style={{ fontSize: 10, fontWeight: 500, letterSpacing: 0 }}>{t("transport.pauseShortcutSelected")}</small>
       </button>
 
       {/* Running cue info */}
-      <div style={{ flex: 1, overflow: "hidden" }}>
+      <div className="stage-running-cues" style={{ flex: 1, minWidth: 90, overflow: "hidden" }}>
         {goError && (
           <div
             role="alert"
             title={goError}
             style={{ color: "#fca5a5", fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginBottom: 3 }}
           >
-            ⚠ {goError}
+            {goError}
           </div>
         )}
         {runningCues.length === 0 ? (
@@ -464,7 +472,7 @@ export function TransportBar({ onRefresh }: Props) {
                 </span>
               )}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                {c.state === "paused" ? "⏸" : "▶"}{" "}
+                {c.state === "paused" ? <Pause size={14} weight="fill" aria-label={t("activeCues.pause")} /> : <Play size={14} weight="fill" aria-hidden="true" />}{" "}
                 {c.number ? `[${c.number}] ` : ""}
                 {c.name}
               </span>
@@ -473,14 +481,13 @@ export function TransportBar({ onRefresh }: Props) {
         )}
       </div>
 
-      <MediaConversionStatus />
+      <div className="stage-transport-secondary" style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0, flex: "0 1 auto" }}>
+        <MediaConversionStatus />
+        <OutputFtbControls />
+        <TcStatusIndicator />
 
-      <OutputFtbControls />
-
-      <TcStatusIndicator />
-
-      {/* OSC activity indicator — click to open/close monitor */}
-      <button
+        {/* OSC activity indicator — click to open/close monitor */}
+        <button
         title={t("components.oscActivity")}
         onClick={() => setOscMonitorOpen((v) => !v)}
         style={{
@@ -494,11 +501,11 @@ export function TransportBar({ onRefresh }: Props) {
           cursor: "pointer",
           padding: 0,
         }}
-      />
-      {oscMonitorOpen && <OscMonitor onClose={() => setOscMonitorOpen(false)} />}
+        />
+        {oscMonitorOpen && <OscMonitor onClose={() => setOscMonitorOpen(false)} />}
 
       {/* DMX lighting panel toggle */}
-      <button
+        <button
         title={t("components.dmxLighting")}
         onClick={() => setLightingOpen((v) => !v)}
         style={{
@@ -513,13 +520,13 @@ export function TransportBar({ onRefresh }: Props) {
           flexShrink: 0,
           cursor: "pointer",
         }}
-      >
-        DMX
-      </button>
-      {lightingOpen && <LightingPanel onClose={() => setLightingOpen(false)} />}
+        >
+          DMX
+        </button>
+        {lightingOpen && <LightingPanel onClose={() => setLightingOpen(false)} />}
 
       {/* Floating output mixer */}
-      <button
+        <button
         title={t("components.outputMixer")}
         onClick={() => void openMixerWindow().catch(console.error)}
         style={{
@@ -534,22 +541,26 @@ export function TransportBar({ onRefresh }: Props) {
           flexShrink: 0,
           cursor: "pointer",
         }}
-      >
-        MIX
-      </button>
+        >
+          MIX
+        </button>
+      </div>
 
       {/* Meter + slider block */}
-      <div
+      <div className="stage-master-area"
         style={{
           display: "flex",
           flexDirection: "column",
           justifyContent: "center",
-          gap: 3,
+          gap: 2,
+          minWidth: 150,
+          flexShrink: 1,
         }}
       >
         <TickRow />
         <MeterRow label="L" fillPct={meterL.fill} holdPct={meterL.hold} />
         <MeterRow label="R" fillPct={meterR.fill} holdPct={meterR.hold} />
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "var(--wc-text-muted)", whiteSpace: "nowrap" }}><SpeakerHigh size={13} weight="bold" aria-hidden="true" /><span>{t("transport.masterVolume")}</span></div>
         <VolumeRow valueDb={volumeDb} onChange={handleVolumeChange} />
       </div>
     </div>

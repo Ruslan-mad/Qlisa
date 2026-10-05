@@ -219,6 +219,7 @@ function CueRowImpl({
   const { locale, t } = useLocale();
   const timing = useTimingStore((s) => s.timings[cue.id]);
   const played = useWorkspaceStore((s) => s.playedCueIds.has(cue.id));
+  const isStage = useWorkspaceStore((s) => s.displayPrefs.theme === "stage");
   const outputAssignments = cueOutputAssignments(cue, outputStatuses, defaultOutputId);
 
   const [editingCell, setEditingCell] = useState<"pre_wait_ms" | "post_wait_ms" | "duration_ms" | "notes" | null>(null);
@@ -316,20 +317,21 @@ function CueRowImpl({
 
   const colorAccent = COLOR_SWATCHES[cue.color] ?? "transparent";
   const fullRowTint = cueColorStyle === "full_row" && colorAccent !== "transparent"
-    ? hexToRgba(colorAccent, 0.28)
+    ? hexToRgba(colorAccent, isStage ? (isGroup ? 0.28 : 0.12) : 0.28)
     : null;
 
   let bg = fullRowTint ?? "transparent";
   if (isDragOver)      bg = "var(--wc-bg-drag-over)";
-  // Keep transport state visible underneath selection.  Selection is a
-  // separate interaction state (the outline below), so a running/paused cue
-  // does not become indistinguishable from an ordinary selected row.
+  else if (isStage && isSelected) bg = "var(--wc-bg-selected)";
+  else if (isStage && isGroup && fullRowTint) bg = fullRowTint;
   else if (isRunning)  bg = "var(--wc-bg-running)";
   else if (isPaused)   bg = "var(--wc-bg-paused)";
   else if (isSelected) bg = "var(--wc-accent-dim)";
 
   // Solid background for sticky-right cells (must be opaque to cover scrolled content).
-  const stickyBg = isRunning  ? "var(--wc-bg-running)"
+  const stickyBg = isStage && isSelected ? "var(--wc-bg-selected)"
+    : isStage && isGroup && fullRowTint ? fullRowTint
+    : isRunning  ? "var(--wc-bg-running)"
     : isPaused ? "var(--wc-bg-paused)"
     : isSelected ? "var(--wc-accent-dim)"
     : cue.cue_type === "number" ? fullRowTint ?? "var(--wc-bg-surface)"
@@ -339,7 +341,7 @@ function CueRowImpl({
   // The playhead/running state and the operator's selection are deliberately
   // rendered independently.  The left inset marks the active playhead while
   // the full inset outline marks every selected row (including a multi-select).
-  const stateShadow = isAtPlayhead ? "inset 3px 0 0 var(--wc-text-bright)" : null;
+  const stateShadow = isAtPlayhead ? `inset 3px 0 0 ${isStage ? "#60a5fa" : "var(--wc-text-bright)"}` : null;
   const selectionShadow = isSelected ? "inset 0 0 0 1px var(--wc-accent)" : null;
 
   const rowStyle: React.CSSProperties = {

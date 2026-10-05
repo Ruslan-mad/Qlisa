@@ -511,7 +511,7 @@ pub struct DisplayPreferences {
     #[serde(default)]
     pub timer_floating: bool,
 
-    /// UI colour theme: `"dark"`, `"light"`, or `"system"` (follows OS setting).
+    /// UI colour theme. Unknown strings remain readable for forward compatibility.
     #[serde(default = "DisplayPreferences::default_theme")]
     pub theme: String,
 
@@ -632,7 +632,7 @@ impl DisplayPreferences {
     }
 
     fn default_theme() -> String {
-        "system".into()
+        "stage".into()
     }
     fn default_timer_font() -> String {
         crate::bundled_fonts::FONT_FAMILY.into()

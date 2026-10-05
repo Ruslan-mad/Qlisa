@@ -1,0 +1,159 @@
+/* Qlisa Stage theme. The existing component system reads --wc-* tokens, so
+   saved legacy themes keep their original palette and behavior. */
+:root[data-theme="stage"] {
+  --wc-bg-deepest: #030d16;
+  --wc-bg-app: #06131f;
+  --wc-bg-surface: #091b2b;
+  --wc-bg-input: #051420;
+  --wc-bg-hover: #102a3e;
+  --wc-bg-selected: rgba(20, 104, 177, 0.38);
+  --wc-bg-running: #102a35;
+  --wc-bg-paused: #302717;
+  --wc-bg-group: #0b1b2a;
+  --wc-bg-drag-over: #12354a;
+  --wc-border: #1d3a50;
+  --wc-border-strong: #31516b;
+  --wc-text-bright: #e8f3ff;
+  --wc-text: #d5e5f3;
+  --wc-text-secondary: #9fb4c8;
+  --wc-text-muted: #829bb2;
+  --wc-text-faint: #60788f;
+  --wc-accent: #39c9e8;
+  --wc-accent-hover: #69d9f0;
+  --wc-accent-fg: #04151d;
+  --wc-accent-dim: rgba(57, 201, 232, 0.16);
+  color-scheme: dark;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+:root[data-theme="stage"] input,
+:root[data-theme="stage"] select,
+:root[data-theme="stage"] textarea,
+:root[data-theme="stage"] button {
+  font-family: inherit;
+}
+
+:root[data-theme="stage"] body {
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+:root[data-theme="stage"] :focus-visible {
+  outline: 2px solid #55d8f1;
+  outline-offset: 2px;
+}
+
+:root[data-theme="stage"] [data-is-group="true"] {
+  --stage-group-edge: #55a9d2;
+  font-weight: 500;
+}
+
+:root[data-theme="stage"] [data-cue-id]:hover {
+  filter: brightness(1.08);
+}
+
+:root[data-theme="stage"] .stage-header,
+:root[data-theme="stage"] .stage-clock {
+  background: var(--wc-bg-deepest);
+  color: var(--wc-text-bright);
+  border-color: var(--wc-border);
+}
+
+:root[data-theme="stage"] .stage-clock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  white-space: nowrap;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+:root[data-theme="stage"] .stage-clock-date {
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+:root[data-theme="stage"] .stage-clock-time {
+  font-size: 28px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+:root[data-theme="stage"] .stage-toolbar-row {
+  align-items: center;
+  min-width: 0;
+}
+
+:root[data-theme="stage"] .stage-cue-actions {
+  min-width: 0;
+}
+
+:root[data-theme="stage"] .stage-toolbar-tools {
+  flex-shrink: 0;
+}
+
+:root[data-theme="stage"] .stage-transport-button {
+  font-size: 20px !important;
+}
+
+:root[data-theme="stage"] .stage-main,
+:root[data-theme="stage"] .stage-panel-left,
+:root[data-theme="stage"] .stage-panel-right {
+  background: var(--wc-bg-app);
+  color: var(--wc-text);
+  border-color: var(--wc-border);
+}
+
+:root[data-theme="stage"] .stage-panel-left-collapsed,
+:root[data-theme="stage"] .stage-panel-right-collapsed {
+  background: var(--wc-bg-deepest);
+  color: var(--wc-text-secondary);
+  border-color: var(--wc-border);
+}
+
+@media (max-width: 1400px) {
+  :root[data-theme="stage"] .stage-transport {
+    height: auto !important;
+    min-height: 96px;
+    flex-wrap: wrap;
+  }
+
+  :root[data-theme="stage"] .stage-transport-button {
+    width: 96px !important;
+    min-width: 96px !important;
+    height: 72px;
+  }
+
+  :root[data-theme="stage"] .stage-running-cues {
+    flex: 1 1 180px !important;
+  }
+
+  :root[data-theme="stage"] .stage-master-area {
+    flex: 1 1 260px;
+    min-width: 0;
+  }
+
+  :root[data-theme="stage"] .stage-transport-secondary {
+    flex: 1 1 420px;
+    min-width: 0;
+  }
+
+  :root[data-theme="stage"] .stage-output-controls {
+    max-width: min(100%, 360px) !important;
+  }
+}
+
+@media (max-width: 900px) {
+  :root[data-theme="stage"] .stage-transport {
+    align-items: stretch;
+  }
+
+  :root[data-theme="stage"] .stage-transport-secondary {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  :root[data-theme="stage"] .stage-output-controls {
+    margin-left: 0 !important;
+    max-width: 100% !important;
+  }
+}

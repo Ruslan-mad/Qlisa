@@ -7,6 +7,7 @@ import { MixerWindow } from "./windows/MixerWindow";
 import { OutputMonitorWindow } from "./windows/OutputMonitorWindow";
 import { DiagnosticsStandalone } from "./components/Diagnostics/DiagnosticsStandalone";
 import { MediaRuntimeBootstrap } from "./components/MediaRuntimeBootstrap";
+import "./styles/stage.css";
 
 // Synchronously read window label from Tauri internals — no function call,
 // no async, no crash if the object isn't present (e.g. pure browser dev).

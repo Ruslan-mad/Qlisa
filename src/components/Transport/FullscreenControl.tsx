@@ -136,25 +136,35 @@ export function FullscreenControl() {
   };
 
   const label = visible ? t("fullscreenUi.hide") : t("fullscreenUi.show");
+  const buttonLabel = t("stageUi.fullscreen");
 
   return (
-    <div ref={rootRef} style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
+    <div ref={rootRef} className="stage-fullscreen-control" style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
       <button
         type="button"
-        aria-label={label}
+        className="stage-physical-output-toggle"
+        aria-label={buttonLabel}
         aria-pressed={visible}
         disabled={busy}
         title={label}
         onClick={() => void toggleVisibility()}
         style={{
           ...buttonStyle,
+          minWidth: 150,
+          height: 40,
+          justifyContent: "center",
+          padding: "0 12px",
+          gap: 8,
+          fontSize: 14,
+          letterSpacing: 0,
           borderRadius: "4px 0 0 4px",
           opacity: busy ? 0.65 : 1,
           cursor: busy ? "default" : "pointer",
         }}
       >
+        <Monitor size={18} weight="regular" aria-hidden="true" />
         <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: "50%", background: visible ? "#4ade80" : "var(--wc-text-faint)", boxShadow: visible ? "0 0 5px #4ade80" : "none", flexShrink: 0 }} />
-        <span>{t("fullscreenUi.button")}</span>
+        <span>{buttonLabel}</span>
       </button>
       <button
         type="button"
@@ -166,9 +176,13 @@ export function FullscreenControl() {
         onClick={() => setOpen((current) => !current)}
         style={{
           ...buttonStyle,
+          width: 30,
+          height: 40,
+          minWidth: 30,
+          justifyContent: "center",
           borderLeft: "1px solid var(--wc-border)",
           borderRadius: "0 4px 4px 0",
-          padding: "4px 5px",
+          padding: 0,
           color: open ? "var(--wc-text)" : "var(--wc-text-muted)",
         }}
       >
@@ -178,6 +192,7 @@ export function FullscreenControl() {
       {open && (
         <div
           role="menu"
+          className="stage-output-menu"
           aria-label={t("fullscreenUi.menuLabel")}
           style={{
             position: "absolute",

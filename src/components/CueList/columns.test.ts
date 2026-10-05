@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_COLUMN_CONFIG,
+  STAGE_DEFAULT_COLUMN_CONFIG,
   buildGridCols,
   getVisibleDefs,
   loadColumnConfig,
+  saveColumnConfig,
 } from "./columns";
 
 const LEGACY_ORDER = [
@@ -31,6 +33,36 @@ describe("cue-list column configuration", () => {
       "28px 20px 28px 36px 97px 118px 64px 59px 49px 40px 82px 82px 100px 180px",
     );
     expect(DEFAULT_COLUMN_CONFIG.hidden).toEqual({ file: true, output: true });
+  });
+
+  it("uses a compact Stage default while keeping optional columns available", () => {
+    const visible = getVisibleDefs(STAGE_DEFAULT_COLUMN_CONFIG);
+    expect(visible.map((column) => column.id)).toEqual([
+      "playhead", "led", "type", "number", "name", "notes", "duration", "continue", "file_size", "resolution",
+    ]);
+    expect(buildGridCols(visible, STAGE_DEFAULT_COLUMN_CONFIG)).toBe(
+      "28px 20px 28px 44px 300px 130px 72px 40px 72px 94px",
+    );
+    expect(STAGE_DEFAULT_COLUMN_CONFIG.order).toEqual(DEFAULT_COLUMN_CONFIG.order);
+    expect(STAGE_DEFAULT_COLUMN_CONFIG.hidden).toEqual({
+      file: true, target: true, output: true, outputs: true, pre_wait: true, post_wait: true,
+    });
+  });
+
+  it("stores Stage layout separately and preserves the legacy theme layout", () => {
+    const legacy = JSON.stringify({ order: LEGACY_ORDER, widths: { name: 97 }, hidden: {} });
+    const values = new Map([["inkue_column_config_v2", legacy]]);
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+    });
+
+    const stage = loadColumnConfig("stage");
+    expect(getVisibleDefs(stage).map((column) => column.id)).toContain("name");
+    saveColumnConfig(stage, "stage");
+    expect(values.get("inkue_column_config_v2")).toBe(legacy);
+    expect(loadColumnConfig("stage")).toEqual(stage);
+    expect(loadColumnConfig("dark").widths.name).toBe(97);
   });
 
   it("normalizes the current saved legacy layout to the same default without rewriting it", () => {

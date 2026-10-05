@@ -10,7 +10,7 @@ import { EditMenu } from "./components/MenuBar/EditMenu";
 import { CartView } from "./components/CueList/CartView";
 import { ShowModeView } from "./components/ShowMode/ShowModeView";
 import { ActiveCuesView } from "./components/ActiveCues/ActiveCuesView";
-import { migrateRightPanelMode, toggleRightPanel, type RightPanelMode, flattenActiveCues } from "./components/ActiveCues/activeCueModel";
+import { toggleRightPanel, type RightPanelMode, flattenActiveCues } from "./components/ActiveCues/activeCueModel";
 import { CueListTabs } from "./components/CueList/CueListTabs";
 import { InspectorPanel } from "./components/Inspector/InspectorPanel";
 import { ClipEditorDock } from "./components/Editor/ClipEditorDock";
@@ -39,6 +39,9 @@ import { resolveMonitorPreviewSelection } from "./components/Inspector/numberPre
 import { useNumberPreviewStore } from "./stores/numberPreviewStore";
 import { CueToolbar } from "./components/CueToolbar/CueToolbar";
 import { inspectWorkspaceGuard, isProjectFilePath, resolveWorkspaceGuard, withDefaultProjectExtension } from "./lib/projectFile";
+import { Gear, Minus, Square, X } from "@phosphor-icons/react";
+import { DEFAULT_UI_LAYOUT, normalizeUiLayout, type UiLayout, clampInspectorWidth } from "./components/Workbench/uiLayoutModel";
+import { StageClock } from "./components/Workbench/StageClock";
 
 // ---------------------------------------------------------------------------
 // Recent files
@@ -73,38 +76,33 @@ function WindowControls() {
   // Close goes through the normal close path so onCloseRequested fires.
   const handleClose = () => void getCurrentWindow().close();
 
-  const btn = (
-    key: "min" | "max" | "close",
-    label: string,
-    color: string,
-    hoverColor: string,
-    onClick: () => void,
-  ) => (
+  const btn = (key: "min" | "max" | "close", label: string, onClick: () => void) => (
     <button
       key={key}
+      type="button"
       title={label}
+      aria-label={label}
       onClick={onClick}
       onMouseEnter={() => setHovered(key)}
       onMouseLeave={() => setHovered(null)}
       style={{
-        width: 13, height: 13, borderRadius: "50%", border: "none",
-        background: hovered === key ? hoverColor : color,
+        width: 40, height: 36, borderRadius: 0, border: 0,
+        background: hovered === key ? key === "close" ? "#c42b1c" : "var(--wc-bg-hover)" : "transparent",
         cursor: "pointer", display: "flex", alignItems: "center",
         justifyContent: "center", padding: 0, flexShrink: 0,
-        fontSize: 8,
-        color: hovered === key ? "rgba(0,0,0,0.6)" : "transparent",
-        transition: "background 0.1s",
+        color: hovered === key && key === "close" ? "white" : "var(--wc-text-secondary)",
+        transition: "background 0.12s, color 0.12s",
       }}
     >
-      {hovered === key ? (key === "close" ? "✕" : key === "min" ? "–" : "▢") : ""}
+      {key === "close" ? <X size={16} weight="regular" /> : key === "min" ? <Minus size={16} weight="regular" /> : <Square size={16} weight="regular" />}
     </button>
   );
 
   return (
-    <div style={{ display: "flex", gap: 7, alignItems: "center", flexShrink: 0 }}>
-      {btn("close", t("window.close"), "#ef4444", "#dc2626", handleClose)}
-      {btn("min",   t("window.minimize"), "#f59e0b", "#d97706", handleMin)}
-      {btn("max",   t("window.maximize"), "#22c55e", "#16a34a", handleMax)}
+    <div className="stage-window-controls" style={{ display: "flex", alignItems: "center", flexShrink: 0, height: 36 }}>
+      {btn("min", t("window.minimize"), handleMin)}
+      {btn("max", t("window.maximize"), handleMax)}
+      {btn("close", t("window.close"), handleClose)}
     </div>
   );
 }
@@ -678,47 +676,11 @@ function HelpMenu({ onCheck, onAbout }: { onCheck: () => void; onAbout: () => vo
 
 const LS_LAYOUT_KEY = "inkue_ui_layout";
 
-interface UiLayout {
-  showCueListTabs: boolean;
-  rightPanel: RightPanelMode;
-  showSearchBar: boolean;
-  inspectorWidth: number;
-  showLivePanel: boolean;
-  showSlicePanel: boolean;
-  activeClipTab: "Live" | "Slice";
-}
-
-const INSPECTOR_MIN_WIDTH = 320;
-const INSPECTOR_MAX_WIDTH = 560;
-const INSPECTOR_DEFAULT_WIDTH = 360;
-
-const clampInspectorWidth = (w: number) =>
-  Math.min(INSPECTOR_MAX_WIDTH, Math.max(INSPECTOR_MIN_WIDTH, w));
-
-const DEFAULT_UI_LAYOUT: UiLayout = {
-  showCueListTabs: true,
-  rightPanel: "inspector",
-  showSearchBar: true,
-  inspectorWidth: INSPECTOR_DEFAULT_WIDTH,
-  showLivePanel: true,
-  showSlicePanel: true,
-  activeClipTab: "Live",
-};
-
 function loadUiLayout(): UiLayout {
   try {
     const raw = localStorage.getItem(LS_LAYOUT_KEY);
     if (!raw) return DEFAULT_UI_LAYOUT;
-    const parsed = JSON.parse(raw) as Partial<UiLayout>;
-    return {
-      showCueListTabs: parsed.showCueListTabs ?? true,
-      rightPanel: migrateRightPanelMode((parsed as Partial<UiLayout>).rightPanel, (parsed as { inspectorOpen?: boolean }).inspectorOpen),
-      showSearchBar: parsed.showSearchBar ?? true,
-      inspectorWidth: clampInspectorWidth(parsed.inspectorWidth ?? INSPECTOR_DEFAULT_WIDTH),
-      showLivePanel: parsed.showLivePanel ?? true,
-      showSlicePanel: parsed.showSlicePanel ?? true,
-      activeClipTab: parsed.activeClipTab === "Slice" ? "Slice" : "Live",
-    };
+    return normalizeUiLayout(JSON.parse(raw));
   } catch {
     return DEFAULT_UI_LAYOUT;
   }
@@ -831,6 +793,8 @@ export default function App() {
     useWorkspaceStore();
 
   const [rightPanel, setRightPanel]               = useState<RightPanelMode>(() => loadUiLayout().rightPanel);
+  const [activeCuesOpen, setActiveCuesOpen]       = useState(() => loadUiLayout().activeCuesOpen);
+  const [confirmedSavedAt, setConfirmedSavedAt]   = useState<number | null>(null);
   const [showCueListTabs, setShowCueListTabs]     = useState(() => loadUiLayout().showCueListTabs);
   const [showSearchBar, setShowSearchBar]         = useState(() => loadUiLayout().showSearchBar);
   const [showLivePanel, setShowLivePanel]         = useState(() => loadUiLayout().showLivePanel);
@@ -869,8 +833,8 @@ export default function App() {
 
   // Persist panel visibility + inspector width across launches.
   useEffect(() => {
-    saveUiLayout({ showCueListTabs, rightPanel, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab });
-  }, [showCueListTabs, rightPanel, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab]);
+    saveUiLayout({ showCueListTabs, rightPanel, activeCuesOpen, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab });
+  }, [showCueListTabs, rightPanel, activeCuesOpen, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab]);
 
   useEffect(() => {
     useUpdateStore.getState().setInstallGuard(() => {
@@ -1013,6 +977,7 @@ export default function App() {
     try {
       await saveWorkspace(filePath);
       await refreshWorkspaceInfo();
+      setConfirmedSavedAt(Date.now());
       setRecentFiles(pushRecentFile(filePath));
       return true;
     } catch (error) {
@@ -1035,6 +1000,7 @@ export default function App() {
       try {
         await saveWorkspace(path);
         await refreshWorkspaceInfo();
+        setConfirmedSavedAt(Date.now());
         setRecentFiles(pushRecentFile(path));
         return true;
       } catch (error) {
@@ -1049,6 +1015,7 @@ export default function App() {
   const performOpenWorkspacePath = useCallback(async (path: string): Promise<boolean> => {
     try {
       await loadWorkspace(path);
+      setConfirmedSavedAt(null);
       setRecentFiles(pushRecentFile(path));
       setSearchQuery("");
       return true;
@@ -1168,7 +1135,7 @@ export default function App() {
 
   const handleNew = useCallback(async () => {
     runWorkspaceAction(async () => {
-      try { await newWorkspace(); }
+      try { await newWorkspace(); setConfirmedSavedAt(null); }
       catch (error) { console.error("Failed to create Qlisa project", error); setWorkspaceError(String(error)); }
     });
   }, [runWorkspaceAction]);
@@ -1197,6 +1164,7 @@ export default function App() {
     if (typeof dir !== "string") return;
     try {
       const report = await collectAndSave(dir);
+      setConfirmedSavedAt(Date.now());
       setCollectReport(report);
     } catch (err) {
       setLoadError(String(err));
@@ -1526,9 +1494,12 @@ export default function App() {
     );
   };
 
-  const titleBarName = workspaceInfo
-    ? `${workspaceInfo.name}${workspaceInfo.is_modified ? " •" : ""}`
-    : t("app.name");
+  const titleBarName = workspaceInfo?.name ?? t("app.name");
+  const saveStatus = workspaceInfo?.is_modified
+    ? t("stageUi.modified")
+    : confirmedSavedAt == null
+      ? t("stageUi.savedStatus")
+      : t("stageUi.savedAt", { time: new Date(confirmedSavedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) });
 
   useEffect(() => {
     const title = workspaceInfo?.name
@@ -1638,13 +1609,14 @@ export default function App() {
       {preflightOpen && <PreflightModal onClose={() => setPreflightOpen(false)} />}
       {logsOpen && <LogViewerModal onClose={() => setLogsOpen(false)} />}
 
-      {/* Custom title bar — two rows: Row 1 holds the window controls, menus and a
-          full-width drag area; Row 2 holds the cue toolbar.  Splitting them means
+      {/* Custom title bar — the main row holds project identity and window controls;
+          the compact menu row follows, then the cue toolbar. Splitting them means
           the toolbar can never squeeze the drag area down to an ungrabbable sliver
           when the window is narrow (the previous single-row layout collapsed it to
           ~40px, so only the "Inkue" label was draggable).  No drag-region on the
           row containers so menus/buttons keep working on Linux/WebKitGTK. */}
       <div
+        className="stage-header"
         style={{
           display: "flex", flexDirection: "column",
           background: "var(--wc-bg-surface)", borderBottom: "1px solid var(--wc-border)",
@@ -1656,91 +1628,81 @@ export default function App() {
           position: "relative", zIndex: 10000,
         }}
       >
-        {/* Row 1 — window controls, File/View menus, draggable workspace title */}
-        <div style={{ display: "flex", alignItems: "center", height: 36, padding: "0 12px", gap: 12, position: "relative" }}>
-        <WindowControls />
-        <FileMenu
-          onSave={() => void handleSave()}
-          onSaveAs={() => void handleSaveAs()}
-          onOpen={() => void handleOpen()}
-          onNew={() => void handleNew()}
-          onImportQlab={() => void handleImportQlab()}
-          onCollect={() => void handleCollectAndSave()}
-          onCheck={() => setPreflightOpen(true)}
-          onLogs={() => setLogsOpen(true)}
-          onDiagnostics={() => void openDiagnosticsWindow()}
-          onPreferences={() => void openPreferencesWindow()}
-          onAbout={() => setShowAbout(true)}
-          recentFiles={recentFiles}
-          onOpenRecent={(p) => void openWorkspacePath(p)}
-        />
-        <EditMenu onRefresh={handleRefresh} />
-        <HelpMenu onCheck={() => void useUpdateStore.getState().checkForUpdates()} onAbout={() => setShowAbout(true)} />
-        <ViewMenu
-          items={[
-            { label: t("menus.showMode"), checked: showMode, onClick: () => setShowMode((v) => !v), shortcut: "F5" },
-            { label: t("menus.cueListTabs"), checked: showCueListTabs, onClick: () => setShowCueListTabs((v) => !v) },
-            { label: CLIP_EDITOR_TAB_LABELS.timeline, checked: showLivePanel, onClick: () => toggleClipPanel("Live") },
-            { label: CLIP_EDITOR_TAB_LABELS.slice, checked: showSlicePanel, onClick: () => toggleClipPanel("Slice") },
-            { label: t("menus.searchBar"), checked: showSearchBar, onClick: handleToggleSearch, shortcut: "Ctrl+F" },
-            { label: t("menus.activeCues"), checked: rightPanel === "active-cues", onClick: () => setRightPanel((v) => toggleRightPanel(v, "active-cues")) },
-            { label: t("menus.inspector"), checked: rightPanel === "inspector", onClick: () => setRightPanel((v) => toggleRightPanel(v, "inspector")) },
-            { label: t("menus.outputSurface"), checked: outputSurfaceVisible, onClick: () => void handleToggleSurface() },
-            { label: t("menus.outputMonitor"), checked: outputMonitorVisible, onClick: () => void handleToggleOutputMonitor() },
-          ]}
-        />
-        <ActionMenu onDone={handleRefresh} />
-
-        {/* Drag region: app name + workspace name */}
-        <div
-          data-tauri-drag-region
-          style={{ flex: 1, minWidth: 40, position: "relative", display: "flex", alignItems: "center", gap: 8, overflow: "hidden" }}
-        >
-          <div data-tauri-drag-region style={{ flexShrink: 0, pointerEvents: "none", display: "flex" }}>
-            <InkueMark size={18} />
+        {/* Main title row. Menus stay in their own compact row below. */}
+        <div className="stage-header-main" style={{ display: "flex", alignItems: "center", height: 64, padding: "0 12px", gap: 12, position: "relative" }}>
+          <div data-tauri-drag-region style={{ flex: "1 1 0", maxWidth: "max(0px, calc(50% - 125px))", minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: 10, overflow: "hidden" }}>
+            <div data-tauri-drag-region style={{ flexShrink: 0, pointerEvents: "none", display: "flex" }}>
+              <InkueMark size={30} />
+            </div>
+            <div data-tauri-drag-region style={{ minWidth: 0, display: "flex", alignItems: "baseline", gap: 12, overflow: "hidden" }}>
+              <span data-tauri-drag-region style={{ fontWeight: 700, fontSize: 20, color: "var(--wc-text-bright)", flexShrink: 0, letterSpacing: "-0.02em" }}>Qlisa</span>
+              <span data-tauri-drag-region style={{ minWidth: 0, flexShrink: 1, fontSize: 14, color: "var(--wc-text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{titleBarName}</span>
+              <span data-tauri-drag-region style={{ color: workspaceInfo?.is_modified ? "#fbbf24" : "var(--wc-text-muted)", fontSize: 11, fontWeight: 600, flexShrink: 0 }}>{saveStatus}</span>
+            </div>
+            {brokenCueIds.size > 0 && (
+              <button type="button" onClick={() => setPreflightOpen(true)} title={t("toolbar.problems")} style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.5)", borderRadius: 5, color: "#ef4444", cursor: "pointer", fontSize: 11, padding: "2px 8px" }}>
+                ⚠ {brokenCueIds.size}
+              </button>
+            )}
           </div>
-          <span
-            data-tauri-drag-region
-            style={{ fontWeight: 700, fontSize: 13, color: "var(--wc-text-bright)", flexShrink: 0, letterSpacing: "-0.01em" }}
-          >
-            Qlisa
-          </span>
-          <span
-            data-tauri-drag-region
-            style={{ fontSize: 12, color: "var(--wc-text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-          >
-            {titleBarName}
-          </span>
-          {brokenCueIds.size > 0 && (
-            <button
-              onClick={() => setPreflightOpen(true)}
-              title={t("toolbar.problems")}
-              style={{
-                flexShrink: 0, display: "flex", alignItems: "center", gap: 4,
-                background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.5)",
-                borderRadius: 5, color: "#ef4444", cursor: "pointer",
-                fontSize: 11, padding: "2px 8px",
-              }}
-            >
-              ⚠ {brokenCueIds.size}
-            </button>
-          )}
-        </div>
         <div
           onPointerDown={(event) => event.stopPropagation()}
           style={{ position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)", display: "flex", alignItems: "center" }}
         >
           <FullscreenControl />
         </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, flexShrink: 0, marginLeft: "auto" }}>
+            <button type="button" onClick={() => void openPreferencesWindow()} title={`${t("app.preferences")} (Ctrl+,)`} aria-label={t("app.preferences")} style={{ display: "inline-flex", alignItems: "center", gap: 7, flexShrink: 0, background: "var(--wc-bg-hover)", border: "1px solid var(--wc-border-strong)", borderRadius: 6, color: "var(--wc-text)", padding: "8px 13px", cursor: "pointer", fontSize: 13 }}>
+              <Gear size={17} weight="regular" aria-hidden="true" />{t("menus.settings")}
+            </button>
+            <StageClock />
+            <WindowControls />
+          </div>
+        </div>
 
-        </div>{/* end Row 1 */}
+        <div className="stage-menubar" style={{ display: "flex", alignItems: "center", gap: 5, height: 26, minHeight: 26, padding: "0 12px", borderTop: "1px solid var(--wc-border)", position: "relative", zIndex: 1, flexShrink: 0 }}>
+          <FileMenu
+            onSave={() => void handleSave()}
+            onSaveAs={() => void handleSaveAs()}
+            onOpen={() => void handleOpen()}
+            onNew={() => void handleNew()}
+            onImportQlab={() => void handleImportQlab()}
+            onCollect={() => void handleCollectAndSave()}
+            onCheck={() => setPreflightOpen(true)}
+            onLogs={() => setLogsOpen(true)}
+            onDiagnostics={() => void openDiagnosticsWindow()}
+            onPreferences={() => void openPreferencesWindow()}
+            onAbout={() => setShowAbout(true)}
+            recentFiles={recentFiles}
+            onOpenRecent={(p) => void openWorkspacePath(p)}
+          />
+          <EditMenu onRefresh={handleRefresh} />
+          <HelpMenu onCheck={() => void useUpdateStore.getState().checkForUpdates()} onAbout={() => setShowAbout(true)} />
+          <ViewMenu
+            items={[
+              { label: t("menus.showMode"), checked: showMode, onClick: () => setShowMode((v) => !v), shortcut: "F5" },
+              { label: t("menus.cueListTabs"), checked: showCueListTabs, onClick: () => setShowCueListTabs((v) => !v) },
+              { label: CLIP_EDITOR_TAB_LABELS.timeline, checked: showLivePanel, onClick: () => toggleClipPanel("Live") },
+              { label: CLIP_EDITOR_TAB_LABELS.slice, checked: showSlicePanel, onClick: () => toggleClipPanel("Slice") },
+              { label: t("menus.searchBar"), checked: showSearchBar, onClick: handleToggleSearch, shortcut: "Ctrl+F" },
+              { label: t("menus.activeCues"), checked: activeCuesOpen, onClick: () => setActiveCuesOpen((value) => !value) },
+              { label: t("menus.inspector"), checked: rightPanel === "inspector", onClick: () => setRightPanel((value) => value === "inspector" ? "closed" : "inspector") },
+              { label: t("menus.outputSurface"), checked: outputSurfaceVisible, onClick: () => void handleToggleSurface() },
+              { label: t("menus.outputMonitor"), checked: outputMonitorVisible, onClick: () => void handleToggleOutputMonitor() },
+            ]}
+          />
+          <ActionMenu onDone={handleRefresh} />
+        </div>
 
         {/* Row 2 — one-line cue toolbar. The fixed right controls keep their
             width while the left cue actions move into More as space shrinks. */}
         {showMode ? null : <CueToolbar
           activeCueCount={activeCueCount}
           rightPanel={rightPanel}
-          onToggleRightPanel={(panel) => setRightPanel((value) => toggleRightPanel(value, panel))}
+          activeCuesOpen={activeCuesOpen}
+          onToggleRightPanel={(panel) => panel === "active-cues"
+            ? setActiveCuesOpen((value) => !value)
+            : setRightPanel((value) => value === "inspector" ? "closed" : "inspector")}
           onSettings={() => void openPreferencesWindow()}
           onAdd={(type) => {
             const direct: Partial<Record<CueType, () => void>> = {
@@ -1758,11 +1720,20 @@ export default function App() {
       <HealthBanner />
 
       {/* Main area */}
-      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+      <div className="stage-main" style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         {showMode ? (
           <ShowModeView />
         ) : (
           <>
+            {activeCuesOpen ? (
+              <aside id="stage-active-cues" className="stage-panel-left" aria-label={t("menus.activeCues")} style={{ width: 300, minWidth: 230, maxWidth: 380, flex: "0 0 300px", minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", borderRight: "1px solid var(--wc-border)" }}>
+                <ActiveCuesView />
+              </aside>
+            ) : (
+              <div className="stage-panel-left-collapsed" style={{ width: 34, flex: "0 0 34px", display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 8, borderRight: "1px solid var(--wc-border)" }}>
+                <button type="button" onClick={() => setActiveCuesOpen(true)} title={t("toolbar.activeCuesToggle")} aria-label={t("toolbar.activeCuesToggle")} aria-expanded={false} style={{ border: 0, background: "transparent", color: "var(--wc-text-muted)", cursor: "pointer", writingMode: "vertical-rl", fontSize: 10, padding: "8px 4px" }}>{t("menus.activeCues")}</button>
+              </div>
+            )}
             <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
               {showCueListTabs && <CueListTabs onRefresh={handleRefresh} />}
               {searchQuery.trim() ? (
@@ -1862,8 +1833,10 @@ export default function App() {
                 </div>
               )}
             </div>
-            {rightPanel !== "closed" && (
+            {rightPanel !== "closed" ? (
               <div
+                id="stage-inspector"
+                className="stage-panel-right"
                 style={{
                   width: inspectorWidth, position: "relative",
                   borderLeft: "1px solid var(--wc-border)",
@@ -1878,7 +1851,7 @@ export default function App() {
                     cursor: "ew-resize", zIndex: 2,
                   }}
                 />
-                {rightPanel === "active-cues" ? <ActiveCuesView /> : <InspectorPanel
+                <InspectorPanel
                   selectedCue={selectedCue}
                   selectedCueIds={selectedCueIds}
                   allCues={cues}
@@ -1895,7 +1868,11 @@ export default function App() {
                   reloadToken={inspectorReload}
                   onCueSaved={() => setEditorReload((n) => n + 1)}
                   onSelectCue={(id) => useWorkspaceStore.getState().setSelectedCueId(id)}
-                />}
+                />
+              </div>
+            ) : (
+              <div className="stage-panel-right-collapsed" style={{ width: 34, flex: "0 0 34px", display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 8, borderLeft: "1px solid var(--wc-border)" }}>
+                <button type="button" onClick={() => setRightPanel("inspector")} title={t("toolbar.inspectorToggle")} aria-label={t("toolbar.inspectorToggle")} aria-expanded={false} style={{ border: 0, background: "transparent", color: "var(--wc-text-muted)", cursor: "pointer", writingMode: "vertical-rl", fontSize: 10, padding: "8px 4px" }}>{t("menus.inspector")}</button>
               </div>
             )}
           </>

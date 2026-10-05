@@ -412,7 +412,10 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
   }, [playheadCueId, generalPrefs.auto_scroll_to_playhead]);
 
   // ---------- Column config ----------
-  const [colConfig, setColConfig] = useState<ColumnConfig>(loadColumnConfig);
+  const columnTheme = displayPrefs.theme;
+  const [colConfig, setColConfig] = useState<ColumnConfig>(() => loadColumnConfig(columnTheme));
+  const columnThemeRef = useRef(columnTheme);
+  const skipColumnSaveRef = useRef(false);
   const [colMenuPos, setColMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [draggingColId, setDraggingColId] = useState<ColumnId | null>(null);
   const [hoveredResizeId, setHoveredResizeId] = useState<ColumnId | null>(null);
@@ -469,7 +472,19 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
   const selectionEndRef = useRef<string | null>(null);
   const selectedCueSet = useMemo(() => new Set(selectedCueIds), [selectedCueIds]);
 
-  useEffect(() => { saveColumnConfig(colConfig); }, [colConfig]);
+  useEffect(() => {
+    if (columnThemeRef.current === columnTheme) return;
+    columnThemeRef.current = columnTheme;
+    skipColumnSaveRef.current = true;
+    setColConfig(loadColumnConfig(columnTheme));
+  }, [columnTheme]);
+  useEffect(() => {
+    if (skipColumnSaveRef.current) {
+      skipColumnSaveRef.current = false;
+      return;
+    }
+    saveColumnConfig(colConfig, columnTheme);
+  }, [colConfig, columnTheme]);
 
   const visibleDefs = useMemo(() => getVisibleDefs(colConfig), [colConfig]);
   const gridCols    = useMemo(() => buildGridCols(visibleDefs, colConfig), [visibleDefs, colConfig]);

@@ -33,12 +33,14 @@ export function OutputFtbControls() {
 
   return (
     <div
+      className="stage-output-controls"
       aria-label={t("components.outputFtb.panelLabel")}
       style={{
         display: "flex",
         alignItems: "center",
         gap: 5,
-        maxWidth: 390,
+        maxWidth: 450,
+        minWidth: 0,
         overflowX: "auto",
         flexShrink: 1,
         marginLeft: "auto",
@@ -58,6 +60,7 @@ export function OutputFtbControls() {
           : t("components.outputFtb.outputUnavailable", { name: output.name, detail: output.detail ?? t("status.outputOffline") });
         return (
           <button
+            className="stage-output-chip"
             key={output.output_id}
             type="button"
             disabled={!usable}
@@ -71,11 +74,11 @@ export function OutputFtbControls() {
             style={{
               display: "inline-flex",
               alignItems: "center",
-              gap: 5,
+              gap: 7,
               minWidth: 0,
-              maxWidth: 150,
-              padding: "4px 7px",
-              borderRadius: 4,
+              maxWidth: 180,
+              padding: "7px 10px",
+              borderRadius: 6,
               border: `1px solid ${output.ftb ? "#ef4444" : "var(--wc-border-strong)"}`,
               background: output.ftb ? "#3b1114" : "var(--wc-bg-surface)",
               color: usable ? "var(--wc-text-secondary)" : "var(--wc-text-faint)",
@@ -88,18 +91,18 @@ export function OutputFtbControls() {
             <span
               aria-hidden="true"
               style={{
-                width: 8,
-                height: 8,
+                width: 9,
+                height: 9,
                 borderRadius: "50%",
                 flexShrink: 0,
                 background: color,
                 boxShadow: `0 0 5px ${color}`,
               }}
             />
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontSize: 10, fontWeight: 700 }}>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontSize: 11, fontWeight: 700 }}>
               {output.name}
             </span>
-            <span style={{ fontSize: 9, fontWeight: 800, color, flexShrink: 0 }}>{stateText}</span>
+            <span style={{ fontSize: 10, fontWeight: 800, color, flexShrink: 0 }}>{stateText}</span>
           </button>
         );
       })}

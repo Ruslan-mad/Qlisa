@@ -16,5 +16,6 @@ describe("built-in general preferences", () => {
     });
     expect(DEFAULT_GENERAL_PREFS.default_cue_colors.text).toBeUndefined();
     expect(DEFAULT_DISPLAY_PREFS.cue_color_style).toBe("full_row");
+    expect(DEFAULT_DISPLAY_PREFS.theme).toBe("stage");
   });
 });

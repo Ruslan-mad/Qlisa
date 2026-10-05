@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity } from "lucide-react";
+import { Pulse as Activity, CaretDown, SquaresFour } from "@phosphor-icons/react";
 import { useLocale } from "../../i18n";
 import { COMMAND_CUE_TYPES, CUE_TYPE_COLORS, type CueType } from "../../lib/types";
 import { CueTypeIcon } from "../common/CueTypeIcon";
@@ -8,6 +8,7 @@ import { CUE_TOOLBAR_DESCRIPTORS, resolveCueToolbarLayout } from "./cueToolbarMo
 type Props = {
   activeCueCount: number;
   rightPanel: string;
+  activeCuesOpen?: boolean;
   onToggleRightPanel: (panel: "active-cues" | "inspector") => void;
   onSettings: () => void;
   onAdd: (type: CueType) => void;
@@ -19,7 +20,7 @@ const buttonStyle: React.CSSProperties = {
   borderRadius: 4, color: "var(--wc-text)", cursor: "pointer", fontSize: 12,
 };
 
-export function CueToolbar({ activeCueCount, rightPanel, onToggleRightPanel, onSettings, onAdd, onDragStart }: Props) {
+export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggleRightPanel, onAdd, onDragStart }: Props) {
   const { t, locale } = useLocale();
   const leftRef = useRef<HTMLDivElement>(null);
   const measureRefs = useRef(new Map<CueType, HTMLButtonElement>());
@@ -67,7 +68,7 @@ export function CueToolbar({ activeCueCount, rightPanel, onToggleRightPanel, onS
       key={type}
       ref={measuring ? (element) => { if (element) measureRefs.current.set(type, element); else measureRefs.current.delete(type); } : undefined}
       style={{
-        ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0, userSelect: "none",
+        ...buttonStyle, width: "max-content", minWidth: 72, minHeight: 62, padding: "6px 10px", borderRadius: 6, display: "inline-flex", flexDirection: "column", justifyContent: "center", alignItems: "center", gap: 3, flexShrink: 0, userSelect: "none", fontSize: 13, fontWeight: 600,
         color: hoveredMain === type ? CUE_TYPE_COLORS[type] : "var(--wc-text-secondary)",
         borderColor: hoveredMain === type ? CUE_TYPE_COLORS[type] : "var(--wc-border-strong)",
         background: hoveredMain === type ? "var(--wc-bg-hover)" : "var(--wc-bg-surface)",
@@ -81,14 +82,14 @@ export function CueToolbar({ activeCueCount, rightPanel, onToggleRightPanel, onS
       tabIndex={measuring ? -1 : undefined}
       aria-hidden={measuring || undefined}
     >
-      <CueTypeIcon type={type} size={18} tone="type" />{label(type)}
+      <CueTypeIcon type={type} size={24} tone="type" />{label(type)}
     </button>
   );
 
   const menuItems = layout.overflow.map((type) => {
     const item = descriptors.find((descriptor) => descriptor.type === type)!;
     return (
-      <button key={type} onMouseEnter={() => setHoveredItem(type)} onMouseLeave={() => setHoveredItem(null)}
+      <button key={type} role="menuitem" onMouseEnter={() => setHoveredItem(type)} onMouseLeave={() => setHoveredItem(null)}
         onClick={(event) => { event.stopPropagation(); setOpen(false); onAdd(type); }}
         onMouseDown={(event) => { if (event.button === 0) onDragStart(type, event); }}
         style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", height: 26, padding: "0 10px", borderRadius: 4, border: "none", textAlign: "left", background: hoveredItem === type ? "var(--wc-bg-hover)" : "transparent", cursor: "pointer", whiteSpace: "nowrap" }}>
@@ -100,7 +101,7 @@ export function CueToolbar({ activeCueCount, rightPanel, onToggleRightPanel, onS
   });
 
   return (
-    <div style={{ display: "flex", flexWrap: "nowrap", gap: 6, padding: "0 12px 6px", alignItems: "center", minWidth: 0 }} onClick={(event) => {
+    <div className="stage-toolbar-row" style={{ display: "flex", flexWrap: "nowrap", gap: 8, padding: "0 12px 8px", alignItems: "center", minWidth: 0 }} onClick={(event) => {
       const button = (event.target as HTMLElement).closest("button");
       button?.animate([
         { transform: "scale(1)", filter: "brightness(1)" },
@@ -108,31 +109,27 @@ export function CueToolbar({ activeCueCount, rightPanel, onToggleRightPanel, onS
         { transform: "scale(1)", filter: "brightness(1)" },
       ], { duration: 260, easing: "cubic-bezier(.2,.7,.3,1)" });
     }}>
-      <div ref={leftRef} style={{ display: "flex", flex: "1 1 0", minWidth: 0, flexWrap: "nowrap", alignItems: "center", gap: 6, overflow: "visible" }}>
+      <div ref={leftRef} className="stage-cue-actions" style={{ display: "flex", flex: "1 1 0", minWidth: 0, flexWrap: "nowrap", alignItems: "center", gap: 8, overflow: "visible" }}>
         {layout.visible.map((type) => mainButton(type))}
         {layout.showMore && <div style={{ position: "relative", flexShrink: 0, zIndex: open ? 10002 : undefined }}>
           {open && <div style={{ position: "fixed", inset: 0, zIndex: 10000 }} onClick={() => setOpen(false)} />}
-          <button style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0, userSelect: "none", color: hoveredMore || open ? "var(--wc-text)" : "var(--wc-text-secondary)", borderColor: hoveredMore || open ? "var(--wc-text-secondary)" : "var(--wc-border-strong)", background: hoveredMore || open ? "var(--wc-bg-hover)" : "var(--wc-bg-surface)", transition: "color 0.12s, border-color 0.12s, background 0.12s" }}
+          <button aria-haspopup="menu" aria-expanded={open} style={{ ...buttonStyle, position: "relative", width: "max-content", minWidth: 72, minHeight: 62, padding: "6px 10px", borderRadius: 6, display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, flexShrink: 0, userSelect: "none", fontSize: 13, fontWeight: 600, color: hoveredMore || open ? "var(--wc-text)" : "var(--wc-text-secondary)", borderColor: hoveredMore || open ? "var(--wc-text-secondary)" : "var(--wc-border-strong)", background: hoveredMore || open ? "var(--wc-bg-hover)" : "var(--wc-bg-surface)", transition: "color 0.12s, border-color 0.12s, background 0.12s" }}
             onClick={(event) => { event.stopPropagation(); setOpen((value) => !value); }} onMouseEnter={() => setHoveredMore(true)} onMouseLeave={() => setHoveredMore(false)} title={t("toolbar.otherTitle")}>
-            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14" fill="currentColor" style={{ flexShrink: 0, opacity: 0.9 }}>
-              <rect x="1" y="1" width="5" height="5" rx="1" /><rect x="8" y="1" width="5" height="5" rx="1" />
-              <rect x="1" y="8" width="5" height="5" rx="1" /><rect x="8" y="8" width="5" height="5" rx="1" />
-            </svg>{t("toolbar.other")}<span style={{ fontSize: 9, opacity: 0.7 }}>▾</span>
+            <SquaresFour size={24} weight="bold" aria-hidden="true" /><span>{t("toolbar.other")}</span><CaretDown size={11} weight="bold" aria-hidden="true" style={{ position: "absolute", right: 5, top: 5 }} />
           </button>
-          {open && <div style={{ position: "absolute", left: 0, top: "100%", marginTop: 4, zIndex: 10001, background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)", borderRadius: 6, boxShadow: "0 8px 24px rgba(0,0,0,0.6)", padding: 4, minWidth: 262, maxHeight: "70vh", overflowY: "auto" }}>{menuItems}</div>}
+          {open && <div role="menu" aria-label={t("toolbar.otherTitle")} style={{ position: "absolute", left: 0, top: "100%", marginTop: 4, zIndex: 10001, background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)", borderRadius: 6, boxShadow: "0 8px 24px rgba(0,0,0,0.6)", padding: 4, minWidth: 262, maxHeight: "70vh", overflowY: "auto" }}>{menuItems}</div>}
         </div>}
         <div aria-hidden="true" style={{ position: "absolute", visibility: "hidden", pointerEvents: "none", whiteSpace: "nowrap", display: "flex", gap: 6, left: -10000, top: 0 }}>
           {descriptors.filter((item) => item.primary).map(({ type }) => mainButton(type, true))}
-          <button ref={moreMeasureRef} style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5 }}><svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><rect x="1" y="1" width="5" height="5" rx="1" /><rect x="8" y="1" width="5" height="5" rx="1" /><rect x="1" y="8" width="5" height="5" rx="1" /><rect x="8" y="8" width="5" height="5" rx="1" /></svg>{t("toolbar.other")}<span>▾</span></button>
+          <button ref={moreMeasureRef} style={{ ...buttonStyle, width: "max-content", minWidth: 72, minHeight: 62, padding: "6px 10px", display: "inline-flex", flexDirection: "column", justifyContent: "center", alignItems: "center", gap: 3, fontSize: 13 }}><SquaresFour size={24} />{t("toolbar.other")}</button>
         </div>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, flex: "0 0 auto", whiteSpace: "nowrap" }}>
-        <button style={{ ...buttonStyle, flexShrink: 0 }} onClick={() => onToggleRightPanel("active-cues")} title={t("toolbar.activeCuesToggle")} aria-pressed={rightPanel === "active-cues"}>
-          <Activity size={14} style={{ verticalAlign: "-2px", marginRight: 5 }} />{t("menus.activeCues")}
+      <div className="stage-toolbar-tools" style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto", marginLeft: "auto", whiteSpace: "nowrap" }}>
+        <button className="stage-action-button" style={{ ...buttonStyle, minHeight: 60, padding: "7px 12px", borderRadius: 6, flexShrink: 0, fontSize: 12, fontWeight: 600 }} onClick={() => onToggleRightPanel("active-cues")} title={t("toolbar.activeCuesToggle")} aria-pressed={activeCuesOpen ?? rightPanel === "active-cues"}>
+          <Activity size={17} weight="bold" style={{ verticalAlign: "-3px", marginRight: 7 }} />{t("menus.activeCues")}
           {activeCueCount > 0 && <span style={{ marginLeft: 6, padding: "1px 5px", borderRadius: 8, background: "var(--wc-bg-hover)", color: "var(--wc-text-secondary)", fontSize: 10 }}>{activeCueCount}</span>}
         </button>
-        <button style={{ ...buttonStyle, flexShrink: 0 }} onClick={() => onToggleRightPanel("inspector")} title={t("toolbar.inspectorToggle")} aria-pressed={rightPanel === "inspector"}>{t("menus.inspector")}</button>
-        <button style={{ ...buttonStyle, flexShrink: 0 }} onClick={onSettings} title={`${t("app.preferences")} (Ctrl+,)`} aria-label={t("app.preferences")}>⚙ {t("menus.settings")}</button>
+        <button className="stage-action-button" style={{ ...buttonStyle, minHeight: 60, padding: "7px 12px", borderRadius: 6, flexShrink: 0, fontSize: 12, fontWeight: 600 }} onClick={() => onToggleRightPanel("inspector")} title={t("toolbar.inspectorToggle")} aria-pressed={rightPanel === "inspector"}>{t("menus.inspector")}</button>
       </div>
     </div>
   );
