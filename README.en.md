@@ -40,6 +40,8 @@ The **Playhead** points to the Cue that will start when you press **GO**. After 
 
 You can choose how a Cue advances the list. **Auto-Continue** starts the next Cue after a set delay measured from the current action's start, so Cues can overlap. **Auto-Follow** starts the next Cue after the current action finishes and its delay elapses.
 
+In the Cue List, **Up/Down** moves through visible rows and moves the Playhead; **Space** starts the selected Cue. Double-click a Group or Number row to expand or collapse it. **Left/Right** collapses and expands the focused Group or Number.
+
 ## Screenshots
 
 ![Qlisa main window with its Cue List](docs/screenshots/main-window.png)
@@ -55,6 +57,7 @@ You can choose how a Cue advances the list. **Auto-Continue** starts the next Cu
 - Play audio and video; display images and text.
 - Set levels, fade in and out, trim the beginning and end, seek, and loop playback.
 - Choose audio devices, mix audio, and preview through headphones.
+- Headphone audition starts at the editor cursor; the editor's Play/Pause and seek controls operate the active audition.
 - Use multiple display outputs and route visual Cues to specific outputs.
 - Set separate image geometry for different outputs.
 
@@ -117,9 +120,11 @@ Qlisa is licensed under [GPL-3.0-or-later](LICENSE). Third-party components have
 ## Documentation
 
 Technical guides in docs are currently in English; the 1.5.11 release notes are available in English and Russian.
+The navigation and audition details describe source changes after 1.5.11; they are not included in the published 1.5.11 release. Manual checks are listed in the [follow-up regression checklist](docs/BUGFIXES_NEXT.md).
 
 - [Qlisa documentation](docs/README.md)
 - [Developer guide](docs/PROJECT_GUIDE.md)
 - [Release preparation](docs/RELEASING.md)
 - [Version 1.5.11 release notes](docs/RELEASE_NOTES_1.5.11.md)
+- [Follow-up regression checklist](docs/BUGFIXES_NEXT.md)
 - [License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)

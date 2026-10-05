@@ -38,6 +38,28 @@ owns cue state, playback, native audio/video/output windows, networking,
 lighting, timecode, workspace persistence, and device integration. The UI
 issues typed Tauri commands and listens for backend events.
 
+## Source updates after 1.5.11
+
+The working source contains seven follow-up fixes after the 1.5.11 baseline.
+They are not part of the published 1.5.11 release notes. Use
+[the manual regression checklist](BUGFIXES_NEXT.md) before release review.
+
+- Group and Number rows expand or collapse by double-click and Left/Right.
+- Headphone audition starts at the editor cursor; its play, pause, and seek
+  controls follow the active preview, including paused seeks.
+- Cue List Up/Down moves the visible selection and backend Playhead. Space GO
+  waits for the final arrow selection, including when navigation starts without
+  a selection.
+- Creating a Number places it at the first selected top-level cue and keeps
+  child order from the Cue List.
+- Cue List pre-wait and post-wait cells show transport progress.
+- A held final video frame does not block continuation during post-wait.
+- Automatic transition labels use Russian translations in the Russian UI.
+
+Focused implementation notes: [Cue List navigation](cue-list-navigation.md),
+[headphone preview transport](headphone-preview-transport.md), and
+[Wait progress and held video frames](cue-wait-and-hold.md).
+
 Features represented in the current tree include:
 
 - Cue-list editing, multi-selection, reorder/group, cue colors and notes,

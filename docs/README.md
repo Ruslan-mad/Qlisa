@@ -28,6 +28,14 @@
   trim-loop behavior, regression coverage, and runtime-test limits.
 - [Number timeline](number-timeline.md) — Number action offsets, trim ranges,
   finite repeats, waveform reuse, and timeline playhead behavior.
+- [Cue List navigation](cue-list-navigation.md) — visible-row keyboard
+  navigation, Group/Number expansion, and Number creation order.
+- [Headphone preview transport](headphone-preview-transport.md) — editor
+  cursor, playback, pause, and seek behavior for isolated headphone audition.
+- [Cue wait progress and held video frames](cue-wait-and-hold.md) — Pre-Wait and
+  Post-Wait progress cells plus Auto-Follow behavior at a held final frame.
+- [Follow-up regression checklist](BUGFIXES_NEXT.md) — manual checks for seven
+  source fixes after the 1.5.11 baseline; unchecked items are not verified.
 - [Media preview cache](cache.md) — project-scoped waveform, thumbnail, and
   filmstrip cache behavior, invalidation, promotion, and storage limits.
 - [Audio underrun diagnostics](audio-underrun-diagnostics.md) — callback-safe
