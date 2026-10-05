@@ -30,6 +30,7 @@ use tauri::{Emitter, Manager, State};
 struct BenchState {
     output: Arc<OutputEngine>,
     frontend: Arc<std::sync::Mutex<FrontendAggregate>>,
+    capture_enabled: bool,
 }
 
 #[derive(Default)]
@@ -60,8 +61,10 @@ impl FrontendAggregate {
         if metrics.active {
             self.active_samples = self.active_samples.saturating_add(1);
         }
-        self.received_fps_total += metrics.received_fps.unwrap_or_default();
-        self.displayed_fps_total += metrics.displayed_fps.unwrap_or_default();
+        if metrics.active {
+            self.received_fps_total += metrics.received_fps.unwrap_or_default();
+            self.displayed_fps_total += metrics.displayed_fps.unwrap_or_default();
+        }
         self.received_frames = self.received_frames.saturating_add(metrics.received_frames);
         self.displayed_frames = self.displayed_frames.saturating_add(metrics.displayed_frames);
         if let Some(value) = metrics.frame_age_average_ms {
@@ -94,8 +97,9 @@ impl FrontendAggregate {
         json!({
             "samples": self.samples,
             "activeSamples": self.active_samples,
-            "receivedFpsAverage": (self.samples > 0).then(|| self.received_fps_total / self.samples as f64),
-            "displayedFpsAverage": (self.samples > 0).then(|| self.displayed_fps_total / self.samples as f64),
+            "receivedFpsAverage": (self.active_samples > 0).then(|| self.received_fps_total / self.active_samples as f64),
+            "displayedFpsAverage": (self.active_samples > 0).then(|| self.displayed_fps_total / self.active_samples as f64),
+            "fpsAverageSampleCount": self.active_samples,
             "receivedFrames": self.received_frames,
             "displayedFrames": self.displayed_frames,
             "frameAgeAverageMs": (self.frame_age_average_samples > 0).then(|| self.frame_age_average_total / self.frame_age_average_samples as f64),
@@ -112,8 +116,12 @@ impl FrontendAggregate {
 }
 
 #[tauri::command]
-fn list_output_monitor_sources() -> Vec<OutputMonitorSource> {
-    vec![OutputMonitorSource { id: "default".into(), name: "Main".into() }]
+fn list_output_monitor_sources(state: State<'_, BenchState>) -> Vec<OutputMonitorSource> {
+    if state.capture_enabled {
+        vec![OutputMonitorSource { id: "default".into(), name: "Main".into() }]
+    } else {
+        Vec::new()
+    }
 }
 
 #[tauri::command]
@@ -328,11 +336,13 @@ fn configure_output(output: &OutputEngine, path: &Path, layers: u32, is_image: b
             preload: false,
         })?;
     }
-    output.set_output_transform(OutputTransform {
-        scale: 0.98,
-        corners: [[0.005, 0.005], [-0.005, 0.005], [0.005, -0.005], [-0.005, -0.005]],
-        ..OutputTransform::default()
-    });
+    if env::var_os("QLISA_MONITOR_BENCH_NO_OVERLAY").is_none() {
+        output.set_output_transform(OutputTransform {
+            scale: 0.98,
+            corners: [[0.005, 0.005], [-0.005, 0.005], [0.005, -0.005], [-0.005, -0.005]],
+            ..OutputTransform::default()
+        });
+    }
     Ok(())
 }
 
@@ -371,6 +381,7 @@ fn run_webview_benchmark(
     let (_, ram_end) = process_metrics();
     let frontend_summary = frontend.lock().map(|metrics| metrics.summary()).unwrap_or_else(|_| json!({"error":"metrics lock poisoned"}));
     let video_end = video_runtime_summary(&output);
+    let capture = output.output_monitor_diagnostics(Some("default")).ok();
     output.panic_stop();
     println!("{}", json!({
         "mode": mode, "durationSeconds": seconds, "layers": layers, "imageInput": is_image,
@@ -379,6 +390,7 @@ fn run_webview_benchmark(
         "workingSetStartBytes": ram_start, "workingSetEndBytes": ram_end,
         "workingSetMaximumBytes": (ram_max > 0).then_some(ram_max),
         "videoRuntimeStart": video_start, "videoRuntimeEnd": video_end,
+        "capture": capture,
         "frontend": frontend_summary, "includesIpcOrWebView": true,
     }));
     handle.exit(0);
@@ -416,7 +428,10 @@ fn main() -> Result<()> {
     env::set_var("APPDATA", &isolated_profile);
     if let Some(fps) = capture_fps {
         env::set_var("QLISA_MONITOR_CAPTURE_FPS", fps.to_string());
+    } else {
+        env::remove_var("QLISA_MONITOR_CAPTURE_FPS");
     }
+    let no_overlay = env::var_os("QLISA_MONITOR_BENCH_NO_OVERLAY").is_some();
 
     let mut context = tauri::generate_context!();
     if webview {
@@ -443,9 +458,10 @@ fn main() -> Result<()> {
                 let audio = AudioEngine::new_silent(&MachineAudioConfig::default());
                 let output = Arc::new(OutputEngine::new(audio, app.handle().clone())?);
                 configure_output(&output, &webview_video_path, layers, is_image)?;
-                output.set_output_timer(Some("Output Monitor Bench"));
-                output.set_output_monitor_source(Some("default"), 1)?;
-                app.manage(BenchState { output, frontend: Arc::default() });
+                if !no_overlay { output.set_output_timer(Some("Output Monitor Bench")); }
+                let capture_enabled = capture_fps.is_some();
+                if capture_enabled { output.set_output_monitor_source(Some("default"), 1)?; }
+                app.manage(BenchState { output, frontend: Arc::default(), capture_enabled });
                 Ok(())
             });
     }
@@ -488,7 +504,7 @@ fn main() -> Result<()> {
     let audio = AudioEngine::new_silent(&MachineAudioConfig::default());
     let output = Arc::new(OutputEngine::new(audio, app_handle)?);
     configure_output(&output, &video_path, layers, is_image)?;
-    output.set_output_timer(Some("Output Monitor Bench"));
+    if !no_overlay { output.set_output_timer(Some("Output Monitor Bench")); }
     if capture_fps.is_some() {
         output.set_output_monitor_source(Some("default"), 1)?;
     }
