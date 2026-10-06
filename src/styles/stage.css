@@ -53,9 +53,16 @@
 
 :root[data-theme="stage"] .stage-header,
 :root[data-theme="stage"] .stage-clock {
-  background: var(--wc-bg-deepest);
   color: var(--wc-text-bright);
   border-color: var(--wc-border);
+}
+
+:root[data-theme="stage"] .stage-header {
+  background: var(--wc-bg-deepest);
+}
+
+:root[data-theme="stage"] .stage-clock {
+  background: transparent;
 }
 
 :root[data-theme="stage"] .stage-clock {
