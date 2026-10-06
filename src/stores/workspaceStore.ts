@@ -1,13 +1,42 @@
 // Zustand store: workspace data, cue list, selection, and playhead.
 
 import { create } from "zustand";
-import type { CueId, CueListSummary, CueSummary, CueValidation, DisplayPreferences, GeneralPreferences, HealthAlert, WorkspaceInfo } from "../lib/types";
+import type { CueId, CueListSummary, CueSummary, CueValidation, DisplayPreferences, GeneralPreferences, HealthAlert, WorkspaceCueCatalogEntry, WorkspaceCueCatalogList, WorkspaceInfo } from "../lib/types";
 import { DEFAULT_DISPLAY_PREFS, DEFAULT_GENERAL_PREFS } from "../lib/types";
 import { normalizeCueSelection } from "../lib/cueSelection";
-import { checkWorkspace, getAllCues, getCueLists, getHealthAlerts, getPlayhead, getPreferences, getWorkspaceInfo } from "../lib/commands";
+import { commitIfCurrent, createCatalogRequestGuard } from "../lib/catalogRequestGuard";
+import { checkWorkspace, getAllCues, getCueLists, getHealthAlerts, getPlayhead, getPreferences, getWorkspaceCueCatalog, getWorkspaceInfo } from "../lib/commands";
+
+const catalogRequestGuard = createCatalogRequestGuard();
+let cueListRequestGeneration = 0;
+let cueStateRevision = 0;
+const cueStateOverrides = new Map<CueId, { revision: number; state: CueSummary["state"] }>();
+
+function mergeCatalogStateOverrides(
+  lists: WorkspaceCueCatalogList[],
+  sinceRevision: number,
+): WorkspaceCueCatalogList[] {
+  const apply = (cues: WorkspaceCueCatalogEntry[]): WorkspaceCueCatalogEntry[] => {
+    let changed = false;
+    const next = cues.map((cue) => {
+      const override = cueStateOverrides.get(cue.id);
+      const children = cue.children ? apply(cue.children) : cue.children;
+      const state = override && override.revision > sinceRevision ? override.state : cue.state;
+      if (state !== cue.state || children !== cue.children) {
+        changed = true;
+        return { ...cue, state, ...(children ? { children } : {}) };
+      }
+      return cue;
+    });
+    return changed ? next : cues;
+  };
+  return lists.map((list) => ({ ...list, cues: apply(list.cues) }));
+}
 
 interface WorkspaceState {
   cues: CueSummary[];
+  /** Read-only cue snapshots for every workspace list, including remote runtime state. */
+  cueCatalog: WorkspaceCueCatalogList[];
   cueLists: CueListSummary[];
   activeCueListId: string | null;
   selectedCueId: CueId | null;
@@ -30,6 +59,7 @@ interface WorkspaceState {
 
   // Actions
   refreshCues: () => Promise<void>;
+  refreshCueCatalog: () => Promise<void>;
   refreshValidation: () => Promise<void>;
   refreshHealth: () => Promise<void>;
   refreshCueLists: () => Promise<void>;
@@ -73,8 +103,22 @@ export function updateCueStateRecursive(
   return changed ? next : cues;
 }
 
+function updateCatalogStateRecursive(cues: WorkspaceCueCatalogEntry[], cueId: CueId, state: CueSummary["state"]): WorkspaceCueCatalogEntry[] {
+  let changed = false;
+  const next = cues.map((cue) => {
+    if (cue.id === cueId) { changed = true; return { ...cue, state }; }
+    if (cue.children) {
+      const children = updateCatalogStateRecursive(cue.children, cueId, state);
+      if (children !== cue.children) { changed = true; return { ...cue, children }; }
+    }
+    return cue;
+  });
+  return changed ? next : cues;
+}
+
 export const useWorkspaceStore = create<WorkspaceState>((set, _get) => ({
   cues: [],
+  cueCatalog: [],
   cueLists: [],
   activeCueListId: null,
   selectedCueId: null,
@@ -94,8 +138,23 @@ export const useWorkspaceStore = create<WorkspaceState>((set, _get) => ({
       const cues = await getAllCues();
       const playheadCueId = await getPlayhead();
       set({ cues, playheadCueId });
+      await _get().refreshCueCatalog();
     } catch (e) {
       console.error("Failed to refresh cues:", e);
+    }
+  },
+
+  refreshCueCatalog: async () => {
+    const requestGeneration = catalogRequestGuard.begin();
+    const stateRevision = cueStateRevision;
+    try {
+      const cueCatalog = await getWorkspaceCueCatalog();
+      commitIfCurrent(catalogRequestGuard, requestGeneration, cueCatalog, (snapshot) => {
+        set({ cueCatalog: mergeCatalogStateOverrides(snapshot, stateRevision) });
+        cueStateOverrides.clear();
+      });
+    } catch (e) {
+      console.error("Failed to refresh workspace cue catalog:", e);
     }
   },
 
@@ -122,21 +181,34 @@ export const useWorkspaceStore = create<WorkspaceState>((set, _get) => ({
   },
 
   refreshCueLists: async () => {
+    const listGeneration = ++cueListRequestGeneration;
+    const catalogGeneration = catalogRequestGuard.begin();
+    const stateRevision = cueStateRevision;
     try {
       const cueLists = await getCueLists();
+      const cueCatalog = await getWorkspaceCueCatalog();
+      if (listGeneration !== cueListRequestGeneration) return;
       set((prev) => {
         // Keep the active ID only if it still exists in the new list.
         const validId = cueLists.some((cl) => cl.id === prev.activeCueListId)
           ? prev.activeCueListId
           : (cueLists[0]?.id ?? null);
-        return { cueLists, activeCueListId: validId };
+        const catalogUpdate = catalogRequestGuard.isCurrent(catalogGeneration)
+          ? { cueCatalog: mergeCatalogStateOverrides(cueCatalog, stateRevision) }
+          : {};
+        if ("cueCatalog" in catalogUpdate) cueStateOverrides.clear();
+        return { cueLists, ...catalogUpdate, activeCueListId: validId };
       });
     } catch (e) {
       console.error("Failed to refresh cue lists:", e);
     }
   },
 
-  setCueLists: (lists, activeId) => set({ cueLists: lists, activeCueListId: activeId }),
+  setCueLists: (lists, activeId) => {
+    cueListRequestGeneration += 1;
+    catalogRequestGuard.invalidate();
+    set({ cueLists: lists, activeCueListId: activeId });
+  },
 
   refreshWorkspaceInfo: async () => {
     try {
@@ -162,7 +234,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, _get) => ({
   setPlayheadCueId: (id) => set({ playheadCueId: id }),
 
   updateCueState: (cueId, state) => {
-    set((prev) => ({ cues: updateCueStateRecursive(prev.cues, cueId, state) }));
+    cueStateRevision += 1;
+    cueStateOverrides.set(cueId, { revision: cueStateRevision, state });
+    set((prev) => ({
+      cues: updateCueStateRecursive(prev.cues, cueId, state),
+      cueCatalog: prev.cueCatalog.map((list) => {
+        const cues = updateCatalogStateRecursive(list.cues, cueId, state);
+        return cues === list.cues ? list : { ...list, cues };
+      }),
+    }));
   },
 
   markCuePlayed: (cueId) => set((prev) => {

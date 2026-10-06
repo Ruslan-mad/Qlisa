@@ -162,6 +162,31 @@ fn number_start_stop_targets(
     ids
 }
 
+fn number_start_stop_targets_in_workspace(
+    cue_lists: &[CueList],
+    source_list: usize,
+    source_id: CueId,
+    mode: NumberStartStopMode,
+    selected: &[CueId],
+) -> Vec<CueId> {
+    let Some(list) = cue_lists.get(source_list) else { return Vec::new(); };
+    let mut ids = number_start_stop_targets(list, source_id, mode, selected);
+    if mode == NumberStartStopMode::Selected {
+        let source_tree: HashSet<CueId> = list.get_recursive(&source_id).map(|cue| {
+            let mut tree = HashSet::new();
+            collect_subtree_ids(cue, &mut tree);
+            tree
+        }).unwrap_or_default();
+        for id in selected.iter().copied() {
+            if source_tree.contains(&id) { continue; }
+            let Some(target) = cue_lists.iter().find_map(|list| list.get_recursive(&id)) else { continue; };
+            if cue_tree_is_active(target) { ids.push(id); }
+        }
+    }
+    dedup_ids(&mut ids);
+    ids
+}
+
 fn is_external_number_flow_target(source_tree_ids: &HashSet<CueId>, target_id: CueId) -> bool {
     !source_tree_ids.contains(&target_id)
 }
@@ -265,6 +290,40 @@ impl Transport {
         Self { context }
     }
 
+    fn fire_immediate_continuation(
+        &mut self,
+        cue_lists: &mut [CueList],
+        list_index: usize,
+        source_id: CueId,
+        dispatched: &mut HashSet<CueId>,
+        continuation_guard: &mut HashSet<CueId>,
+    ) -> Result<GoResult> {
+        let Some((mode, post_wait, still_running, generation)) = cue_lists[list_index]
+            .get_recursive(&source_id)
+            .map(|cue| (cue.continue_mode(), cue.post_wait(), cue.is_running(), cue.play_generation())) else {
+            return Ok(Self::empty_go_result());
+        };
+        let immediate = mode == ContinueMode::AutoContinue && post_wait.is_zero()
+            || mode == ContinueMode::AutoFollow && !still_running && post_wait.is_zero();
+        if !immediate { return Ok(Self::empty_go_result()); }
+        if mode == ContinueMode::AutoContinue {
+            if let Some(source) = cue_lists[list_index].get_mut_recursive(&source_id) {
+                source.mark_auto_continue_fired();
+            }
+        }
+        let Some(plan) = cue_lists[list_index].continuation_plan(source_id)
+            .filter(|plan| plan.source_generation == generation).cloned() else {
+            return Ok(Self::empty_go_result());
+        };
+        let Some(target_id) = cue_lists[list_index].next_continuation_target(&plan) else {
+            cue_lists[list_index].remove_continuation_plan(source_id);
+            return Ok(Self::empty_go_result());
+        };
+        cue_lists[list_index].take_continuation_plan(source_id);
+        cue_lists[list_index].playhead_cue_id = Some(target_id);
+        self.go_in_lists_with_guards(cue_lists, list_index, dispatched, continuation_guard)
+    }
+
     fn empty_go_result() -> GoResult {
         GoResult {
             triggered: Vec::new(),
@@ -279,7 +338,7 @@ impl Transport {
     /// the manager's owner check. The recursive walk also covers Group
     /// children and nested Groups, where the ordinary top-level GO filter
     /// cannot see the running cue.
-    fn reconcile_browser_ownership(&self, cue_list: &mut CueList) -> Vec<CueId> {
+    fn reconcile_browser_ownership(&self, cue_lists: &mut [CueList]) -> Vec<CueId> {
         let starts = self.context.take_browser_starts();
         if starts.is_empty() {
             return Vec::new();
@@ -287,7 +346,10 @@ impl Transport {
         let Some(owner_id) = starts.last().copied() else {
             return Vec::new();
         };
-        let is_active_browser = cue_list
+        let Some(owner_list) = cue_lists.iter().position(|list| list.get_recursive(&owner_id).is_some()) else {
+            return Vec::new();
+        };
+        let is_active_browser = cue_lists[owner_list]
             .get_recursive(&owner_id)
             .is_some_and(|cue| cue.cue_type() == CueType::Browser && cue.is_running());
         if !is_active_browser {
@@ -295,15 +357,20 @@ impl Transport {
         }
         let mut stopped = Vec::new();
         let mut active_ids = Vec::new();
-        collect_active_browser_ids(&cue_list.cues, &mut active_ids);
+        for cue_list in cue_lists.iter() {
+            collect_active_browser_ids(&cue_list.cues, &mut active_ids);
+        }
         for old_id in active_ids.into_iter().filter(|id| *id != owner_id) {
-            if let Some(old) = cue_list.get_mut_recursive(&old_id) {
-                if old.cue_type() == CueType::Browser && (old.is_running() || old.is_paused()) {
-                    let _ = old.stop(&self.context);
-                    stopped.push(old_id);
+            for cue_list in cue_lists.iter_mut() {
+                if let Some(old) = cue_list.get_mut_recursive(&old_id) {
+                    if old.cue_type() == CueType::Browser && (old.is_running() || old.is_paused()) {
+                        let _ = old.stop(&self.context);
+                        stopped.push(old_id);
+                    }
+                    cue_list.remove_continuation_plan(old_id);
+                    break;
                 }
             }
-            cue_list.remove_continuation_plan(old_id);
         }
         dedup_ids(&mut stopped);
         stopped
@@ -359,8 +426,42 @@ impl Transport {
         cue_list: &mut CueList,
         fired_ids: &[CueId],
     ) -> GoResult {
+        self.dispatch_fired_cues_in_lists(std::slice::from_mut(cue_list), 0, fired_ids, &mut HashSet::new(), &mut HashSet::new())
+    }
+
+    /// Workspace version of the existing action dispatcher. Every recursive
+    /// hop resolves the UUID to its owning list, while cycle and dedup guards
+    /// remain shared for the full dispatch tree.
+    pub(crate) fn dispatch_fired_cues_in_workspace(
+        &mut self,
+        cue_lists: &mut [CueList],
+        owner_list: usize,
+        fired_ids: &[CueId],
+    ) -> GoResult {
+        self.dispatch_fired_cues_with_guards(cue_lists, owner_list, fired_ids, &mut HashSet::new(), &mut HashSet::new())
+    }
+
+    fn dispatch_fired_cues_with_guards(
+        &mut self,
+        cue_lists: &mut [CueList],
+        owner_list: usize,
+        fired_ids: &[CueId],
+        dispatched: &mut HashSet<CueId>,
+        continuation_guard: &mut HashSet<CueId>,
+    ) -> GoResult {
+        self.dispatch_fired_cues_in_lists(cue_lists, owner_list, fired_ids, dispatched, continuation_guard)
+    }
+
+    fn dispatch_fired_cues_in_lists(
+        &mut self,
+        cue_lists: &mut [CueList],
+        owner_list: usize,
+        fired_ids: &[CueId],
+        dispatched: &mut HashSet<CueId>,
+        continuation_guard: &mut HashSet<CueId>,
+    ) -> GoResult {
         let mut result = ActionDispatchResult::default();
-        let mut dispatched = HashSet::new();
+        result.started_targets.extend(fired_ids.iter().copied());
         let mut path = HashSet::new();
         for cue_id in fired_ids.iter().copied() {
             // A previous action in the same Group batch may have stopped or
@@ -368,19 +469,14 @@ impl Transport {
             if result.cancelled_actions.contains(&cue_id) {
                 continue;
             }
-            self.dispatch_action_recursive(
-                cue_list,
-                cue_id,
-                &mut path,
-                &mut dispatched,
-                &mut result,
-            );
+            self.dispatch_action_recursive(cue_lists, cue_id, &mut path, dispatched, continuation_guard, &mut result);
         }
         dedup_ids(&mut result.fired);
         dedup_ids(&mut result.triggered);
         dedup_ids(&mut result.stopped);
-        result.stopped.extend(self.reconcile_browser_ownership(cue_list));
+        result.stopped.extend(self.reconcile_browser_ownership(cue_lists));
         dedup_ids(&mut result.stopped);
+        let _ = owner_list;
         GoResult {
             triggered: result.triggered,
             fired: result.fired,
@@ -389,11 +485,12 @@ impl Transport {
     }
 
     fn dispatch_action_recursive(
-        &self,
-        cue_list: &mut CueList,
+        &mut self,
+        cue_lists: &mut [CueList],
         cue_id: CueId,
         path: &mut HashSet<CueId>,
         dispatched: &mut HashSet<CueId>,
+        continuation_guard: &mut HashSet<CueId>,
         result: &mut ActionDispatchResult,
     ) {
         if result.cancelled_actions.contains(&cue_id)
@@ -402,7 +499,8 @@ impl Transport {
         {
             return;
         }
-        let specs = cue_list.get_recursive(&cue_id).map(|cue| {
+        let Some(list_index) = cue_lists.iter().position(|list| list.get_recursive(&cue_id).is_some()) else { return; };
+        let specs = cue_lists[list_index].get_recursive(&cue_id).map(|cue| {
             (
                 cue.fade_specification(),
                 cue.devamp_specification(),
@@ -419,7 +517,8 @@ impl Transport {
             let mut voice_infos: Vec<(VoiceId, f32, f32)> = Vec::new();
             let mut visual_targets: Vec<(VoiceId, f32)> = Vec::new();
             for target_id in &spec.target_cue_ids {
-                let Some(target) = cue_list.get_recursive(target_id) else {
+                let Some(target_index) = cue_lists.iter().position(|list| list.get_recursive(target_id).is_some()) else { continue; };
+                let Some(target) = cue_lists[target_index].get_recursive(target_id) else {
                     continue;
                 };
                 if target.is_visual() {
@@ -452,14 +551,15 @@ impl Transport {
                 .target_visual_alpha
                 .map(|alpha| 1.0 - alpha as f32 / 255.0)
                 .unwrap_or_else(|| spec.target_gain_linear.clamp(0.0, 1.0));
-            if let Some(cue) = cue_list.get_mut_recursive(&cue_id) {
+            if let Some(cue) = cue_lists[list_index].get_mut_recursive(&cue_id) {
                 cue.set_fade_voices(voice_infos, visual_targets, opacity);
             }
         }
 
         if let Some((stop_at_end, target_ids)) = devamp_spec {
             for target_id in target_ids {
-                let Some(target) = cue_list.get_recursive(&target_id) else {
+                let Some(target_index) = cue_lists.iter().position(|list| list.get_recursive(&target_id).is_some()) else { continue; };
+                let Some(target) = cue_lists[target_index].get_recursive(&target_id) else {
                     continue;
                 };
                 if target.is_visual() {
@@ -484,7 +584,7 @@ impl Transport {
         if let Some((hard, target_ids)) = stop_spec {
             let stop_all = target_ids.is_empty();
             let ids_to_stop: Vec<CueId> = if target_ids.is_empty() {
-                cue_list
+                cue_lists[list_index]
                     .cues
                     .iter()
                     .filter(|cue| cue_tree_is_active(cue.as_ref()) && cue.id() != cue_id)
@@ -494,7 +594,8 @@ impl Transport {
                 target_ids.into_iter().filter(|id| *id != cue_id).collect()
             };
             for target_id in ids_to_stop {
-                if let Some(target) = cue_list.get_mut_recursive(&target_id) {
+                if let Some(target_index) = cue_lists.iter().position(|list| list.get_recursive(&target_id).is_some()) {
+                  if let Some(target) = cue_lists[target_index].get_mut_recursive(&target_id) {
                     collect_subtree_ids(target, &mut result.cancelled_actions);
                     collect_running_ids(target, &mut result.stopped);
                     result.stopped.push(target_id);
@@ -503,50 +604,50 @@ impl Transport {
                     } else {
                         let _ = target.stop(&self.context);
                     }
+                  }
+                  let cancelled: Vec<CueId> = result.cancelled_actions.iter().copied().collect();
+                  for cancelled_id in cancelled { for list in cue_lists.iter_mut() { list.remove_continuation_plan(cancelled_id); } }
+                  cue_lists[target_index].remove_continuation_plan(target_id);
                 }
-                let cancelled: Vec<CueId> = result.cancelled_actions.iter().copied().collect();
-                for cancelled_id in cancelled {
-                    cue_list.remove_continuation_plan(cancelled_id);
-                }
-                cue_list.remove_continuation_plan(target_id);
             }
             if stop_all {
                 // A source may already be reset to Standby while its delayed
                 // Auto-Follow is pending. Stop All still cancels that chain.
-                cue_list.clear_continuation_plans();
+                cue_lists[list_index].clear_continuation_plans();
             }
             dedup_ids(&mut result.stopped);
         }
 
         if let Some((action, target_ids)) = control_spec {
             for target_id in target_ids.into_iter().filter(|id| *id != cue_id) {
+                let Some(target_index) = cue_lists.iter().position(|list| list.get_recursive(&target_id).is_some()) else { continue; };
                 if action == ControlAction::Goto {
-                    let goto_succeeded = if cue_list.index_of(&target_id).is_some() {
-                        cue_list.playhead_cue_id = Some(target_id);
+                    let goto_succeeded = if cue_lists[target_index].index_of(&target_id).is_some() {
+                        cue_lists[target_index].playhead_cue_id = Some(target_id);
                         true
                     } else {
                         // A nested Goto changes the selection path, not target
                         // cue execution; keep GoResult's fired semantics.
-                        set_nested_group_playhead(&mut cue_list.cues, target_id)
+                        set_nested_group_playhead(&mut cue_lists[target_index].cues, target_id)
                     };
                     if goto_succeeded {
                         // Explicit Goto is a flow change and cancels existing
                         // delayed chains. Transport::go may bind a fresh plan
                         // for this Goto cue after action dispatch completes.
-                        cue_list.clear_continuation_plans();
+                        cue_lists[target_index].clear_continuation_plans();
                     }
                     continue;
                 }
 
                 let target_successors = if action == ControlAction::Start {
-                    cue_list.continuation_successors(target_id)
+                    cue_lists[target_index].continuation_successors(target_id)
                 } else {
                     None
                 };
                 let mut nested_fired = Vec::new();
                 let mut target_started = false;
                 let mut target_generation_before = None;
-                if let Some(target) = cue_list.get_mut_recursive(&target_id) {
+                if let Some(target) = cue_lists[target_index].get_mut_recursive(&target_id) {
                     match action {
                         ControlAction::Start
                             if !path.contains(&target_id)
@@ -585,38 +686,41 @@ impl Transport {
                 }
                 if target_started {
                     let new_target_execution = target_generation_before.is_some_and(|before| {
-                        cue_list
+                        cue_lists[target_index]
                             .get_recursive(&target_id)
                             .is_some_and(|target| target.play_generation() != before)
                     });
                     if new_target_execution {
                         if let Some(successors) = target_successors {
                             let continuation =
-                                cue_list.get_recursive(&target_id).and_then(|target| {
+                                cue_lists[target_index].get_recursive(&target_id).and_then(|target| {
                                     (target.continue_mode() != ContinueMode::DoNotContinue)
                                         .then_some(target.play_generation())
                                 });
                             if let Some(generation) = continuation {
-                                cue_list.bind_continuation(target_id, generation, successors);
+                                cue_lists[target_index].bind_continuation(target_id, generation, successors);
                             } else {
-                                cue_list.remove_continuation_plan(target_id);
+                                cue_lists[target_index].remove_continuation_plan(target_id);
                             }
                         }
                     }
                     result.fired.push(target_id);
                     result.fired.extend(nested_fired.iter().copied());
                     for nested_id in nested_fired {
-                        self.dispatch_action_recursive(
-                            cue_list, nested_id, path, dispatched, result,
-                        );
+                        self.dispatch_action_recursive(cue_lists, nested_id, path, dispatched, continuation_guard, result);
                     }
-                    self.dispatch_action_recursive(cue_list, target_id, path, dispatched, result);
+                    self.dispatch_action_recursive(cue_lists, target_id, path, dispatched, continuation_guard, result);
+                    if let Ok(chained) = self.fire_immediate_continuation(cue_lists, target_index, target_id, dispatched, continuation_guard) {
+                        result.fired.extend(chained.fired);
+                        result.triggered.extend(chained.triggered);
+                        result.stopped.extend(chained.stopped);
+                    }
                 }
                 if action == ControlAction::Reset {
-                    cue_list.remove_continuation_plan(target_id);
+                    cue_lists[target_index].remove_continuation_plan(target_id);
                     let cancelled: Vec<CueId> = result.cancelled_actions.iter().copied().collect();
                     for cancelled_id in cancelled {
-                        cue_list.remove_continuation_plan(cancelled_id);
+                        for list in cue_lists.iter_mut() { list.remove_continuation_plan(cancelled_id); }
                     }
                 }
             }
@@ -644,7 +748,28 @@ impl Transport {
     ///    the Stop Cue would immediately kill.
     /// 6. Chain via Auto-Continue (post_wait = 0) or instant Auto-Follow.
     pub fn go(&mut self, cue_list: &mut CueList) -> Result<GoResult> {
-        let cue_id = match cue_list.playhead_cue_id {
+        self.go_in_lists(std::slice::from_mut(cue_list), 0)
+    }
+
+    /// Run the active Playhead in one list while allowing its action specs to
+    /// address cues in every list in the workspace.
+    pub fn go_in_workspace(&mut self, cue_lists: &mut [CueList], owner_list: usize) -> Result<GoResult> {
+        self.go_in_lists(cue_lists, owner_list)
+    }
+
+    fn go_in_lists(&mut self, cue_lists: &mut [CueList], list_index: usize) -> Result<GoResult> {
+        self.go_in_lists_with_guards(cue_lists, list_index, &mut HashSet::new(), &mut HashSet::new())
+    }
+
+    fn go_in_lists_with_guards(
+        &mut self,
+        cue_lists: &mut [CueList],
+        list_index: usize,
+        dispatched: &mut HashSet<CueId>,
+        continuation_guard: &mut HashSet<CueId>,
+    ) -> Result<GoResult> {
+        if list_index >= cue_lists.len() { return Ok(Self::empty_go_result()); }
+        let cue_id = match cue_lists[list_index].playhead_cue_id {
             Some(id) => id,
             None => {
                 return Ok(GoResult {
@@ -657,30 +782,30 @@ impl Transport {
 
         // If the cue at the playhead is disabled (e.g., toggled while the
         // playhead was parked on it), advance past it and retry.
-        if cue_list.get(&cue_id).is_some_and(|c| c.is_disabled()) {
-            cue_list.advance_playhead();
-            return self.go(cue_list);
+        if cue_lists[list_index].get(&cue_id).is_some_and(|c| c.is_disabled()) {
+            cue_lists[list_index].advance_playhead();
+            return self.go_in_lists_with_guards(cue_lists, list_index, dispatched, continuation_guard);
         }
 
         // If the cue wants to absorb this GO (e.g., a Sequential Group paused
         // mid-sequence), delegate to the cue and skip outer Playhead advancement.
-        if cue_list.get(&cue_id).is_some_and(|c| c.absorbs_go()) {
-            if let Some(cue) = cue_list.get_mut(&cue_id) {
+        if cue_lists[list_index].get(&cue_id).is_some_and(|c| c.absorbs_go()) {
+            if let Some(cue) = cue_lists[list_index].get_mut(&cue_id) {
                 cue.go(&self.context)?;
             }
             let mut fired = vec![cue_id];
-            if let Some(cue) = cue_list.get_mut(&cue_id) {
+            if let Some(cue) = cue_lists[list_index].get_mut(&cue_id) {
                 fired.extend(cue.take_fired_cue_ids());
             }
-            let action_result = self.dispatch_fired_cues(cue_list, &fired);
+            let action_result = self.dispatch_fired_cues_with_guards(cue_lists, list_index, &fired, dispatched, continuation_guard);
             fired.extend(action_result.fired);
             let mut triggered = vec![cue_id];
             triggered.extend(action_result.triggered);
             let mut stopped = action_result.stopped;
             // If that GO fired the group's last child, release the outer Playhead
             // to the cue after the group so the next GO continues the outer list.
-            if cue_list.get(&cue_id).is_some_and(|c| c.released_playhead()) {
-                cue_list.advance_playhead();
+            if cue_lists[list_index].get(&cue_id).is_some_and(|c| c.released_playhead()) {
+                cue_lists[list_index].advance_playhead();
             }
             dedup_ids(&mut fired);
             dedup_ids(&mut triggered);
@@ -694,8 +819,8 @@ impl Transport {
 
         // Freeze this execution's successor path before advancing the visible
         // Playhead or dispatching actions (a Goto action may move it).
-        let continuation_successors = cue_list.continuation_successors(cue_id);
-        let (source_was_active, source_generation_before) = cue_list
+        let continuation_successors = cue_lists[list_index].continuation_successors(cue_id);
+        let (source_was_active, source_generation_before) = cue_lists[list_index]
             .get(&cue_id)
             .map(|cue| {
                 (
@@ -706,18 +831,18 @@ impl Transport {
             .unwrap_or((false, 0));
 
         // Advance playhead before triggering (matches QLab behaviour).
-        cue_list.advance_playhead();
+        cue_lists[list_index].advance_playhead();
 
         // Stop any running cues that should automatically stop on the next GO
         // (only the Text Cue opts in — visual cues are layers and never
         // auto-stop each other).  If a visual type ever opts back in, it only
         // stops when the incoming cue is also visual.
-        let incoming_is_visual = cue_list
+        let incoming_is_visual = cue_lists[list_index]
             .get(&cue_id)
             .map(|c| c.is_visual())
             .unwrap_or(false);
 
-        let top_level_stop_ids: Vec<CueId> = cue_list
+        let top_level_stop_ids: Vec<CueId> = cue_lists[list_index]
             .cues
             .iter()
             .filter(|c| {
@@ -729,41 +854,43 @@ impl Transport {
             .map(|c| c.id())
             .collect();
         for id in &top_level_stop_ids {
-            if let Some(cue) = cue_list.get_mut(id) {
+            if let Some(cue) = cue_lists[list_index].get_mut(id) {
                 let _ = cue.stop(&self.context);
             }
-            cue_list.remove_continuation_plan(*id);
+            cue_lists[list_index].remove_continuation_plan(*id);
         }
 
         // Number can optionally clear currently-running media before its
         // master starts. Resolve targets against the full recursive list so
         // selected nested cues work exactly like command targets.
-        let number_start_stop_ids = cue_list
+        let number_start_stop_ids = cue_lists[list_index]
             .get(&cue_id)
             .and_then(|cue| cue.number_start_stop_specification())
-            .map(|(mode, selected)| number_start_stop_targets(cue_list, cue_id, mode, &selected))
+            .map(|(mode, selected)| number_start_stop_targets_in_workspace(cue_lists, list_index, cue_id, mode, &selected))
             .unwrap_or_default();
         for id in &number_start_stop_ids {
-            if let Some(cue) = cue_list.get_mut_recursive(id) {
+            if let Some(target_index) = cue_lists.iter().position(|list| list.get_recursive(id).is_some()) {
+              if let Some(cue) = cue_lists[target_index].get_mut_recursive(id) {
                 let _ = cue.stop(&self.context);
+              }
+              cue_lists[target_index].remove_continuation_plan(*id);
             }
-            cue_list.remove_continuation_plan(*id);
         }
 
         // Trigger the cue.
         {
-            let cue = cue_list
+            let cue = cue_lists[list_index]
                 .get_mut(&cue_id)
                 .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
             cue.go(&self.context)?;
         }
         let mut fired = vec![cue_id];
-        if let Some(cue) = cue_list.get_mut(&cue_id) {
+        if let Some(cue) = cue_lists[list_index].get_mut(&cue_id) {
             fired.extend(cue.take_fired_cue_ids());
         }
 
         // All action cue side effects use the shared recursive dispatcher.
-        let action_result = self.dispatch_fired_cues(cue_list, &fired);
+        let action_result = self.dispatch_fired_cues_with_guards(cue_lists, list_index, &fired, dispatched, continuation_guard);
         fired.extend(action_result.fired);
         let mut stopped = top_level_stop_ids;
         stopped.extend(number_start_stop_ids);
@@ -772,7 +899,7 @@ impl Transport {
 
         // Read continue-mode metadata after go() (state may have changed for
         // instant cues that complete synchronously).
-        let (continue_mode, post_wait, is_still_running, holds_playhead) = cue_list
+        let (continue_mode, post_wait, is_still_running, holds_playhead) = cue_lists[list_index]
             .cues
             .iter()
             .find(|c| c.id() == cue_id)
@@ -785,7 +912,7 @@ impl Transport {
                 )
             })
             .ok_or_else(|| anyhow!("Cue not found after go: {:?}", cue_id))?;
-        let source_generation = cue_list
+        let source_generation = cue_lists[list_index]
             .get(&cue_id)
             .map(|cue| cue.play_generation())
             .unwrap_or(0);
@@ -795,15 +922,15 @@ impl Transport {
             if execution_started && continue_mode != ContinueMode::DoNotContinue {
                 match (continuation_successors, Some(source_generation)) {
                     (Some(successors), Some(generation)) => {
-                        Some(cue_list.bind_continuation(cue_id, generation, successors))
+                        Some(cue_lists[list_index].bind_continuation(cue_id, generation, successors))
                     }
                     _ => {
-                        cue_list.remove_continuation_plan(cue_id);
+                        cue_lists[list_index].remove_continuation_plan(cue_id);
                         None
                     }
                 }
             } else if execution_started {
-                cue_list.remove_continuation_plan(cue_id);
+                cue_lists[list_index].remove_continuation_plan(cue_id);
                 None
             } else {
                 None
@@ -815,7 +942,7 @@ impl Transport {
         // forward; we move it back here.  The event loop will advance it again
         // once the group completes.
         if is_still_running && holds_playhead {
-            cue_list.playhead_cue_id = Some(cue_id);
+            cue_lists[list_index].playhead_cue_id = Some(cue_id);
         }
 
         // Determine whether to chain immediately:
@@ -831,7 +958,7 @@ impl Transport {
                     && post_wait.is_zero()));
 
         if execution_started && continue_mode == ContinueMode::AutoContinue && post_wait.is_zero() {
-            if let Some(cue) = cue_list.get_mut(&cue_id) {
+            if let Some(cue) = cue_lists[list_index].get_mut(&cue_id) {
                 cue.mark_auto_continue_fired();
             }
         }
@@ -843,13 +970,18 @@ impl Transport {
 
         if chain_now {
             let mut rest = if let Some(token) = continuation_token {
-                let plan = cue_list
+                let plan = cue_lists[list_index]
                     .continuation_plan(cue_id)
                     .filter(|plan| plan.token == token)
                     .cloned();
                 if let Some(plan) = plan {
-                    cue_list.take_continuation_plan(cue_id);
-                    self.go_to_continuation_target(cue_list, &plan)?
+                    cue_lists[list_index].take_continuation_plan(cue_id);
+                    if let Some(target_id) = cue_lists[list_index].next_continuation_target(&plan) {
+                        cue_lists[list_index].playhead_cue_id = Some(target_id);
+                        if continuation_guard.insert(cue_id) {
+                            self.go_in_lists_with_guards(cue_lists, list_index, dispatched, continuation_guard)?
+                        } else { Self::empty_go_result() }
+                    } else { Self::empty_go_result() }
                 } else {
                     Self::empty_go_result()
                 }
@@ -882,6 +1014,79 @@ impl Transport {
     pub fn go_by_id(&mut self, cue_list: &mut CueList, cue_id: &CueId) -> Result<GoResult> {
         cue_list.set_playhead(Some(*cue_id))?;
         self.go(cue_list)
+    }
+
+    /// Park the owning list on a UUID-resolved cue and run the normal GO path.
+    /// Cart, MIDI, and timecode triggers must keep ordinary GO side effects.
+    pub fn go_by_id_in_workspace(
+        &mut self,
+        cue_lists: &mut [CueList],
+        cue_id: &CueId,
+    ) -> Result<GoResult> {
+        let list_index = cue_lists.iter().position(|list| list.get_recursive(cue_id).is_some())
+            .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
+        cue_lists[list_index].set_playhead(Some(*cue_id))?;
+        self.go_in_lists(cue_lists, list_index)
+    }
+
+    /// Hard-stop selected Fade targets wherever they live. Return the active
+    /// cue IDs that changed so the event loop can publish their exact states.
+    pub(crate) fn hard_stop_targets_in_workspace(
+        &mut self,
+        cue_lists: &mut [CueList],
+        target_ids: &[CueId],
+    ) -> Vec<CueId> {
+        let mut stopped = Vec::new();
+        let mut seen = HashSet::new();
+        for target_id in target_ids.iter().copied() {
+            if !seen.insert(target_id) { continue; }
+            let Some(list_index) = cue_lists.iter().position(|list| list.get_recursive(&target_id).is_some()) else { continue; };
+            let mut subtree_ids = HashSet::new();
+            let mut active_ids = Vec::new();
+            if let Some(target) = cue_lists[list_index].get_recursive(&target_id) {
+                collect_subtree_ids(target, &mut subtree_ids);
+                collect_running_ids(target, &mut active_ids);
+            }
+            if !active_ids.is_empty() {
+                stopped.extend(active_ids);
+                if let Some(target) = cue_lists[list_index].get_mut_recursive(&target_id) {
+                    let _ = target.hard_stop(&self.context);
+                }
+            }
+            for id in subtree_ids {
+                cue_lists[list_index].remove_continuation_plan(id);
+            }
+        }
+        dedup_ids(&mut stopped);
+        stopped
+    }
+
+    pub fn stop_cue_in_workspace(&mut self, cue_lists: &mut [CueList], cue_id: &CueId) -> Result<()> {
+        let index = cue_lists.iter().position(|list| list.get_recursive(cue_id).is_some())
+            .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
+        cue_lists[index].get_mut_recursive(cue_id).unwrap().stop(&self.context)?;
+        cue_lists[index].remove_continuation_plan(*cue_id);
+        Ok(())
+    }
+
+    pub fn hard_stop_cue_in_workspace(&mut self, cue_lists: &mut [CueList], cue_id: &CueId) -> Result<()> {
+        let index = cue_lists.iter().position(|list| list.get_recursive(cue_id).is_some())
+            .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
+        cue_lists[index].get_mut_recursive(cue_id).unwrap().hard_stop(&self.context)?;
+        cue_lists[index].remove_continuation_plan(*cue_id);
+        Ok(())
+    }
+
+    pub fn pause_cue_in_workspace(&mut self, cue_lists: &mut [CueList], cue_id: &CueId) -> Result<()> {
+        let index = cue_lists.iter().position(|list| list.get_recursive(cue_id).is_some())
+            .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
+        cue_lists[index].get_mut_recursive(cue_id).unwrap().pause(&self.context)
+    }
+
+    pub fn resume_cue_in_workspace(&mut self, cue_lists: &mut [CueList], cue_id: &CueId) -> Result<()> {
+        let index = cue_lists.iter().position(|list| list.get_recursive(cue_id).is_some())
+            .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
+        cue_lists[index].get_mut_recursive(cue_id).unwrap().resume(&self.context)
     }
 
     /// Start targets requested by a Number after its final post-wait. This is
@@ -936,6 +1141,89 @@ impl Transport {
         dedup_ids(&mut triggered);
         dedup_ids(&mut stopped);
         GoResult { triggered, fired, stopped }
+    }
+
+    /// Dispatch a delayed continuation from its source list. The source's
+    /// generation and token are checked before the frozen successor is read.
+    pub fn continue_from_source_in_workspace(
+        &mut self,
+        cue_lists: &mut [CueList],
+        source_list: usize,
+        source_id: CueId,
+        token: u64,
+    ) -> Result<GoResult> {
+        let Some(list) = cue_lists.get(source_list) else { return Ok(Self::empty_go_result()); };
+        let Some(plan) = list.continuation_plan(source_id).cloned() else { return Ok(Self::empty_go_result()); };
+        if plan.token != token || plan.source_id != source_id { return Ok(Self::empty_go_result()); }
+        let valid = list.get_recursive(&source_id).is_some_and(|source| {
+            source.play_generation() == plan.source_generation
+                && source.continue_mode() != ContinueMode::DoNotContinue
+                && source.auto_continue_marker() != Some(false)
+        });
+        if !valid { cue_lists[source_list].remove_continuation_plan(source_id); return Ok(Self::empty_go_result()); }
+        cue_lists[source_list].take_continuation_plan(source_id);
+        let Some(target_id) = cue_lists[source_list].next_continuation_target(&plan) else { return Ok(Self::empty_go_result()); };
+        cue_lists[source_list].playhead_cue_id = Some(target_id);
+        self.go_in_lists(cue_lists, source_list)
+    }
+
+    /// Start delayed Number targets across the workspace. Preserve the saved
+    /// target order and reject every cue inside the Number's own Group tree.
+    pub fn start_number_targets_in_workspace(
+        &mut self,
+        cue_lists: &mut [CueList],
+        source_list: usize,
+        source_id: CueId,
+        target_ids: &[CueId],
+    ) -> GoResult {
+        let source_tree: HashSet<CueId> = cue_lists.get(source_list)
+            .and_then(|list| list.get_recursive(&source_id))
+            .map(|cue| { let mut ids = HashSet::new(); collect_subtree_ids(cue, &mut ids); ids })
+            .unwrap_or_default();
+        let mut ordered = target_ids.to_vec();
+        dedup_ids(&mut ordered);
+        let mut fired = Vec::new();
+        let mut triggered = Vec::new();
+        let mut started_ids = Vec::new();
+        let mut dispatched = HashSet::new();
+        let mut continuation_guard = HashSet::new();
+        for id in ordered.into_iter().filter(|id| !source_tree.contains(id)) {
+            let Some(index) = cue_lists.iter().position(|list| list.get_recursive(&id).is_some()) else { continue; };
+            let successors = cue_lists[index].continuation_successors(id);
+            let Some((generation_before, allowed)) = cue_lists[index].get_recursive(&id)
+                .map(|target| (target.play_generation(), !target.is_disabled() && !target.is_running() && !target.is_paused())) else { continue; };
+            if !allowed { continue; }
+            let mut nested = Vec::new();
+            let started = if let Some(target) = cue_lists[index].get_mut_recursive(&id) {
+                if target.go(&self.context).is_ok() { nested.extend(target.take_fired_cue_ids()); true } else { false }
+            } else { false };
+            if started {
+                let continuation = cue_lists[index].get_recursive(&id).and_then(|target| {
+                    (target.play_generation() != generation_before && target.continue_mode() != ContinueMode::DoNotContinue)
+                        .then_some(target.play_generation())
+                });
+                if let (Some(generation), Some(successors)) = (continuation, successors) {
+                    cue_lists[index].bind_continuation(id, generation, successors);
+                } else { cue_lists[index].remove_continuation_plan(id); }
+                fired.push(id);
+                fired.extend(nested);
+                triggered.push(id);
+                started_ids.push((index, id));
+            }
+        }
+        let mut result = self.dispatch_fired_cues_with_guards(cue_lists, source_list, &fired, &mut dispatched, &mut continuation_guard);
+        result.fired.extend(fired);
+        result.triggered.extend(triggered);
+        for (index, source_id) in started_ids {
+            if let Ok(mut chained) = self.fire_immediate_continuation(cue_lists, index, source_id, &mut dispatched, &mut continuation_guard) {
+                result.fired.append(&mut chained.fired);
+                result.triggered.append(&mut chained.triggered);
+                result.stopped.append(&mut chained.stopped);
+            }
+        }
+        dedup_ids(&mut result.fired);
+        dedup_ids(&mut result.triggered);
+        result
     }
 
     // -----------------------------------------------------------------------
@@ -1047,6 +1335,7 @@ impl Transport {
             .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
         cue.resume(&self.context)
     }
+
 }
 
 #[cfg(test)]

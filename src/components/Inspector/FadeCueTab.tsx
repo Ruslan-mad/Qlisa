@@ -1,7 +1,7 @@
 // Fade Cue main tab: targets, fade parameters, audio/visual goals, on-complete.
 // Extracted from BasicsTab so Basics stays identity-only.
 
-import type { CueSummary, FadeCueData, FadeShapes } from "../../lib/types";
+import type { FadeCueData, FadeShapes } from "../../lib/types";
 import { CurveEditor } from "../Curve/CurveEditor";
 
 /** Locked S-Curve — what a fade has always done, for a cue saved before
@@ -13,7 +13,7 @@ const DEFAULT_FADE_SHAPES: FadeShapes = {
 };
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { Grid2, MiniField, NumberInput, Section, SliderRow, ToggleRow } from "./Field";
-import { CueTargetPicker } from "./CueTargetPicker";
+import { CueTargetPicker, flattenCueCatalog } from "./CueTargetPicker";
 import { useLocale } from "../../i18n";
 
 export function FadeCueTab({
@@ -27,12 +27,10 @@ export function FadeCueTab({
   onOpenCurveEditor?: () => void;
 }) {
   const { t, locale } = useLocale();
-  const allCues = useWorkspaceStore((s) => s.cues);
+  const lists = useWorkspaceStore((s) => s.cueCatalog);
 
   const targetIds: string[] = cue.target_cue_ids ?? [];
-  const targetCues = targetIds
-    .map((id) => allCues.find((c) => c.id === id))
-    .filter((c): c is CueSummary => !!c);
+  const targetCues = flattenCueCatalog(lists).filter((cue) => targetIds.includes(cue.id));
   const hasAudio = targetCues.some((c) => c.cue_type === "audio");
   const hasVideo = targetCues.some((c) => c.cue_type === "video");
   const hasVisual = hasVideo || targetCues.some(
@@ -54,13 +52,13 @@ export function FadeCueTab({
     <>
       <Section title={t("inspectorCueUi.fadeTargets")}>
         <CueTargetPicker
-          allCues={allCues}
+          lists={lists}
           selfId={cue.id}
           selectedIds={targetIds}
           filterTypes={["audio", "video", "image", "camera", "group"]}
           onChange={(ids) => {
             const nums = ids
-              .map((id) => allCues.find((c) => c.id === id)?.number)
+              .map((id) => flattenCueCatalog(lists).find((c) => c.id === id)?.number)
               .filter((n): n is string => n != null);
             onSave({ target_cue_ids: ids, target_cue_numbers: nums });
           }}

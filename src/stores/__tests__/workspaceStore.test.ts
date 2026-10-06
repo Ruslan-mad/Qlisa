@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { CueSummary } from "../../lib/types";
+import type { WorkspaceCueCatalogList } from "../../lib/types";
 import { useWorkspaceStore } from "../workspaceStore";
 
 const summary = (id: string, children?: CueSummary[]): CueSummary => ({
@@ -50,6 +51,21 @@ describe("workspace cue state updates", () => {
     useWorkspaceStore.getState().updateCueState("missing", "running");
 
     expect(useWorkspaceStore.getState().cues[0]).toBe(group);
+  });
+
+  it("updates remote runtime state in the read-only catalog, including nested cues", () => {
+    const catalog: WorkspaceCueCatalogList[] = [{
+      id: "remote", name: "Remote", cues: [{
+        id: "parent", cue_type: "group", name: "Parent", number: "1", state: "standby", color: "none", duration_ms: null, is_disabled: false,
+        children: [{ id: "child", cue_type: "audio", name: "Child", number: "1.1", state: "standby", color: "none", duration_ms: 1000, is_disabled: false }],
+      }],
+    }];
+    useWorkspaceStore.setState({ cueCatalog: catalog });
+
+    useWorkspaceStore.getState().updateCueState("child", "running");
+
+    expect(useWorkspaceStore.getState().cueCatalog[0].cues[0].state).toBe("standby");
+    expect(useWorkspaceStore.getState().cueCatalog[0].cues[0].children?.[0].state).toBe("running");
   });
 });
 

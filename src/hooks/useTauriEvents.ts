@@ -7,6 +7,8 @@ import { useWorkspaceStore } from "../stores/workspaceStore";
 import { useTransportStore } from "../stores/transportStore";
 import { useTimingStore } from "../stores/timingStore";
 import { go, stopAll, hardStopAll, setPlayhead, pauseCue, resumeCue } from "../lib/commands";
+import { shouldApplyPlayheadMovedEvent } from "../lib/playheadEvents";
+import { flattenCatalogActiveCues } from "../components/ActiveCues/activeCueModel";
 import type {
   CueListsChangedEvent,
   CueFiredEvent,
@@ -79,7 +81,10 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
 
       unlisteners.push(
         await listen<PlayheadMovedEvent>("playhead-moved", (e) => {
-          setPlayheadCueId(e.payload.cue_id);
+          const activeListId = useWorkspaceStore.getState().activeCueListId;
+          if (shouldApplyPlayheadMovedEvent(e.payload.cue_list_id, activeListId)) {
+            setPlayheadCueId(e.payload.cue_id);
+          }
         })
       );
 
@@ -105,6 +110,7 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
           // dedicated preferences-updated event below.
           await loadDisplayPrefs();
           await loadGeneralPrefs();
+          await refreshCues();
           clearPlayedCueHistory();
         })
       );
@@ -200,7 +206,7 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
                 await hardStopAll();
                 break;
               case "pause_all": {
-                const running = useWorkspaceStore.getState().cues.filter(c => c.state === "running");
+                const running = flattenCatalogActiveCues(useWorkspaceStore.getState().cueCatalog).filter(c => c.state === "running");
                 for (const c of running) {
                   const { pauseCue } = await import("../lib/commands");
                   await pauseCue(c.id);
@@ -208,7 +214,7 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
                 break;
               }
               case "resume_all": {
-                const paused = useWorkspaceStore.getState().cues.filter(c => c.state === "paused");
+                const paused = flattenCatalogActiveCues(useWorkspaceStore.getState().cueCatalog).filter(c => c.state === "paused");
                 for (const c of paused) {
                   const { resumeCue } = await import("../lib/commands");
                   await resumeCue(c.id);
@@ -261,7 +267,7 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
                 break;
               }
               case "pause_toggle": {
-                const cues = useWorkspaceStore.getState().cues;
+                const cues = flattenCatalogActiveCues(useWorkspaceStore.getState().cueCatalog);
                 const running = cues.filter(c => c.state === "running");
                 const paused  = cues.filter(c => c.state === "paused");
                 if (running.length > 0) {

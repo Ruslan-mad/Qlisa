@@ -10,7 +10,7 @@ import { EditMenu } from "./components/MenuBar/EditMenu";
 import { CartView } from "./components/CueList/CartView";
 import { ShowModeView } from "./components/ShowMode/ShowModeView";
 import { ActiveCuesView } from "./components/ActiveCues/ActiveCuesView";
-import { toggleRightPanel, type RightPanelMode, flattenActiveCues } from "./components/ActiveCues/activeCueModel";
+import { toggleRightPanel, type RightPanelMode, flattenCatalogActiveCues } from "./components/ActiveCues/activeCueModel";
 import { CueListTabs } from "./components/CueList/CueListTabs";
 import { InspectorPanel } from "./components/Inspector/InspectorPanel";
 import { ClipEditorDock } from "./components/Editor/ClipEditorDock";
@@ -789,7 +789,7 @@ function findNumberOwner(cues: CueSummary[], targetId: string | null): string | 
 
 export default function App() {
   const { t } = useLocale();
-  const { refreshCues, refreshWorkspaceInfo, refreshValidation, refreshHealth, brokenCueIds, loadGeneralPrefs, loadDisplayPrefs, displayPrefs, workspaceInfo, selectedCueId, selectedCueIds, cues, cueLists, activeCueListId } =
+  const { refreshCues, refreshWorkspaceInfo, refreshValidation, refreshHealth, brokenCueIds, loadGeneralPrefs, loadDisplayPrefs, displayPrefs, workspaceInfo, selectedCueId, selectedCueIds, cues, cueCatalog, cueLists, activeCueListId } =
     useWorkspaceStore();
 
   const [rightPanel, setRightPanel]               = useState<RightPanelMode>(() => loadUiLayout().rightPanel);
@@ -839,7 +839,7 @@ export default function App() {
   useEffect(() => {
     useUpdateStore.getState().setInstallGuard(() => {
       const workspace = useWorkspaceStore.getState();
-      if (flattenActiveCues(workspace.cues).length > 0) return "activeCuesRunning";
+      if (flattenCatalogActiveCues(workspace.cueCatalog).length > 0) return "activeCuesRunning";
       if (workspace.workspaceInfo?.is_modified) return "unsavedWorkspace";
       return null;
     });
@@ -1237,7 +1237,7 @@ export default function App() {
       }
 
       const state = useWorkspaceStore.getState();
-      if (hasActivePlayback(state.cues)) {
+      if (hasActivePlayback(state.cues) || flattenCatalogActiveCues(state.cueCatalog).length > 0) {
         event.preventDefault();
         activePlaybackCloseOpenRef.current = true;
         setActivePlaybackCloseOpen(true);
@@ -1323,7 +1323,7 @@ export default function App() {
   );
 
   const selectedCue = findCueRecursive(cues, selectedCueId) ?? null;
-  const activeCueCount = flattenActiveCues(cues).length;
+  const activeCueCount = flattenCatalogActiveCues(cueCatalog).length;
   const selectedNumberOwner = selectedCue?.cue_type === "number" ? selectedCue.id : findNumberOwner(cues, selectedCueId);
   const numberPreviewPositionMs = useNumberPreviewStore((state) =>
     selectedCue?.cue_type === "number" && state.numberId === selectedCue.id ? state.positionMs : 0,

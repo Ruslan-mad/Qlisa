@@ -55,6 +55,7 @@ import type {
   NumberCueData,
   WaveformData,
   WorkspaceInfo,
+  WorkspaceCueCatalogList,
   MediaInfo,
   ProbeMetadata,
   MediaCompatibility,
@@ -95,6 +96,7 @@ export const resumeCue = (cueId: CueId) =>
 // ---------------------------------------------------------------------------
 
 export const getAllCues = () => invoke<CueSummary[]>("get_all_cues");
+export const getWorkspaceCueCatalog = () => invoke<WorkspaceCueCatalogList[]>("get_workspace_cue_catalog");
 export const getCue = (cueId: CueId) =>
   invoke<AudioCueData | VideoCueData | ImageCueData | NumberCueData>("get_cue", { cueId });
 export const addCue = (cueType: CueType, position = -1) =>

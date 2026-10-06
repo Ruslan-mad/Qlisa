@@ -41,6 +41,32 @@ const TIMER_TICK_MS: u64 = 16;
 /// ~tens-of-ms gap, below a perceptible delay.
 const AUDIO_FREEZE_MS: u64 = 250;
 
+fn collect_cue_states(cue: &dyn crate::cue::traits::Cue, out: &mut Vec<(CueId, CueState)>) {
+    out.push((cue.id(), cue.state()));
+    if let Some(children) = cue.child_cues() {
+        for child in children { collect_cue_states(child.as_ref(), out); }
+    }
+}
+
+fn workspace_cue_states(workspace: &Workspace) -> Vec<(CueId, CueState)> {
+    let mut states = Vec::new();
+    for list in &workspace.cue_lists {
+        for cue in &list.cues { collect_cue_states(cue.as_ref(), &mut states); }
+    }
+    states
+}
+
+fn changed_cue_states(
+    before: &[(CueId, CueState)],
+    after: &[(CueId, CueState)],
+) -> Vec<(CueId, CueState, CueState)> {
+    let after_by_id: HashMap<_, _> = after.iter().copied().collect();
+    before.iter().filter_map(|(id, old_state)| {
+        after_by_id.get(id).filter(|new_state| *new_state != old_state)
+            .map(|new_state| (*id, *old_state, *new_state))
+    }).collect()
+}
+
 #[derive(Clone, Debug)]
 struct PendingContinuation {
     due: Instant,
@@ -381,20 +407,6 @@ fn append_wait_clear_snapshots(
         });
     }
     *previous_wait_ids = current_wait_ids;
-}
-
-/// Collect the ids of `cue` and every descendant that is Running or Paused.
-/// Used when a Fade force-stops a target so the UI can be told which cues
-/// (including group children) are no longer active.
-fn collect_running_ids(cue: &dyn crate::cue::traits::Cue, out: &mut Vec<CueId>) {
-    if cue.state() == CueState::Running || cue.state() == CueState::Paused {
-        out.push(cue.id());
-    }
-    if let Some(children) = cue.child_cues() {
-        for ch in children {
-            collect_running_ids(ch.as_ref(), out);
-        }
-    }
 }
 
 /// Reset any RUNNING group child whose audio voice has completed.
@@ -942,6 +954,9 @@ fn tick(
         Err(_) => return,
     };
 
+    let playheads_before: Vec<(uuid::Uuid, Option<CueId>)> = ws.cue_lists
+        .iter().map(|list| (list.id, list.playhead_cue_id)).collect();
+    let mut all_state_changes = Vec::new();
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let ws_patches = ws.output_patches.clone();
     let ws_default_patch = ws.default_output_patch_id;
@@ -991,8 +1006,6 @@ fn tick(
     }
     let frozen_now = cb_last_advance.elapsed() >= Duration::from_millis(AUDIO_FREEZE_MS);
 
-    let mut just_paused: Vec<CueId> = Vec::new();
-    let mut just_resumed: Vec<CueId> = Vec::new();
     if frozen_now && !*audio_frozen {
         for cl in ws.cue_lists.iter_mut() {
             for cue in cl.cues.iter_mut() {
@@ -1001,7 +1014,6 @@ fn tick(
                     && cue.pause(&tick_ctx).is_ok()
                 {
                     auto_paused.insert(cue.id());
-                    just_paused.push(cue.id());
                 }
             }
         }
@@ -1022,7 +1034,6 @@ fn tick(
                     }
                 }
                 if cue.resume(&tick_ctx).is_ok() {
-                    just_resumed.push(cue.id());
                 }
             }
         }
@@ -1055,14 +1066,13 @@ fn tick(
     let mut all_go_fired: Vec<CueId> = Vec::new();
     let mut all_time_snapshots: Vec<CueTimeSnapshot> = Vec::new();
     let mut all_go_triggered: Vec<CueId> = Vec::new();
-    let mut all_go_stopped: Vec<CueId> = Vec::new();
-    let mut all_seq_group_playheads: Vec<Option<CueId>> = Vec::new();
+    let mut all_seq_group_playheads: Vec<(uuid::Uuid, Option<CueId>)> = Vec::new();
     let mut number_finish_starts: Vec<(CueId, Vec<CueId>)> = Vec::new();
     let mut group_child_changed = false;
+    let mut runtime_tick_failures: Vec<(CueId, String)> = Vec::new();
     // A cue can fail between GO commands. Do not discard that Result: its
     // runtime diagnostic is persisted on the cue and this list drives the UI
     // state change/refresh that makes it visible to the operator.
-    let mut runtime_tick_failures: Vec<(CueId, String)> = Vec::new();
     let mut runtime_diagnostic_changed = false;
 
     // Source execution tokens whose captured successor should GO this tick.
@@ -1129,12 +1139,13 @@ fn tick(
         // The transport drains its actual-start queue here and reconciles all
         // nested Browser owners.
         if !tick_fired_ids.is_empty() || tick_ctx.has_browser_starts() {
-            if let Some(cl) = ws.cue_list_by_id_mut(list_id) {
+            if let Some(list_index) = ws.cue_lists.iter().position(|cl| cl.id == list_id) {
+                let before = workspace_cue_states(&ws);
                 let mut transport = Transport::new(tick_ctx.clone());
-                let result = transport.dispatch_fired_cues(cl, &tick_fired_ids);
+                let result = transport.dispatch_fired_cues_in_workspace(&mut ws.cue_lists, list_index, &tick_fired_ids);
+                all_state_changes.extend(changed_cue_states(&before, &workspace_cue_states(&ws)));
                 all_go_fired.extend(result.fired);
                 all_go_triggered.extend(result.triggered);
-                all_go_stopped.extend(result.stopped);
                 group_child_changed = true;
             }
             all_go_fired.extend(tick_fired_ids);
@@ -1147,7 +1158,6 @@ fn tick(
         //     running (target + descendants) so step 11 emits `cue-state-changed`
         //     for them; otherwise the UI keeps showing them RUNNING until the next
         //     GO forces a full refresh.
-        let mut fade_stopped_ids: Vec<CueId> = Vec::new();
         let fade_stop_targets: Vec<CueId> = ws
             .cue_list_by_id_mut(list_id)
             .map(|cl| {
@@ -1158,15 +1168,12 @@ fn tick(
             })
             .unwrap_or_default();
         if !fade_stop_targets.is_empty() {
-            if let Some(cl) = ws.cue_list_by_id_mut(list_id) {
-                for tid in fade_stop_targets {
-                    if let Some(target) = cl.get_mut_recursive(&tid) {
-                        if target.is_running() || target.is_paused() {
-                            collect_running_ids(target, &mut fade_stopped_ids);
-                            let _ = target.hard_stop(&tick_ctx);
-                        }
-                    }
-                }
+            let before = workspace_cue_states(&ws);
+            let mut transport = Transport::new(tick_ctx.clone());
+            let fade_stopped_ids = transport.hard_stop_targets_in_workspace(&mut ws.cue_lists, &fade_stop_targets);
+            all_state_changes.extend(changed_cue_states(&before, &workspace_cue_states(&ws)));
+            if !fade_stopped_ids.is_empty() {
+                group_child_changed = true;
             }
         }
 
@@ -1186,7 +1193,7 @@ fn tick(
                 cl.advance_playhead();
             }
             let ph = ws.cue_list_by_id(list_id).and_then(|cl| cl.playhead_cue_id);
-            all_seq_group_playheads.push(ph);
+            all_seq_group_playheads.push((list_id, ph));
         }
 
         // 6. Detect completions.
@@ -1246,26 +1253,16 @@ fn tick(
         }
 
         if !number_finish_starts.is_empty() {
-            if let Some(cl) = ws.cue_list_by_id_mut(list_id) {
+            if let Some(list_index) = ws.cue_lists.iter().position(|cl| cl.id == list_id) {
+                let before = workspace_cue_states(&ws);
                 let mut transport = Transport::new(tick_ctx.clone());
                 for (source_id, targets) in number_finish_starts.drain(..) {
-                    let result = transport.start_number_targets(cl, source_id, &targets);
+                    let result = transport.start_number_targets_in_workspace(&mut ws.cue_lists, list_index, source_id, &targets);
                     all_go_fired.extend(result.fired);
                     all_go_triggered.extend(result.triggered);
-                    all_go_stopped.extend(result.stopped);
                 }
+                all_state_changes.extend(changed_cue_states(&before, &workspace_cue_states(&ws)));
                 group_child_changed = true;
-            }
-        }
-
-        // Fade-stopped cues (target + descendants) are reported as completed so
-        // the UI clears them.  DoNotContinue so they never chain a follow-on cue.
-        if !fade_stopped_ids.is_empty() {
-            // Force a full cue-list refresh so nested state + green playhead
-            // highlights resync (they derive from the whole cue tree).
-            group_child_changed = true;
-            for id in fade_stopped_ids {
-                newly_completed.push((id, ContinueMode::DoNotContinue, Duration::ZERO));
             }
         }
 
@@ -1281,7 +1278,7 @@ fn tick(
         }
         if playhead_advanced {
             let ph = ws.cue_list_by_id(list_id).and_then(|cl| cl.playhead_cue_id);
-            all_seq_group_playheads.push(ph);
+            all_seq_group_playheads.push((list_id, ph));
         }
 
         // 7. Time snapshots.
@@ -1452,7 +1449,8 @@ fn tick(
     // 9. Fire captured Auto-Continue / Auto-Follow successors. Never consult
     // the mutable UI Playhead here: it may have moved during the source cue.
     for (list_id, source_id, token) in ordered_ready_continuations(&ready_continuations) {
-        if let Some(cl) = ws.cue_list_by_id_mut(list_id) {
+        if let Some(list_index) = ws.cue_lists.iter().position(|cl| cl.id == list_id) {
+            let before = workspace_cue_states(&ws);
             let context = make_context(
                 audio_engine,
                 output_engine,
@@ -1468,11 +1466,11 @@ fn tick(
                 ws_buffer_size,
             );
             let mut transport = Transport::new(context);
-            if let Ok(result) = transport.continue_from_source(cl, source_id, token) {
+            if let Ok(result) = transport.continue_from_source_in_workspace(&mut ws.cue_lists, list_index, source_id, token) {
                 all_go_fired.extend(result.fired);
                 all_go_triggered.extend(result.triggered);
-                all_go_stopped.extend(result.stopped);
             }
+            all_state_changes.extend(changed_cue_states(&before, &workspace_cue_states(&ws)));
         }
     }
 
@@ -1480,7 +1478,8 @@ fn tick(
     //     through the same real GO path so playback actually starts and
     //     Auto-Continue / Auto-Follow chains still work.
     for (list_id, cue_id) in &tc_fire {
-        if let Some(cl) = ws.cue_list_by_id_mut(*list_id) {
+        if let Some(_list_index) = ws.cue_lists.iter().position(|cl| cl.id == *list_id) {
+            let before = workspace_cue_states(&ws);
             let context = make_context(
                 audio_engine,
                 output_engine,
@@ -1496,11 +1495,11 @@ fn tick(
                 ws_buffer_size,
             );
             let mut transport = Transport::new(context);
-            if let Ok(result) = transport.go_by_id(cl, cue_id) {
+            if let Ok(result) = transport.go_by_id_in_workspace(&mut ws.cue_lists, cue_id) {
                 all_go_fired.extend(result.fired);
                 all_go_triggered.extend(result.triggered);
-                all_go_stopped.extend(result.stopped);
             }
+            all_state_changes.extend(changed_cue_states(&before, &workspace_cue_states(&ws)));
         }
     }
 
@@ -1619,7 +1618,18 @@ fn tick(
     let newly_completed = all_newly_completed;
     let time_snapshots = all_time_snapshots;
     let go_triggered = all_go_triggered;
-    let go_stopped = all_go_stopped;
+
+    for (list_id, old_playhead) in &playheads_before {
+        if *list_id == active_list_id { continue; }
+        if let Some(list) = ws.cue_list_by_id(*list_id) {
+            if list.playhead_cue_id != *old_playhead {
+                let _ = handle.emit("playhead-moved", serde_json::json!({
+                    "cue_list_id": list_id,
+                    "cue_id": list.playhead_cue_id,
+                }));
+            }
+        }
+    }
 
     drop(ws);
 
@@ -1657,27 +1667,18 @@ fn tick(
         let _ = handle.emit("cue-fired", serde_json::json!({ "cue_id": cue_id }));
     }
 
-    // Audio-freeze pause / resume (device-loss timeline guard).
-    for cue_id in &just_paused {
-        let _ = handle.emit(
-            "cue-state-changed",
-            serde_json::json!({
-                "cue_id": cue_id, "old_state": "running", "new_state": "paused",
-            }),
-        );
+    for (cue_id, old_state, new_state) in &all_state_changes {
+        let _ = handle.emit("cue-state-changed", serde_json::json!({
+            "cue_id": cue_id, "old_state": old_state, "new_state": new_state,
+        }));
     }
-    for cue_id in &just_resumed {
-        let _ = handle.emit(
-            "cue-state-changed",
-            serde_json::json!({
-                "cue_id": cue_id, "old_state": "paused", "new_state": "running",
-            }),
-        );
+    if !go_triggered.is_empty() || !all_state_changes.is_empty() {
+        let _ = handle.emit("cue-list-refresh", serde_json::json!({}));
     }
 
     // Emit playhead-moved for each sequential-group completion advance.
-    for new_ph in &all_seq_group_playheads {
-        let _ = handle.emit("playhead-moved", serde_json::json!({ "cue_id": new_ph }));
+    for (list_id, new_ph) in &all_seq_group_playheads {
+        let _ = handle.emit("playhead-moved", serde_json::json!({ "cue_list_id": list_id, "cue_id": new_ph }));
     }
 
     for snapshot in &time_snapshots {
@@ -1718,31 +1719,9 @@ fn tick(
             }),
         );
     }
-
-    for stopped_id in &go_stopped {
-        let _ = handle.emit(
-            "cue-state-changed",
-            serde_json::json!({
-                "cue_id": stopped_id,
-                "old_state": "running",
-                "new_state": "standby",
-            }),
-        );
-    }
-
     if !go_triggered.is_empty() {
         if let Some(phid) = go_final_playhead {
-            let _ = handle.emit("playhead-moved", serde_json::json!({ "cue_id": phid }));
-        }
-        for triggered_id in &go_triggered {
-            let _ = handle.emit(
-                "cue-state-changed",
-                serde_json::json!({
-                    "cue_id": triggered_id,
-                    "old_state": "standby",
-                    "new_state": "running",
-                }),
-            );
+            let _ = handle.emit("playhead-moved", serde_json::json!({ "cue_list_id": active_list_id, "cue_id": phid }));
         }
     }
 

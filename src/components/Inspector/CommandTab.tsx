@@ -6,7 +6,8 @@
 import { COMMAND_CUE_TYPES, type CommandCueType, type StopCueData } from "../../lib/types";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { Section } from "./Field";
-import { CueTargetPicker } from "./CueTargetPicker";
+import { CueTargetPicker, flattenCueCatalog } from "./CueTargetPicker";
+import { singleTargetSelection } from "./targetCueModel";
 import { useLocale } from "../../i18n";
 
 export function CommandTab({
@@ -17,7 +18,7 @@ export function CommandTab({
   onSave: (p: Partial<StopCueData>) => void;
 }) {
   const { t, locale } = useLocale();
-  const allCues = useWorkspaceStore((s) => s.cues);
+  const lists = useWorkspaceStore((s) => s.cueCatalog);
   const targetIds: string[] = cue.target_cue_ids ?? [];
   const meta = COMMAND_CUE_TYPES.find((c) => c.type === (cue.cue_type as CommandCueType));
   const singleTarget = cue.cue_type === "goto";
@@ -38,13 +39,13 @@ export function CommandTab({
       </div>
 
       <CueTargetPicker
-        allCues={allCues}
+        lists={lists}
         selfId={cue.id}
         selectedIds={targetIds}
         onChange={(ids) => {
-          const kept = singleTarget ? ids.slice(-1) : ids;
+          const kept = singleTarget ? singleTargetSelection(ids) : ids;
           const nums = kept
-            .map((id) => allCues.find((c) => c.id === id)?.number)
+            .map((id) => flattenCueCatalog(lists).find((c) => c.id === id)?.number)
             .filter((n): n is string => n != null);
           onSave({ target_cue_ids: kept, target_cue_numbers: nums });
         }}

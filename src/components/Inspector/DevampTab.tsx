@@ -4,7 +4,7 @@
 import type { DevampCueData } from "../../lib/types";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { Section, Segmented } from "./Field";
-import { CueTargetPicker } from "./CueTargetPicker";
+import { CueTargetPicker, flattenCueCatalog } from "./CueTargetPicker";
 import { useLocale } from "../../i18n";
 
 export function DevampTab({
@@ -15,7 +15,7 @@ export function DevampTab({
   onSave: (p: Partial<DevampCueData>) => void;
 }) {
   const { t, locale } = useLocale();
-  const allCues = useWorkspaceStore((s) => s.cues);
+  const lists = useWorkspaceStore((s) => s.cueCatalog);
   const targetIds: string[] = cue.target_cue_ids ?? [];
 
   return (
@@ -25,13 +25,13 @@ export function DevampTab({
         hint={locale === "ru" ? "Выберите cue, которым будет управлять эта команда." : t("help.go")}
       >
         <CueTargetPicker
-          allCues={allCues}
+          lists={lists}
           selfId={cue.id}
           selectedIds={targetIds}
           filterTypes={["audio", "video", "group"]}
           onChange={(ids) => {
             const nums = ids
-              .map((id) => allCues.find((c) => c.id === id)?.number)
+              .map((id) => flattenCueCatalog(lists).find((c) => c.id === id)?.number)
               .filter((n): n is string => n != null);
             onSave({ target_cue_ids: ids, target_cue_numbers: nums });
           }}

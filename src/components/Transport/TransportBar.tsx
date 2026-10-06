@@ -12,6 +12,7 @@ import { OutputFtbControls } from "./OutputFtbControls";
 import { useLocale } from "../../i18n";
 import { transportErrorFromEvent } from "./transportErrorModel";
 import { MediaConversionStatus } from "./MediaConversionStatus";
+import { flattenCatalogActiveCues, getCatalogPauseTargets } from "../ActiveCues/activeCueModel";
 
 interface Props {
   onRefresh: () => void;
@@ -205,7 +206,7 @@ const OSC_ACTIVITY_MS = 300;
 
 export function TransportBar({ onRefresh }: Props) {
   const { t, locale } = useLocale();
-  const { cues } = useWorkspaceStore();
+  const cueCatalog = useWorkspaceStore((state) => state.cueCatalog);
   const { masterPeakL, masterPeakR, oscActivityAt } = useTransportStore();
 
   const [volumeDb, setVolumeDb] = useState(0);
@@ -305,23 +306,21 @@ export function TransportBar({ onRefresh }: Props) {
     void setMasterVolume(db).catch(console.error);
   };
 
-  const runningCues = cues.filter(
-    (c) => c.state === "running" || c.state === "paused"
-  );
+  const runningCues = flattenCatalogActiveCues(cueCatalog);
 
   // Pause toggle: pause every running cue, or (if none running) resume every
   // paused cue — same semantics as the OSC `/inkue/pause_toggle` handler.
-  const hasRunning = cues.some((c) => c.state === "running");
-  const hasPaused = cues.some((c) => c.state === "paused");
+  const hasRunning = runningCues.some((c) => c.state === "running");
+  const hasPaused = runningCues.some((c) => c.state === "paused");
   const pauseDisabled = !hasRunning && !hasPaused;
   const pauseLabel = hasRunning ? "PAUSE" : hasPaused ? "RESUME" : "PAUSE";
 
   const handlePauseToggle = async () => {
     try {
       if (hasRunning) {
-        for (const c of cues.filter((c) => c.state === "running")) await pauseCue(c.id);
+        for (const c of getCatalogPauseTargets(cueCatalog)) await pauseCue(c.id);
       } else if (hasPaused) {
-        for (const c of cues.filter((c) => c.state === "paused")) await resumeCue(c.id);
+        for (const c of getCatalogPauseTargets(cueCatalog)) await resumeCue(c.id);
       }
     } catch (err) {
       console.error(err);

@@ -209,6 +209,52 @@ pub struct CueSummary {
     pub number_finish_start_ids: Option<Vec<String>>,
 }
 
+/// Lightweight cue tree for selecting UUID targets across the workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceCueCatalogList {
+    pub id: String,
+    pub name: String,
+    pub cues: Vec<WorkspaceCueCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceCueCatalogEntry {
+    pub id: String,
+    pub cue_type: CueType,
+    pub name: String,
+    pub number: Option<String>,
+    pub state: CueState,
+    pub color: CueColor,
+    pub duration_ms: Option<u64>,
+    pub is_disabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_patch_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<WorkspaceCueCatalogEntry>,
+}
+
+fn catalog_cues(cues: &[Box<dyn Cue>], patches: &PatchTable) -> Vec<WorkspaceCueCatalogEntry> {
+    cues.iter()
+        .map(|cue| WorkspaceCueCatalogEntry {
+            id: cue.id().to_string(),
+            cue_type: cue.cue_type(),
+            name: cue.name().to_string(),
+            number: cue.number().map(str::to_string),
+            state: cue.state(),
+            color: cue.color(),
+            duration_ms: cue.duration().map(|duration| {
+                duration.as_millis().min(u64::MAX as u128) as u64
+            }),
+            is_disabled: cue.is_disabled(),
+            output_patch_name: patches.name_for(cue.as_ref()),
+            children: cue
+                .child_cues()
+                .map(|children| catalog_cues(children, patches))
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CueTargetSummary {
     pub number: Option<String>,
@@ -441,6 +487,36 @@ fn index_cue_targets(cues: &[Box<dyn Cue>], index: &mut CueTargetIndex) {
             index_cue_targets(children, index);
         }
     }
+}
+
+fn index_cue_target_ids(cues: &[Box<dyn Cue>], index: &mut CueTargetIndex) {
+    for cue in cues {
+        index.by_id.insert(
+            cue.id().to_string(),
+            CueTargetSummary {
+                number: cue.number().map(str::to_string),
+                name: cue.name().to_string(),
+            },
+        );
+        if let Some(children) = cue.child_cues() {
+            index_cue_target_ids(children, index);
+        }
+    }
+}
+
+fn workspace_target_index(workspace: &crate::show::workspace::Workspace) -> CueTargetIndex {
+    let mut index = CueTargetIndex::default();
+    for list in &workspace.cue_lists {
+        index_cue_target_ids(&list.cues, &mut index);
+    }
+    // Number-only legacy targets have no globally unique identity. Resolve
+    // them only within the list that owns the targeted cue.
+    if let Some(active_list) = workspace.active_cue_list() {
+        let mut legacy_numbers = CueTargetIndex::default();
+        index_cue_targets(&active_list.cues, &mut legacy_numbers);
+        index.by_number = legacy_numbers.by_number;
+    }
+    index
 }
 
 fn cue_target_ids(serialized: &serde_json::Value) -> Vec<String> {
@@ -927,8 +1003,7 @@ pub fn get_all_cues(
         patches: &ws.output_patches,
         default_id: ws.default_output_patch_id,
     };
-    let mut target_index = CueTargetIndex::default();
-    index_cue_targets(&cue_list.cues, &mut target_index);
+    let target_index = workspace_target_index(&ws);
 
     let mut metadata_requests = HashSet::new();
     let summaries: Vec<CueSummary> = cue_list
@@ -967,6 +1042,27 @@ pub fn get_all_cues(
     );
 
     Ok(summaries)
+}
+
+/// Return cue identity and runtime display fields for every workspace list.
+#[tauri::command]
+pub fn get_workspace_cue_catalog(
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkspaceCueCatalogList>, String> {
+    let ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let patch_table = PatchTable {
+        patches: &ws.output_patches,
+        default_id: ws.default_output_patch_id,
+    };
+    Ok(ws
+        .cue_lists
+        .iter()
+        .map(|list| WorkspaceCueCatalogList {
+            id: list.id.to_string(),
+            name: list.name.clone(),
+            cues: catalog_cues(&list.cues, &patch_table),
+        })
+        .collect())
 }
 
 /// Return the full serialised JSON for a single cue.
@@ -3840,8 +3936,7 @@ pub fn set_cue_duration(
         .snapshot();
     let loading = state.loading_cues.lock().map_err(|e| e.to_string())?;
     let mut metadata_requests = HashSet::new();
-    let mut target_index = CueTargetIndex::default();
-    index_cue_targets(&cue_list.cues, &mut target_index);
+    let target_index = workspace_target_index(&ws);
     let summary = summarise(
         cue,
         ws_dir.as_deref(),
@@ -6105,9 +6200,10 @@ mod tests {
         registry::CueRegistry,
         video_cue::{VideoCue, VideoCueFactory},
         stop_cue::StopCue,
-        stop_cue::StopCueFactory,
+        stop_cue::{StopCueFactory},
         traits::Cue,
-        types::{CueColor, CueType},
+        types::{CueColor, CueState, CueType},
+        wait_cue::WaitCueFactory,
     };
     use crate::engine::media_metadata::{
         MediaMetadata, MediaMetadataFailure, MediaMetadataKey, MediaMetadataReservation,
@@ -6451,6 +6547,158 @@ mod tests {
         let (targets, targets_all) = target_display_for_cue(&stop_all, &index);
         assert!(targets_all);
         assert_eq!(targets.expect("Stop All has an empty target list").len(), 0);
+    }
+
+    #[test]
+    fn workspace_catalog_and_target_index_cover_all_lists_without_global_number_fallback() {
+        let mut workspace = crate::show::workspace::Workspace::new("catalog test");
+        let active_id = workspace.active_cue_list_id;
+        let active = workspace.cue_lists.iter_mut().find(|list| list.id == active_id).unwrap();
+        let mut active_target = AudioCue::new();
+        active_target.set_number(Some("1".into()));
+        active_target.set_name("Active target".into());
+        let active_target_id = active_target.id();
+        active.push(Box::new(active_target));
+
+        let mut other = CueList::new("Other");
+        let mut nested_number = GroupCue::new_number();
+        nested_number.set_name("Remote Number".into());
+        nested_number.set_number(Some("7".into()));
+        let number_id = nested_number.id();
+        let mut remote_target = AudioCue::new();
+        remote_target.set_number(Some("1".into()));
+        remote_target.set_name("Remote nested target".into());
+        remote_target.set_color(CueColor::Cyan);
+        remote_target.set_disabled(true);
+        remote_target.restore_runtime_state(crate::cue::traits::RuntimeState {
+            state: CueState::Running,
+            voice_id: None,
+            started_at: None,
+            action_started_at: None,
+        });
+        let remote_target_id = remote_target.id();
+        nested_number.add_child(Box::new(remote_target), -1).unwrap();
+        let mut remote_group = GroupCue::new();
+        remote_group.set_name("Remote Group".into());
+        let group_id = remote_group.id();
+        remote_group.add_child(Box::new(nested_number), -1).unwrap();
+        let mut timed_child = crate::cue::wait_cue::WaitCue::new();
+        timed_child.set_user_action_duration(Some(std::time::Duration::from_millis(347))).unwrap();
+        timed_child.set_color(CueColor::Orange);
+        let timed_id = timed_child.id();
+        remote_group.add_child(Box::new(timed_child), -1).unwrap();
+        other.push(Box::new(remote_group));
+        workspace.cue_lists.push(other);
+        workspace.cue_lists.push(CueList::new("Empty"));
+        let mut cross_list_stop = StopCue::new();
+        cross_list_stop.set_context_target(remote_target_id, Some("1".into()));
+        let cross_list_stop_id = cross_list_stop.id();
+        workspace
+            .cue_lists
+            .iter_mut()
+            .find(|list| list.id == active_id)
+            .unwrap()
+            .push(Box::new(cross_list_stop));
+
+        let patch_table = super::PatchTable {
+            patches: &workspace.output_patches,
+            default_id: workspace.default_output_patch_id,
+        };
+        let catalog: Vec<_> = workspace.cue_lists.iter().map(|list| super::WorkspaceCueCatalogList {
+            id: list.id.to_string(), name: list.name.clone(), cues: super::catalog_cues(&list.cues, &patch_table),
+        }).collect();
+        assert_eq!(catalog.len(), 3);
+        assert_eq!(catalog[2].cues.len(), 0);
+        assert_eq!(catalog[0].cues[0].number.as_deref(), Some("1"));
+        assert_eq!(catalog[0].cues[0].output_patch_name.as_deref(), Some("Main"));
+        let remote_group_catalog = &catalog[1].cues[0];
+        assert_eq!(remote_group_catalog.id, group_id.to_string());
+        assert_eq!(remote_group_catalog.children[0].id, number_id.to_string());
+        let nested_target = &remote_group_catalog.children[0].children[0];
+        assert_eq!(nested_target.id, remote_target_id.to_string());
+        assert_eq!(nested_target.state, CueState::Running);
+        assert_eq!(nested_target.color, CueColor::Cyan);
+        assert!(nested_target.is_disabled);
+        let timed_entry = &remote_group_catalog.children[1];
+        assert_eq!(timed_entry.id, timed_id.to_string());
+        assert_eq!(timed_entry.state, CueState::Standby);
+        assert_eq!(timed_entry.color, CueColor::Orange);
+        assert_eq!(timed_entry.duration_ms, Some(347));
+
+        let index = super::workspace_target_index(&workspace);
+        assert_eq!(index.by_id[&remote_target_id.to_string()].name, "Remote nested target");
+        assert_eq!(index.by_number["1"].name, "Active target");
+        let mut stop = StopCue::new();
+        stop.set_context_target(remote_target_id, Some("1".into()));
+        let (resolved, _) = super::target_display_for_cue(&stop, &index);
+        assert_eq!(resolved.unwrap()[0].name, "Remote nested target");
+        let mut number_stop = StopCue::new();
+        number_stop.set_context_target(number_id, Some("7".into()));
+        let (resolved, _) = super::target_display_for_cue(&number_stop, &index);
+        assert_eq!(resolved.unwrap()[0].name, "Remote Number");
+
+        assert_ne!(active_target_id, remote_target_id);
+
+        let mut registry = crate::cue::registry::CueRegistry::new();
+        registry.register(CueType::Audio, Box::new(crate::cue::audio_cue::AudioCueFactory));
+        registry.register(CueType::Wait, Box::new(WaitCueFactory));
+        registry.register(CueType::Stop, Box::new(StopCueFactory));
+        let serialized = workspace.to_recovery_json().unwrap();
+        let mut restored = crate::show::workspace::Workspace::from_json_str(&serialized, None, &registry).unwrap();
+        let restored_target = restored.cue_lists[1].get_recursive(&remote_target_id).unwrap();
+        assert_eq!(restored_target.id(), remote_target_id);
+        let restored_stop = restored.cue_lists[0].get_recursive(&cross_list_stop_id).unwrap();
+        assert_eq!(restored_stop.serialize()["target_cue_ids"][0], remote_target_id.to_string());
+        let restored_index = super::workspace_target_index(&restored);
+        assert_eq!(restored_index.by_id[&remote_target_id.to_string()].name, "Remote nested target");
+        let target_json = serde_json::json!({ "type": "stop", "target_cue_ids": [remote_target_id.to_string()], "target_cue_numbers": ["1"] });
+        let restored_target_stop = registry.from_json(target_json).unwrap();
+        let (resolved, _) = super::target_display_for_cue(restored_target_stop.as_ref(), &restored_index);
+        assert_eq!(resolved.unwrap()[0].name, "Remote nested target");
+
+        let legacy_json = serde_json::json!({ "type": "stop", "target_cue_ids": [], "target_cue_numbers": ["1"] });
+        let legacy_stop = registry.from_json(legacy_json).unwrap();
+        let (resolved, _) = super::target_display_for_cue(legacy_stop.as_ref(), &restored_index);
+        assert_eq!(resolved.unwrap()[0].name, "Active target");
+
+        let deleted_json = serde_json::json!({ "type": "stop", "target_cue_ids": [remote_target_id.to_string()], "target_cue_numbers": ["1"] });
+        let deleted_stop = registry.from_json(deleted_json).unwrap();
+        fn remove_target(cues: &mut Vec<Box<dyn Cue>>, target_id: Uuid) -> bool {
+            if let Some(position) = cues.iter().position(|cue| cue.id() == target_id) {
+                cues.remove(position);
+                return true;
+            }
+            cues.iter_mut().any(|cue| {
+                cue.child_cues_mut()
+                    .is_some_and(|children| remove_target(children, target_id))
+            })
+        }
+        fn collect_ids(cues: &[Box<dyn Cue>], ids: &mut std::collections::HashSet<Uuid>) {
+            for cue in cues {
+                ids.insert(cue.id());
+                if let Some(children) = cue.child_cues() {
+                    collect_ids(children, ids);
+                }
+            }
+        }
+        assert!(remove_target(&mut restored.cue_lists[1].cues, remote_target_id));
+        let mut all_cue_ids = std::collections::HashSet::new();
+        for list in &restored.cue_lists {
+            collect_ids(&list.cues, &mut all_cue_ids);
+        }
+        let deleted_ctx = crate::cue::validation::ValidationContext {
+            all_cue_ids,
+            fixture_ids: std::collections::HashSet::new(),
+            fixture_group_ids: std::collections::HashSet::new(),
+            osc_patch_ids: std::collections::HashSet::new(),
+            output_patch_ids: std::collections::HashSet::new(),
+            unavailable_output_patch_ids: std::collections::HashSet::new(),
+            midi_ports: Vec::new(),
+        };
+        assert!(deleted_stop.validate(&deleted_ctx).iter().any(|issue| {
+            issue.severity == crate::cue::validation::Severity::Warning
+                && issue.message.contains("cue deleted")
+        }));
     }
 
     #[test]

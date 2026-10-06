@@ -125,7 +125,10 @@ pub fn go(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<()
     );
     let mut transport = Transport::new(context);
 
-    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
+    let active_list_id = ws.active_cue_list_id;
+    let active_index = ws.cue_lists.iter().position(|list| list.id == active_list_id)
+        .ok_or("No active cue list")?;
+    let cue_list = &ws.cue_lists[active_index];
 
     if let Some(cue) = cue_list.playhead_cue() {
         let issues = crate::cue::group_cue::number_readiness_issues(cue);
@@ -154,40 +157,21 @@ pub fn go(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<()
         }
     }
 
-    let result = transport.go(cue_list).map_err(|e| e.to_string())?;
+    let before_states = workspace_cue_states(&ws.cue_lists);
+    let before_playheads = workspace_playheads(&ws.cue_lists);
+    let result = transport.go_in_workspace(&mut ws.cue_lists, active_index).map_err(|e| e.to_string())?;
 
     for id in &result.fired {
         let _ = app_handle.emit("cue-fired", serde_json::json!({ "cue_id": id }));
     }
 
-    // Emit state changes for cues stopped by a Stop Cue action.
-    for id in &result.stopped {
-        let _ = app_handle.emit(
-            "cue-state-changed",
-            serde_json::json!({
-                "cue_id": id,
-                "old_state": "running",
-                "new_state": "standby",
-            }),
-        );
-    }
-
-    // Emit state changes for chained cues (skip the primary — the frontend
-    // already shows it as triggered via playhead-moved + cue-list-refresh).
-    for &id in result.triggered.iter().skip(1) {
-        let _ = app_handle.emit(
-            "cue-state-changed",
-            serde_json::json!({
-                "cue_id": id,
-                "old_state": "standby",
-                "new_state": "running",
-            }),
-        );
-    }
+    emit_workspace_state_changes(&app_handle, &before_states, &workspace_cue_states(&ws.cue_lists));
+    emit_remote_playhead_changes(&app_handle, &before_playheads, &ws.cue_lists, active_list_id);
 
     // Always emit — even when playhead_cue_id is None (cue was last in list).
     let _ = app_handle.emit("playhead-moved", serde_json::json!({
-        "cue_id": cue_list.playhead_cue_id.map(|u| u.to_string())
+        "cue_list_id": active_list_id,
+        "cue_id": ws.cue_lists[active_index].playhead_cue_id.map(|u| u.to_string())
     }));
     // Refresh the cue list so the frontend sees updated group inner-playhead state.
     let _ = app_handle.emit("cue-list-refresh", serde_json::json!({}));
@@ -196,9 +180,8 @@ pub fn go(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<()
 
 /// Trigger a specific cue by ID (used in Cart Mode).
 ///
-/// Parks the Playhead on the given cue and fires it via the normal GO path.
-/// Auto-Continue / Auto-Follow chains still work. The same loading guard as
-/// `go` applies to Audio Cues whose file is still being decoded.
+/// Fires the given cue without moving either the active list or its Playhead.
+/// The same loading guard as `go` applies to Audio Cues whose file is loading.
 #[tauri::command]
 pub fn go_cue(
     cue_id: String,
@@ -207,12 +190,12 @@ pub fn go_cue(
 ) -> Result<(), String> {
     let id: uuid::Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let active_list_id = ws.active_cue_list_id;
+    let active_playhead_before = ws.active_cue_list().and_then(|list| list.playhead_cue_id);
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let context = make_context(&state, stop_fade_ms);
     let mut transport = Transport::new(context);
-    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-
-    if let Some(cue) = cue_list.get_recursive(&id) {
+    if let Some(cue) = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id)) {
         let issues = crate::cue::group_cue::number_readiness_issues(cue);
         if let Some(issue) = issues.first() {
             return Err(format!("Number is not ready: {issue}"));
@@ -230,35 +213,23 @@ pub fn go_cue(
         }
     }
 
-    let result = transport.go_by_id(cue_list, &id).map_err(|e| e.to_string())?;
+    let before_states = workspace_cue_states(&ws.cue_lists);
+    let before_playheads = workspace_playheads(&ws.cue_lists);
+    let result = transport.go_by_id_in_workspace(&mut ws.cue_lists, &id).map_err(|e| e.to_string())?;
 
     for fired_id in &result.fired {
         let _ = app_handle.emit("cue-fired", serde_json::json!({ "cue_id": fired_id }));
     }
 
-    for stopped_id in &result.stopped {
-        let _ = app_handle.emit(
-            "cue-state-changed",
-            serde_json::json!({
-                "cue_id": stopped_id,
-                "old_state": "running",
-                "new_state": "standby",
-            }),
-        );
+    emit_workspace_state_changes(&app_handle, &before_states, &workspace_cue_states(&ws.cue_lists));
+    emit_remote_playhead_changes(&app_handle, &before_playheads, &ws.cue_lists, ws.active_cue_list_id);
+    let active_playhead_after = ws.active_cue_list().and_then(|list| list.playhead_cue_id);
+    if active_playhead_after != active_playhead_before {
+        let _ = app_handle.emit("playhead-moved", serde_json::json!({
+            "cue_list_id": active_list_id,
+            "cue_id": active_playhead_after,
+        }));
     }
-    for &triggered_id in result.triggered.iter().skip(1) {
-        let _ = app_handle.emit(
-            "cue-state-changed",
-            serde_json::json!({
-                "cue_id": triggered_id,
-                "old_state": "standby",
-                "new_state": "running",
-            }),
-        );
-    }
-    let _ = app_handle.emit("playhead-moved", serde_json::json!({
-        "cue_id": cue_list.playhead_cue_id.map(|u| u.to_string())
-    }));
     let _ = app_handle.emit("cue-list-refresh", serde_json::json!({}));
     Ok(())
 }
@@ -310,14 +281,11 @@ pub fn stop_cue(
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let context = make_context(&state, stop_fade_ms);
     let mut transport = Transport::new(context);
-    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-    let before = cue_list
-        .get_recursive(&id)
+    let before = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id))
         .map(cue_subtree_states)
         .ok_or_else(|| format!("Cue not found: {id:?}"))?;
-    transport.stop_cue(cue_list, &id).map_err(|e| e.to_string())?;
-    let after = cue_list
-        .get_recursive(&id)
+    transport.stop_cue_in_workspace(&mut ws.cue_lists, &id).map_err(|e| e.to_string())?;
+    let after = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id))
         .map(cue_subtree_states)
         .unwrap_or_default();
     emit_stop_notifications(&app_handle, &before, &after);
@@ -336,10 +304,9 @@ pub fn pause_cue(
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let context = make_context(&state, stop_fade_ms);
     let mut transport = Transport::new(context);
-    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-    let old_state = cue_list.get_recursive(&id).map(|cue| cue.state()).ok_or_else(|| format!("Cue not found: {id:?}"))?;
-    transport.pause_cue(cue_list, &id).map_err(|e| e.to_string())?;
-    let new_state = cue_list.get_recursive(&id).map(|cue| cue.state()).ok_or_else(|| format!("Cue not found: {id:?}"))?;
+    let old_state = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id)).map(|cue| cue.state()).ok_or_else(|| format!("Cue not found: {id:?}"))?;
+    transport.pause_cue_in_workspace(&mut ws.cue_lists, &id).map_err(|e| e.to_string())?;
+    let new_state = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id)).map(|cue| cue.state()).ok_or_else(|| format!("Cue not found: {id:?}"))?;
     if let Some(payload) = cue_state_change_payload(&cue_id, old_state, new_state) {
         let _ = app_handle.emit("cue-state-changed", payload);
     }
@@ -373,10 +340,9 @@ pub fn resume_cue(
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let context = make_context(&state, stop_fade_ms);
     let mut transport = Transport::new(context);
-    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-    let old_state = cue_list.get_recursive(&id).map(|cue| cue.state()).ok_or_else(|| format!("Cue not found: {id:?}"))?;
-    transport.resume_cue(cue_list, &id).map_err(|e| e.to_string())?;
-    let new_state = cue_list.get_recursive(&id).map(|cue| cue.state()).ok_or_else(|| format!("Cue not found: {id:?}"))?;
+    let old_state = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id)).map(|cue| cue.state()).ok_or_else(|| format!("Cue not found: {id:?}"))?;
+    transport.resume_cue_in_workspace(&mut ws.cue_lists, &id).map_err(|e| e.to_string())?;
+    let new_state = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id)).map(|cue| cue.state()).ok_or_else(|| format!("Cue not found: {id:?}"))?;
     if let Some(payload) = cue_state_change_payload(&cue_id, old_state, new_state) {
         let _ = app_handle.emit("cue-state-changed", payload);
     }
@@ -477,6 +443,30 @@ fn cue_state_change_payload(
 }
 
 type CueStateSnapshot = Vec<(uuid::Uuid, CueState)>;
+type PlayheadSnapshot = Vec<(uuid::Uuid, Option<uuid::Uuid>)>;
+
+fn workspace_playheads(cue_lists: &[CueList]) -> PlayheadSnapshot {
+    cue_lists.iter().map(|list| (list.id, list.playhead_cue_id)).collect()
+}
+
+fn emit_remote_playhead_changes(
+    app_handle: &tauri::AppHandle,
+    before: &PlayheadSnapshot,
+    cue_lists: &[CueList],
+    active_list_id: uuid::Uuid,
+) {
+    for (list_id, old_playhead) in before {
+        if *list_id == active_list_id { continue; }
+        if let Some(list) = cue_lists.iter().find(|list| list.id == *list_id) {
+            if list.playhead_cue_id != *old_playhead {
+                let _ = app_handle.emit("playhead-moved", serde_json::json!({
+                    "cue_list_id": list_id,
+                    "cue_id": list.playhead_cue_id,
+                }));
+            }
+        }
+    }
+}
 
 fn cue_subtree_states(cue: &dyn Cue) -> CueStateSnapshot {
     let mut states = Vec::new();
@@ -503,6 +493,21 @@ fn cue_list_states(cue_list: &CueList) -> CueStateSnapshot {
 
 fn workspace_cue_states(cue_lists: &[CueList]) -> CueStateSnapshot {
     cue_lists.iter().flat_map(cue_list_states).collect()
+}
+
+fn emit_workspace_state_changes(
+    app_handle: &tauri::AppHandle,
+    before: &CueStateSnapshot,
+    after: &CueStateSnapshot,
+) {
+    let after_by_id: std::collections::HashMap<_, _> = after.iter().copied().collect();
+    for (id, old_state) in before {
+        if let Some(&new_state) = after_by_id.get(id) {
+            if let Some(payload) = cue_state_change_payload(&id.to_string(), *old_state, new_state) {
+                let _ = app_handle.emit("cue-state-changed", payload);
+            }
+        }
+    }
 }
 
 fn stop_notification_payloads(
@@ -579,9 +584,13 @@ mod stop_tree_notification_tests {
         cue::{
             audio_cue::AudioCue,
             context::{CueContext, CueEvent},
+            control_cue::{ControlAction, ControlCue},
             group_cue::GroupCue,
+            memo_cue::MemoCue,
+            stop_cue::StopCue,
+            text_cue::TextCue,
             traits::{Cue, RuntimeState},
-            types::CueState,
+            types::{ContinueMode, CueState},
             video_cue::VideoCue,
         },
         engine::{
@@ -662,6 +671,227 @@ mod stop_tree_notification_tests {
             Vec::new(),
             256,
         )
+    }
+
+    #[test]
+    fn workspace_start_dispatch_shares_cycle_guard_across_lists() {
+        let mut start_a = ControlCue::new(ControlAction::Start);
+        let mut start_b = ControlCue::new(ControlAction::Start);
+        let a_id = start_a.id();
+        let b_id = start_b.id();
+        let mut disabled = MemoCue::new();
+        let disabled_id = disabled.id();
+        disabled.set_disabled(true);
+        start_a.target_cue_ids = vec![b_id, b_id, disabled_id, uuid::Uuid::new_v4()];
+        start_b.target_cue_ids = vec![a_id];
+
+        let mut list_a = CueList::new("A");
+        let mut list_b = CueList::new("B");
+        list_a.push(Box::new(start_a));
+        list_b.push(Box::new(start_b));
+        list_b.push(Box::new(disabled));
+        let mut lists = vec![list_a, list_b];
+        let mut transport = Transport::new(context());
+
+        let result = transport.go_in_workspace(&mut lists, 0).unwrap();
+
+        assert!(result.fired.contains(&a_id));
+        assert!(result.fired.contains(&b_id));
+        assert!(!result.fired.contains(&disabled_id));
+        assert_eq!(lists[0].get(&a_id).unwrap().state(), CueState::Completed);
+        assert_eq!(lists[1].get(&b_id).unwrap().state(), CueState::Completed);
+        assert_eq!(lists[1].get(&disabled_id).unwrap().state(), CueState::Standby);
+    }
+
+    #[test]
+    fn immediate_remote_autocontinue_and_autofollow_cycles_keep_dispatch_guard() {
+        for mode in [ContinueMode::AutoContinue, ContinueMode::AutoFollow] {
+            let mut start_a = ControlCue::new(ControlAction::Start);
+            let start_a_id = start_a.id();
+            let mut continuation = MemoCue::new();
+            continuation.set_continue_mode(mode);
+            continuation.set_post_wait(Duration::ZERO);
+            let continuation_id = continuation.id();
+            let mut start_b = ControlCue::new(ControlAction::Start);
+            let start_b_id = start_b.id();
+            start_b.target_cue_ids = vec![start_a_id];
+            start_a.target_cue_ids = vec![continuation_id];
+
+            let mut list_a = CueList::new("A");
+            list_a.push(Box::new(start_a));
+            let mut list_b = CueList::new("B");
+            list_b.push(Box::new(continuation));
+            list_b.push(Box::new(start_b));
+            let mut lists = vec![list_a, list_b];
+            let mut transport = Transport::new(context());
+
+            let result = transport.go_in_workspace(&mut lists, 0).unwrap();
+
+            assert!(result.fired.contains(&continuation_id));
+            assert!(result.fired.contains(&start_b_id));
+            assert!(result.fired.contains(&start_a_id));
+            assert!(result.fired.len() < 8, "immediate {mode:?} cross-list cycle must terminate");
+        }
+    }
+
+    #[test]
+    fn workspace_cart_go_keeps_text_stop_on_next_go_behavior() {
+        let mut text = TextCue::new();
+        let text_id = text.id();
+        set_state(&mut text, CueState::Running);
+        let target = MemoCue::new();
+        let target_id = target.id();
+        let mut list = CueList::new("Cart GO");
+        list.push(Box::new(text));
+        list.push(Box::new(target));
+        let mut lists = vec![list];
+        let mut transport = Transport::new(context());
+
+        transport.go_by_id_in_workspace(&mut lists, &target_id).unwrap();
+
+        assert_eq!(lists[0].get(&text_id).unwrap().state(), CueState::Standby);
+        assert_eq!(lists[0].playhead_cue_id, None);
+    }
+
+    #[test]
+    fn workspace_cart_go_applies_number_selected_stops_across_lists() {
+        let target = MemoCue::new();
+        let target_id = target.id();
+        let mut target_list = CueList::new("Target");
+        target_list.push(Box::new(target));
+        set_state(target_list.get_mut(&target_id).unwrap(), CueState::Running);
+
+        let number = GroupCue::new_number();
+        let mut number_json = number.serialize();
+        number_json["number_start_stop_mode"] = serde_json::json!("selected");
+        number_json["number_start_stop_ids"] = serde_json::json!([target_id.to_string()]);
+        let mut number = GroupCue::from_json_with_registry(&number_json, &crate::cue::registry::CueRegistry::new()).unwrap();
+        let master = GroupCue::new();
+        let master_id = master.id();
+        number.add_child(Box::new(master), -1).unwrap();
+        number.set_number_master(master_id).unwrap();
+        let number_id = number.id();
+        let mut number_list = CueList::new("Number");
+        number_list.push(number);
+        let mut lists = vec![number_list, target_list];
+        let mut transport = Transport::new(context());
+
+        transport.go_by_id_in_workspace(&mut lists, &number_id).unwrap();
+
+        assert_eq!(lists[1].get(&target_id).unwrap().state(), CueState::Standby);
+    }
+
+    #[test]
+    fn fade_stop_at_end_hard_stops_remote_group_descendants() {
+        let mut child = AudioCue::new();
+        let child_id = child.id();
+        set_state(&mut child, CueState::Running);
+        assert_eq!(child.state(), CueState::Running);
+        let mut group = GroupCue::new();
+        group.children.push(Box::new(child));
+        let group_id = group.id();
+        let mut lists = vec![CueList::new("Fade"), CueList::new("Remote target")];
+        lists[1].push(Box::new(group));
+        let mut transport = Transport::new(context());
+
+        let stopped = transport.hard_stop_targets_in_workspace(&mut lists, &[group_id]);
+
+        assert_eq!(stopped, vec![child_id]);
+        assert_eq!(lists[1].get_recursive(&child_id).unwrap().state(), CueState::Standby);
+    }
+
+    #[test]
+    fn workspace_goto_moves_only_the_target_owner_playhead() {
+        let mut goto = ControlCue::new(ControlAction::Goto);
+        let target_b = MemoCue::new();
+        let target_b_id = target_b.id();
+        goto.target_cue_ids = vec![target_b_id];
+        let mut list_a = CueList::new("A");
+        list_a.push(Box::new(goto));
+        let next_a = MemoCue::new();
+        let next_a_id = next_a.id();
+        list_a.push(Box::new(next_a));
+
+        let mut list_b = CueList::new("B");
+        let first_b = MemoCue::new();
+        let first_b_id = first_b.id();
+        list_b.push(Box::new(first_b));
+        list_b.push(Box::new(target_b));
+        let mut lists = vec![list_a, list_b];
+        let mut transport = Transport::new(context());
+
+        transport.go_in_workspace(&mut lists, 0).unwrap();
+
+        assert_eq!(lists[0].playhead_cue_id, Some(next_a_id));
+        assert_eq!(lists[1].playhead_cue_id, Some(target_b_id));
+        assert_ne!(lists[1].playhead_cue_id, Some(first_b_id));
+    }
+
+    #[test]
+    fn selected_pause_resume_reset_and_stop_actions_resolve_remote_targets() {
+        let mut media = AudioCue::new();
+        let media_id = media.id();
+        set_state(&mut media, CueState::Running);
+        let mut target_list = CueList::new("Target");
+        target_list.push(Box::new(media));
+
+        let mut pause = ControlCue::new(ControlAction::Pause);
+        pause.target_cue_ids = vec![media_id];
+        let pause_id = pause.id();
+        let mut resume = ControlCue::new(ControlAction::Resume);
+        resume.target_cue_ids = vec![media_id];
+        let resume_id = resume.id();
+        let mut reset = ControlCue::new(ControlAction::Reset);
+        reset.target_cue_ids = vec![media_id];
+        let reset_id = reset.id();
+        let mut stop = StopCue::new();
+        stop.target_cue_ids = vec![media_id];
+        let stop_id = stop.id();
+        let mut command_list = CueList::new("Commands");
+        command_list.push(Box::new(pause));
+        command_list.push(Box::new(resume));
+        command_list.push(Box::new(reset));
+        command_list.push(Box::new(stop));
+        let mut lists = vec![command_list, target_list];
+        let mut transport = Transport::new(context());
+
+        transport.go_by_id_in_workspace(&mut lists, &pause_id).unwrap();
+        assert_eq!(lists[1].get(&media_id).unwrap().state(), CueState::Paused);
+        transport.go_by_id_in_workspace(&mut lists, &resume_id).unwrap();
+        assert_eq!(lists[1].get(&media_id).unwrap().state(), CueState::Running);
+        transport.go_by_id_in_workspace(&mut lists, &reset_id).unwrap();
+        assert_eq!(lists[1].get(&media_id).unwrap().state(), CueState::Standby);
+
+        set_state(lists[1].get_mut(&media_id).unwrap(), CueState::Running);
+        transport.go_by_id_in_workspace(&mut lists, &stop_id).unwrap();
+        assert_eq!(lists[1].get(&media_id).unwrap().state(), CueState::Standby);
+    }
+
+    #[test]
+    fn delayed_number_start_binds_autofollow_to_target_owner_list() {
+        let number = GroupCue::new_number();
+        let number_id = number.id();
+        let mut list_a = CueList::new("Number");
+        list_a.push(Box::new(number));
+
+        let mut target = MemoCue::new();
+        target.set_continue_mode(crate::cue::types::ContinueMode::AutoFollow);
+        target.set_post_wait(Duration::from_secs(1));
+        let target_id = target.id();
+        let successor = MemoCue::new();
+        let successor_id = successor.id();
+        let mut list_b = CueList::new("Targets");
+        list_b.push(Box::new(target));
+        list_b.push(Box::new(successor));
+        let mut lists = vec![list_a, list_b];
+        let mut transport = Transport::new(context());
+
+        let result = transport.start_number_targets_in_workspace(&mut lists, 0, number_id, &[target_id]);
+        assert!(result.fired.contains(&target_id));
+        let plan = lists[1].continuation_plan(target_id).expect("continuation belongs to target list");
+        assert_eq!(plan.source_id, target_id);
+        assert_eq!(plan.source_generation, lists[1].get(&target_id).unwrap().play_generation());
+        assert!(plan.target_ids.contains(&successor_id));
     }
 
     #[test]

@@ -246,6 +246,10 @@ the Playhead.
 - **Cue number** is a string (`"1"`, `"1.5"`, `"Intro"`); selection is separate
   from the Playhead. Do not treat list position or displayed cue number as a
   stable cue identity; use UUID `CueId`.
+- Cue Lists own their cues and Playheads. Explicit command targets use cue UUIDs,
+  so a target can belong to another list; legacy number-only targets resolve
+  within their source list. See [cross-list commands](cross-list-commands.md)
+  for the contract and manual-check fixture.
 - Inspector edits commit on blur. When a background click clears cue selection,
   blur the active editor before changing selection so the edit saves against
   the cue that was selected when editing began. Memo text in Basics, the Memo

@@ -1,4 +1,4 @@
-import type { CueSummary } from "../../lib/types";
+import type { CueSummary, WorkspaceCueCatalogEntry, WorkspaceCueCatalogList } from "../../lib/types";
 
 export type RightPanelMode = "closed" | "inspector" | "active-cues";
 
@@ -18,6 +18,27 @@ export function flattenActiveCues(cues: CueSummary[]): CueSummary[] {
     if (cue.children?.length) result.push(...flattenActiveCues(cue.children));
   }
   return result;
+}
+
+export type CatalogActiveCue = WorkspaceCueCatalogEntry & { listName: string };
+export function flattenCatalogActiveCues(lists: WorkspaceCueCatalogList[]): CatalogActiveCue[] {
+  const result: CatalogActiveCue[] = [];
+  const visit = (cues: WorkspaceCueCatalogEntry[], listName: string) => {
+    for (const cue of cues) {
+      if (cue.state === "running" || cue.state === "paused") result.push({ ...cue, listName });
+      if (cue.children?.length) visit(cue.children, listName);
+    }
+  };
+  for (const list of lists) visit(list.cues, list.name);
+  return result;
+}
+
+/** Global Pause toggles every running cue, or resumes paused cues when none run. */
+export function getCatalogPauseTargets(lists: WorkspaceCueCatalogList[]): CatalogActiveCue[] {
+  const activeById = new Map(flattenCatalogActiveCues(lists).map((cue) => [cue.id, cue]));
+  const active = [...activeById.values()];
+  const running = active.filter((cue) => cue.state === "running");
+  return running.length > 0 ? running : active.filter((cue) => cue.state === "paused");
 }
 
 export function cueProgressPercent(elapsedMs: number, durationMs: number | null | undefined): number | null {

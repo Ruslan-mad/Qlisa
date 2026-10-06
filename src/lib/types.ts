@@ -819,6 +819,26 @@ export interface CueListSummary {
   mode: CueListMode;
 }
 
+/** Minimal, read-only cue snapshot for cross-list target selection. */
+export interface WorkspaceCueCatalogEntry {
+  id: CueId;
+  cue_type: CueType;
+  name: string;
+  number: string | null;
+  state: CueState;
+  color: CueColor;
+  duration_ms: number | null;
+  is_disabled: boolean;
+  output_patch_name?: string | null;
+  children?: WorkspaceCueCatalogEntry[];
+}
+
+export interface WorkspaceCueCatalogList {
+  id: string;
+  name: string;
+  cues: WorkspaceCueCatalogEntry[];
+}
+
 export interface WorkspaceInfo {
   name: string;
   is_modified: boolean;
@@ -1610,6 +1630,7 @@ export interface CueFiredEvent {
 
 export interface PlayheadMovedEvent {
   cue_id: CueId | null;
+  cue_list_id?: string;
 }
 
 export interface WorkspaceModifiedEvent {
