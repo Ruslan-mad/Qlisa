@@ -2,7 +2,9 @@
 
 ## Project and contribution
 
-- [Release notes for 1.5.11](RELEASE_NOTES_1.5.11.md) — changes in this release.
+- [Local candidate notes for 1.5.12](RELEASE_NOTES_1.5.12.md) — candidate changes;
+  awaiting user approval, not published.
+- [Release notes for 1.5.11](RELEASE_NOTES_1.5.11.md) — changes in the published release.
 - [Release notes for 1.5.10](RELEASE_NOTES_1.5.10.md) — previous release.
 - [Project guide](PROJECT_GUIDE.md) — architecture, cue lifecycle, data flow,
   build and test commands, platform prerequisites, and compatibility rules.
@@ -16,7 +18,7 @@
 ## Technical notes
 
 - [Stage theme](flagship-theme.md) — live-operation layout, saved UI preferences,
-  and manual checks for the unreleased source changes.
+  and manual checks for the local 1.5.12 candidate.
 - [Audio bus routing](audio-bus-routing.md) — routing rules for cue audio.
 - [Multi-output behavior](qlisa-multi-output.md) — display/network destinations,
   routing, delivery, and platform limits.
@@ -38,8 +40,8 @@
   and audio preview transport, headphone mute, and repeated-seek behavior.
 - [Cue wait progress and held video frames](cue-wait-and-hold.md) — Pre-Wait and
   Post-Wait progress cells plus Auto-Follow behavior at a held final frame.
-- [Follow-up regression checklist](BUGFIXES_NEXT.md) — manual checks for seven
-  source fixes after the 1.5.11 baseline; unchecked items are not verified.
+- [Regression checklist](BUGFIXES_NEXT.md) — manual checks and verification
+  evidence for the 1.5.12 candidate; unchecked items are not verified.
 - [Media preview cache](cache.md) — project-scoped waveform, thumbnail, and
   filmstrip cache behavior, invalidation, promotion, and storage limits.
 - [Media conversion](media-conversion.md) — output assignment, restoring the

@@ -18,9 +18,11 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. This source tree targets Qlisa 1.5.11; see [its release notes](RELEASE_NOTES_1.5.11.md)
-and the [Releases page](https://github.com/Ruslan-mad/Qlisa/releases) for binary
-availability. This is not an official
+1.5.8. The published baseline is Qlisa 1.5.11. This checkout contains the local
+1.5.12 candidate and its [candidate notes](RELEASE_NOTES_1.5.12.md); it awaits
+user approval and is not published. See the
+[Releases page](https://github.com/Ruslan-mad/Qlisa/releases) for available
+binaries. This is not an official
 upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
 downloads. The Tauri updater is configured for signed GitHub Releases. The
@@ -38,18 +40,16 @@ owns cue state, playback, native audio/video/output windows, networking,
 lighting, timecode, workspace persistence, and device integration. The UI
 issues typed Tauri commands and listens for backend events.
 
-## Source updates after 1.5.11
+## Changes in the local 1.5.12 candidate
 
-The working source contains seven follow-up fixes and Output Monitor changes
-after the 1.5.11 baseline. They are not part of the published 1.5.11 release
-notes. Use
-[the manual regression checklist](BUGFIXES_NEXT.md) before release review.
-
-The working source also includes the unreleased Stage theme. Its layout,
-preferences migration, transport controls, and manual regression checklist are
-documented in [the Stage theme notes](flagship-theme.md). It remains source-only
-work; frontend checks or browser QA with an IPC fixture do not validate the
-physical backend or establish release readiness.
+The candidate adds the Stage theme, cue navigation and hierarchy fixes, linked
+audio/video preview transport, Wait and held-frame transition fixes, and the
+binary Output Monitor. It also fixes restoring converted media and stopping
+nested Number cues. See the [candidate notes](RELEASE_NOTES_1.5.12.md),
+[Stage theme notes](flagship-theme.md), and [regression checklist](BUGFIXES_NEXT.md).
+The latest recorded checks are 494 frontend tests, 3 focused Rust tests, and
+`pnpm tauri:check`. They do not confirm event readiness or physical display
+performance; see [Output Monitor limits](output-monitor.md).
 
 - Group and Number rows expand or collapse by double-click and Left/Right.
 - The editor's shared Play/Pause and seek controls operate the visual preview

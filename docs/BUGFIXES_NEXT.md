@@ -1,9 +1,10 @@
 # Чеклист следующих исправлений / Follow-up regression checklist
 
-These changes are in the source after the 1.5.11 baseline. This file records
-manual checks to run; an unchecked item is not a pass. / Эти изменения внесены
-в исходный код после версии 1.5.11. Здесь записаны ручные проверки; пустой
-чекбокс не означает, что проверка пройдена.
+These changes are included in the local 1.5.12 candidate, which awaits user
+approval and is not published. This file records manual checks; an unchecked
+item is not a pass. / Эти изменения входят в локальный кандидат 1.5.12, который
+ожидает одобрения пользователя и не опубликован. Здесь записаны ручные
+проверки; пустой чекбокс не означает, что проверка пройдена.
 
 ## Manual checks / Ручные проверки
 
@@ -79,6 +80,12 @@ manual checks to run; an unchecked item is not a pass. / Эти изменени
   Continue labels in Cue List and the other transition controls.
 
 ## Подтверждённые QA-результаты
+
+- Последний общий прогон: 494 frontend-теста, 3 сфокусированных Rust-теста и
+  `pnpm tauri:check` прошли. Это программные проверки, не подтверждение event
+  readiness. Ранее пользователь принял проверенные сценарии Stage и управления;
+  предпросмотр был исправлен позднее. Аппаратные проверки Output Monitor
+  остаются ограниченными, см. [заметки монитора](output-monitor.md).
 
 - STOP Number: в mock-IPC fixture режим Legacy меняет 4 карточки на 3
   (карточка Number исчезает, две дочерние остаются). После Reset режим Fixed
