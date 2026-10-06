@@ -18,9 +18,8 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. The published baseline is Qlisa 1.5.11. This checkout contains the local
-1.5.12 candidate and its [candidate notes](RELEASE_NOTES_1.5.12.md); it awaits
-user approval and is not published. See the
+1.5.8. The published baseline was Qlisa 1.5.11. Qlisa 1.5.12 is the current
+release; see its [release notes](RELEASE_NOTES_1.5.12.md) and the
 [Releases page](https://github.com/Ruslan-mad/Qlisa/releases) for available
 binaries. This is not an official
 upstream Inkue release checkout. The source repository is public at
@@ -40,16 +39,18 @@ owns cue state, playback, native audio/video/output windows, networking,
 lighting, timecode, workspace persistence, and device integration. The UI
 issues typed Tauri commands and listens for backend events.
 
-## Changes in the local 1.5.12 candidate
+## Changes in Qlisa 1.5.12
 
-The candidate adds the Stage theme, cue navigation and hierarchy fixes, linked
+The release adds the Stage theme, cue navigation and hierarchy fixes, linked
 audio/video preview transport, Wait and held-frame transition fixes, and the
 binary Output Monitor. It also fixes restoring converted media and stopping
-nested Number cues. See the [candidate notes](RELEASE_NOTES_1.5.12.md),
+nested Number cues. See the [release notes](RELEASE_NOTES_1.5.12.md),
 [Stage theme notes](flagship-theme.md), and [regression checklist](BUGFIXES_NEXT.md).
-The latest recorded checks are 494 frontend tests, 3 focused Rust tests, and
-`pnpm tauri:check`. They do not confirm event readiness or physical display
-performance; see [Output Monitor limits](output-monitor.md).
+The final release checks passed: 494 frontend tests, 999 Rust tests, `cargo check`,
+Clippy, and a signed production NSIS build. Eleven hardware-dependent Rust tests
+were ignored. The installer signature and SHA-256 were verified. The user accepted
+the release after manual scenario checks. See [Output Monitor limits](output-monitor.md)
+for remaining technical limits.
 
 - Group and Number rows expand or collapse by double-click and Left/Right.
 - The editor's shared Play/Pause and seek controls operate the visual preview
@@ -66,8 +67,9 @@ performance; see [Output Monitor limits](output-monitor.md).
 - Output Monitor uses one binary pull request at a time, a three-PBO
   nonblocking readback, and a Canvas preview. See the [Output Monitor guide](output-monitor.md)
   for packet offsets, measured WebView/native checks, commands, and measurement
-  limits. The software is ready for local review; event and hardware readiness
-  remain unconfirmed, and this source work is not a release.
+  limits. The user accepted the release after manual scenario checks. Software
+  checks do not establish event use or physical display performance; see the
+  Output Monitor limits.
 
 Focused implementation notes: [Cue List navigation](cue-list-navigation.md),
 [headphone preview transport](headphone-preview-transport.md), and

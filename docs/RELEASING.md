@@ -42,7 +42,7 @@ key.
 Create and review the release notes, then run from the repository root:
 
 ```powershell
-.\scripts\publish.ps1 -Version 1.5.12
+.\scripts\publish.ps1 -Version 1.5.13
 ```
 
 The script checks the repository, runtime manifest pins, and signing setup. It runs
@@ -58,7 +58,7 @@ anything.
 version files or building artifacts:
 
 ```powershell
-.\scripts\publish.ps1 -Version 1.5.12 -DryRun
+.\scripts\publish.ps1 -Version 1.5.13 -DryRun
 ```
 
 Clippy warnings do not fail this check; a non-zero Clippy exit does. The

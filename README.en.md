@@ -67,10 +67,9 @@ Available Cue types include Audio, Video, Image, Text, Memo, Wait, Fade, Stop, G
 
 Configurable automatic transitions complement manual control through the Playhead, GO, STOP, and Active Cues panel. Waveform and media preview caches are stored alongside the project.
 
-The local 1.5.12 candidate includes the Stage theme for live operation, with a
+The current Qlisa 1.5.12 release includes the Stage theme for live operation, with a
 compact Cue List, independently collapsible panels, and large transport
-controls. It is awaiting user approval and has not been published. See the
-[Stage theme notes](docs/flagship-theme.md) and [1.5.12 candidate notes](docs/RELEASE_NOTES_1.5.12.md).
+controls. See the [Stage theme notes](docs/flagship-theme.md) and [1.5.12 release notes](docs/RELEASE_NOTES_1.5.12.md).
 
 ### Connecting to other systems
 
@@ -124,13 +123,13 @@ Qlisa is licensed under [GPL-3.0-or-later](LICENSE). Third-party components have
 
 ## Documentation
 
-Technical guides in docs are currently in English; the 1.5.11 release notes and local 1.5.12 candidate notes are available in English and Russian. Manual checks are listed in the [regression checklist](docs/BUGFIXES_NEXT.md).
+Technical guides in docs are currently in English; the 1.5.11 and 1.5.12 release notes are available in English and Russian. Manual checks are listed in the [regression checklist](docs/BUGFIXES_NEXT.md).
 
 - [Qlisa documentation](docs/README.md)
 - [Developer guide](docs/PROJECT_GUIDE.md)
 - [Output Monitor: packet format and preliminary WebView measurements](docs/output-monitor.md)
 - [Release preparation](docs/RELEASING.md)
 - [Version 1.5.11 release notes](docs/RELEASE_NOTES_1.5.11.md)
-- [Local 1.5.12 candidate notes](docs/RELEASE_NOTES_1.5.12.md)
+- [Version 1.5.12 release notes](docs/RELEASE_NOTES_1.5.12.md)
 - [Follow-up regression checklist](docs/BUGFIXES_NEXT.md)
 - [License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)

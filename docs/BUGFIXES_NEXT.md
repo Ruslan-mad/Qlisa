@@ -1,10 +1,10 @@
 # Чеклист следующих исправлений / Follow-up regression checklist
 
-These changes are included in the local 1.5.12 candidate, which awaits user
-approval and is not published. This file records manual checks; an unchecked
-item is not a pass. / Эти изменения входят в локальный кандидат 1.5.12, который
-ожидает одобрения пользователя и не опубликован. Здесь записаны ручные
-проверки; пустой чекбокс не означает, что проверка пройдена.
+These changes are included in the published 1.5.12 release. The user accepted
+the release after manual scenario checks. This file records per-item evidence;
+an unchecked item is not a pass. / Эти изменения вошли в опубликованный релиз
+1.5.12. Пользователь принял релиз после ручной проверки сценариев. Здесь
+записаны результаты по пунктам; пустой чекбокс не означает, что проверка пройдена.
 
 ## Manual checks / Ручные проверки
 
@@ -81,11 +81,12 @@ item is not a pass. / Эти изменения входят в локальны
 
 ## Подтверждённые QA-результаты
 
-- Последний общий прогон: 494 frontend-теста, 3 сфокусированных Rust-теста и
-  `pnpm tauri:check` прошли. Это программные проверки, не подтверждение event
-  readiness. Ранее пользователь принял проверенные сценарии Stage и управления;
-  предпросмотр был исправлен позднее. Аппаратные проверки Output Monitor
-  остаются ограниченными, см. [заметки монитора](output-monitor.md).
+- Финальная проверка релиза прошла: 494 frontend-теста, 999 Rust-тестов,
+  `cargo check`, Clippy и production NSIS-сборка с подписью. 11 Rust-тестов,
+  требующих оборудования, пропущены. Подпись установщика и SHA-256 проверены.
+  Пользователь принял релиз после ручной проверки сценариев: «всё проверил ок».
+  Результаты не заменяют ограниченные аппаратные проверки Output Monitor, см.
+  [заметки монитора](output-monitor.md).
 
 - STOP Number: в mock-IPC fixture режим Legacy меняет 4 карточки на 3
   (карточка Number исчезает, две дочерние остаются). После Reset режим Fixed
