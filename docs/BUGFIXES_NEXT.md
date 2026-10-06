@@ -77,3 +77,13 @@ manual checks to run; an unchecked item is not a pass. / Эти изменени
 - [ ] **Russian transition labels / Русские названия автопереходов.** Switch
   the interface to Russian. Check Auto-Continue, Auto-Follow, and Do Not
   Continue labels in Cue List and the other transition controls.
+
+## Подтверждённые QA-результаты
+
+- STOP Number: в mock-IPC fixture режим Legacy меняет 4 карточки на 3
+  (карточка Number исчезает, две дочерние остаются). После Reset режим Fixed
+  оставляет только независимое Audio. В Rust прошли 2 теста
+  `stop_tree_notification_tests`. Fixture не подключает реальное воспроизведение.
+- Stage: прошли 492 frontend-теста на момент проверки и `tsc`. Часы вычисляют
+  `rgba(0, 0, 0, 0)` для прозрачного фона. Визуально подтверждены четыре цвета
+  групп с долей цвета 45%; снимок: `tmp/monitor-validation/stage-colours-fixed.png`.
