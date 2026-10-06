@@ -1584,6 +1584,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
+                  textAlign: def.id === "number" ? "center" : undefined,
                   paddingLeft: 5,
                   paddingRight: 5,
                   pointerEvents: "none",

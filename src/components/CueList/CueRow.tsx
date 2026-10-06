@@ -392,11 +392,9 @@ function CueRowImpl({
   );
 
   // Keep the table grid aligned while making the hierarchy visible in the
-  // leading identity cells.  The name already reserves this inset in its
-  // own content; the type icon and cue number need the same visual offset.
-  // Keep the identity cells inside their own grid tracks.  The name column
-  // has enough room for the full hierarchy inset; the narrow icon/number
-  // cells only need a small inset to communicate nesting.
+  // leading identity cells. The name column carries the full tree indentation;
+  // the type icon has a small inset, and cue numbers stay centered in their
+  // own column.
   const nestedIdentityInset = depth > 0 ? Math.min(8, 4 + (depth - 1) * 2) : 0;
 
   function mediaInfoCell(kind: "file_size" | "resolution") {
@@ -544,17 +542,22 @@ function CueRowImpl({
 
       case "number":
         return (
-          <span style={{
-            display: "block",
-            fontFamily: "monospace",
-            color: "var(--wc-text)",
-            paddingLeft: nestedIdentityInset,
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "100%",
+            height: "100%",
             boxSizing: "border-box",
+            padding: "0 2px",
             overflow: "hidden",
             whiteSpace: "nowrap",
+            textAlign: "center",
+            fontFamily: "monospace",
+            color: "var(--wc-text)",
           }}>
             {cue.number ?? ""}
-          </span>
+          </div>
         );
 
       case "name":
