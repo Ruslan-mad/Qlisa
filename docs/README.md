@@ -16,6 +16,7 @@
 
 ## Technical notes
 
+- [GO latency measurements](go-start-latency.md) — first media progress timing for audio, images, and video, with fixture sizes and measurement limits.
 - [Stage theme](flagship-theme.md) — live-operation layout, saved UI preferences,
   and manual checks for the 1.5.12 release.
 - [Audio bus routing](audio-bus-routing.md) — routing rules for cue audio.
