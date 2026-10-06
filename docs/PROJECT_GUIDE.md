@@ -65,8 +65,9 @@ physical backend or establish release readiness.
 - Automatic transition labels use Russian translations in the Russian UI.
 - Output Monitor uses one binary pull request at a time, a three-PBO
   nonblocking readback, and a Canvas preview. See the [Output Monitor guide](output-monitor.md)
-  for packet offsets, benchmark commands, and measurement limits. Native
-  performance results remain unverified until a benchmark run is recorded.
+  for packet offsets, preliminary WebView benchmark results, commands, and
+  measurement limits. The recorded runs are WIP; they do not mark the monitor
+  READY or validate physical display scanout.
 
 Focused implementation notes: [Cue List navigation](cue-list-navigation.md),
 [headphone preview transport](headphone-preview-transport.md), and

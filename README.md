@@ -129,7 +129,7 @@ Qlisa распространяется по лицензии [GPL-3.0-or-later](
 
 - [Документация Qlisa](docs/README.md)
 - [Руководство разработчика](docs/PROJECT_GUIDE.md)
-- [Output Monitor: формат кадров и проверка производительности](docs/output-monitor.md)
+- [Output Monitor: формат кадров и предварительные замеры WebView](docs/output-monitor.md)
 - [Подготовка релиза](docs/RELEASING.md)
 - [Список изменений версии 1.5.11](docs/RELEASE_NOTES_1.5.11.md)
 - [Чеклист следующих исправлений](docs/BUGFIXES_NEXT.md)

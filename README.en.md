@@ -128,7 +128,7 @@ The navigation, audition, and binary Output Monitor details describe source chan
 
 - [Qlisa documentation](docs/README.md)
 - [Developer guide](docs/PROJECT_GUIDE.md)
-- [Output Monitor: packet format and performance checks](docs/output-monitor.md)
+- [Output Monitor: packet format and preliminary WebView measurements](docs/output-monitor.md)
 - [Release preparation](docs/RELEASING.md)
 - [Version 1.5.11 release notes](docs/RELEASE_NOTES_1.5.11.md)
 - [Follow-up regression checklist](docs/BUGFIXES_NEXT.md)
