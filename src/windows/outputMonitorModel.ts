@@ -5,6 +5,23 @@ export const OUTPUT_MONITOR_MAX_WIDTH = 640;
 export const OUTPUT_MONITOR_MAX_HEIGHT = 360;
 export const OUTPUT_MONITOR_TARGET_INTERVAL_MS = 1000 / 30;
 
+export interface OutputMonitorDisplaySize { width: number; height: number; }
+
+/** Fit the preview inside its viewport without changing its aspect ratio. */
+export function fitOutputMonitorDisplaySize(
+  availableWidth: number,
+  availableHeight: number,
+  aspectRatio: number,
+  maxWidth = OUTPUT_MONITOR_MAX_WIDTH,
+): OutputMonitorDisplaySize {
+  if (![availableWidth, availableHeight, aspectRatio, maxWidth].every(Number.isFinite)
+    || availableWidth <= 0 || availableHeight <= 0 || aspectRatio <= 0 || maxWidth <= 0) {
+    return { width: 0, height: 0 };
+  }
+  const width = Math.min(availableWidth, maxWidth, availableHeight * aspectRatio);
+  return { width, height: width / aspectRatio };
+}
+
 export type OutputMonitorStatus = "no_frame" | "frame" | "unchanged" | "black";
 
 export interface OutputMonitorPacket {
@@ -163,4 +180,3 @@ export function paintOutputMonitorFrame(
   }
   context.putImageData(cache.imageData, 0, 0);
 }
-

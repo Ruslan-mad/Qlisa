@@ -13,6 +13,7 @@ import {
 } from "../lib/commands";
 import {
   clearOutputMonitorCanvas,
+  fitOutputMonitorDisplaySize,
   OutputMonitorMetricsWindow,
   outputMonitorGenerationIsCurrent,
   outputMonitorNextDelay,
@@ -57,9 +58,11 @@ export function OutputMonitorWindow() {
   const [sourceRevision, setSourceRevision] = useState(0);
   const [monitorStatus, setMonitorStatus] = useState<"waiting" | "black" | "unavailable" | "error">("waiting");
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number } | null>(null);
   const [preview, setPreview] = useState<MonitorPreviewSelection | null>(null);
   const [alwaysOnTop, setAlwaysOnTop] = useState(readAlwaysOnTop);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
   const imageDataRef = useRef<{ imageData: ImageData | null }>({ imageData: null });
   const generation = useRef(0);
   const selectionToken = useRef(0);
@@ -164,6 +167,16 @@ export function OutputMonitorWindow() {
     void getCurrentWindow().setAlwaysOnTop(alwaysOnTop).catch(console.error);
     try { localStorage.setItem(ALWAYS_ON_TOP_KEY, String(alwaysOnTop)); } catch { /* ignore */ }
   }, [alwaysOnTop]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) setViewportSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const currentGeneration = ++generation.current;
@@ -274,6 +287,9 @@ export function OutputMonitorWindow() {
   }, [hide]);
 
   const statusText = t(statusKey(monitorStatus) as never);
+  const displaySize = viewportSize
+    ? fitOutputMonitorDisplaySize(viewportSize.width, viewportSize.height, aspectRatio ?? 16 / 9)
+    : null;
 
   return (
     <div style={{
@@ -337,7 +353,7 @@ export function OutputMonitorWindow() {
         >{t("outputMonitorUi.preview")}</button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, padding: 12, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div ref={viewportRef} style={{ flex: 1, minHeight: 0, padding: 12, display: "flex", alignItems: "center", justifyContent: "center" }}>
         {selectedTab === PREVIEW_TAB ? (
           active && preview ? (
             <div style={{ width: "100%", maxWidth: 640 }}>
@@ -351,11 +367,13 @@ export function OutputMonitorWindow() {
           )
         ) : (
           <div style={{
-            width: "100%", maxWidth: 640, aspectRatio: aspectRatio ? String(aspectRatio) : "16 / 9", position: "relative",
+            width: displaySize ? displaySize.width : "min(100%, 640px)",
+            height: displaySize ? displaySize.height : undefined,
+            maxWidth: 640, boxSizing: "border-box", aspectRatio: displaySize ? undefined : aspectRatio ? String(aspectRatio) : "16 / 9", position: "relative",
             display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden",
-            background: "#000", border: "1px solid var(--wc-border-strong)", borderRadius: 5,
+            background: "#000", boxShadow: "inset 0 0 0 1px var(--wc-border-strong)", borderRadius: 5,
           }}>
-            <canvas ref={canvasRef} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+            <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
             {(monitorStatus !== "waiting" || !aspectRatio) && (
               <span style={{ position: "absolute", padding: "6px 10px", borderRadius: 4, background: "rgba(0,0,0,.65)", color: "#d1d5db", fontSize: 11 }}>
                 {statusText}

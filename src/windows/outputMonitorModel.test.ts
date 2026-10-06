@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   OUTPUT_MONITOR_HEADER_BYTES,
+  fitOutputMonitorDisplaySize,
   OutputMonitorMetricsWindow,
   clearOutputMonitorCanvas,
   outputMonitorGenerationIsCurrent,
@@ -63,6 +64,15 @@ describe("Output Monitor binary packet", () => {
 });
 
 describe("Output Monitor polling and metrics", () => {
+  it("fits landscape, portrait and small outputs inside the viewport", () => {
+    expect(fitOutputMonitorDisplaySize(800, 500, 16 / 9)).toEqual({ width: 640, height: 360 });
+    expect(fitOutputMonitorDisplaySize(500, 300, 9 / 16)).toEqual({ width: 168.75, height: 300 });
+    const small = fitOutputMonitorDisplaySize(120, 80, 4 / 3);
+    expect(small.width).toBeCloseTo(106.6667, 3);
+    expect(small.height).toBeCloseTo(80, 3);
+    expect(fitOutputMonitorDisplaySize(500, 300, 9 / 16).width).toBeLessThanOrEqual(640);
+    expect(fitOutputMonitorDisplaySize(0, 300, 16 / 9)).toEqual({ width: 0, height: 0 });
+  });
   it("accounts for request duration and never schedules catch-up work", () => {
     expect(outputMonitorNextDelay({ requestDurationMs: 5 })).toBeCloseTo(1000 / 30 - 5);
     expect(outputMonitorNextDelay({ requestDurationMs: 40 })).toBe(0);
