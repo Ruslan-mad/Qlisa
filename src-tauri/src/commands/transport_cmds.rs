@@ -7,9 +7,10 @@ use tauri::{Emitter, State};
 use crate::{
     cue::{
         context::{CueContext, CueEvent},
+        traits::Cue,
         types::{CueState, CueType},
     },
-    show::transport::Transport,
+    show::{cue_list::CueList, transport::Transport},
     state::AppState,
 };
 use crate::engine::output_engine::BrowserSurfaceState;
@@ -273,23 +274,9 @@ pub fn stop_all(
     let context = make_context(&state, stop_fade_ms);
     let mut transport = Transport::new(context);
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-    let stopping: Vec<_> = cue_list
-        .cues
-        .iter()
-        .filter(|c| c.is_running() || c.is_paused())
-        .map(|c| c.id())
-        .collect();
+    let before = cue_list_states(cue_list);
     transport.stop_all(cue_list).map_err(|e| e.to_string())?;
-    for id in stopping {
-        let _ = app_handle.emit(
-            "cue-state-changed",
-            serde_json::json!({
-                "cue_id": id,
-                "old_state": "running",
-                "new_state": "standby",
-            }),
-        );
-    }
+    emit_stop_notifications(&app_handle, &before, &cue_list_states(cue_list));
     Ok(())
 }
 
@@ -303,31 +290,11 @@ pub fn hard_stop_all(
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let context = make_context(&state, stop_fade_ms);
     let mut transport = Transport::new(context);
-    let stopping: Vec<_> = ws
-        .cue_lists
-        .iter()
-        .flat_map(|cue_list| {
-            cue_list.all_cue_ids().into_iter().filter_map(move |id| {
-                cue_list
-                    .get_recursive(&id)
-                    .filter(|cue| cue.is_running() || cue.is_paused())
-                    .map(|cue| (id, cue.state()))
-            })
-        })
-        .collect();
+    let before = workspace_cue_states(&ws.cue_lists);
     transport
         .hard_stop_all(&mut ws.cue_lists)
         .map_err(|e| e.to_string())?;
-    for (id, old_state) in stopping {
-        if let Some(payload) = cue_state_change_payload(
-            &id.to_string(),
-            old_state,
-            CueState::Standby,
-        ) {
-            let _ = app_handle.emit("cue-state-changed", payload);
-        }
-    }
-    let _ = app_handle.emit("cue-list-refresh", serde_json::json!({}));
+    emit_stop_notifications(&app_handle, &before, &workspace_cue_states(&ws.cue_lists));
     Ok(())
 }
 
@@ -344,12 +311,16 @@ pub fn stop_cue(
     let context = make_context(&state, stop_fade_ms);
     let mut transport = Transport::new(context);
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-    let old_state = cue_list.get_recursive(&id).map(|cue| cue.state()).ok_or_else(|| format!("Cue not found: {id:?}"))?;
+    let before = cue_list
+        .get_recursive(&id)
+        .map(cue_subtree_states)
+        .ok_or_else(|| format!("Cue not found: {id:?}"))?;
     transport.stop_cue(cue_list, &id).map_err(|e| e.to_string())?;
-    let new_state = cue_list.get_recursive(&id).map(|cue| cue.state()).unwrap_or(CueState::Standby);
-    if let Some(payload) = cue_state_change_payload(&cue_id, old_state, new_state) {
-        let _ = app_handle.emit("cue-state-changed", payload);
-    }
+    let after = cue_list
+        .get_recursive(&id)
+        .map(cue_subtree_states)
+        .unwrap_or_default();
+    emit_stop_notifications(&app_handle, &before, &after);
     Ok(())
 }
 
@@ -505,6 +476,66 @@ fn cue_state_change_payload(
     }))
 }
 
+type CueStateSnapshot = Vec<(uuid::Uuid, CueState)>;
+
+fn cue_subtree_states(cue: &dyn Cue) -> CueStateSnapshot {
+    let mut states = Vec::new();
+    collect_cue_states(cue, &mut states);
+    states
+}
+
+fn collect_cue_states(cue: &dyn Cue, states: &mut CueStateSnapshot) {
+    states.push((cue.id(), cue.state()));
+    if let Some(children) = cue.child_cues() {
+        for child in children {
+            collect_cue_states(child.as_ref(), states);
+        }
+    }
+}
+
+fn cue_list_states(cue_list: &CueList) -> CueStateSnapshot {
+    let mut states = Vec::new();
+    for cue in &cue_list.cues {
+        collect_cue_states(cue.as_ref(), &mut states);
+    }
+    states
+}
+
+fn workspace_cue_states(cue_lists: &[CueList]) -> CueStateSnapshot {
+    cue_lists.iter().flat_map(cue_list_states).collect()
+}
+
+fn stop_notification_payloads(
+    before: &[(uuid::Uuid, CueState)],
+    after: &[(uuid::Uuid, CueState)],
+) -> Vec<(&'static str, serde_json::Value)> {
+    let after_by_id: std::collections::HashMap<_, _> = after.iter().copied().collect();
+    let mut events = Vec::new();
+    for (id, old_state) in before {
+        if let Some(&new_state) = after_by_id.get(id) {
+            if let Some(payload) =
+                cue_state_change_payload(&id.to_string(), *old_state, new_state)
+            {
+                events.push(("cue-state-changed", payload));
+            }
+        }
+    }
+    // A STOP can also repair a stale frontend row when the engine was already
+    // in Standby, so refresh after every successful stop command.
+    events.push(("cue-list-refresh", serde_json::json!({})));
+    events
+}
+
+fn emit_stop_notifications(
+    app_handle: &tauri::AppHandle,
+    before: &[(uuid::Uuid, CueState)],
+    after: &[(uuid::Uuid, CueState)],
+) {
+    for (event, payload) in stop_notification_payloads(before, after) {
+        let _ = app_handle.emit(event, payload);
+    }
+}
+
 #[cfg(test)]
 mod timing_tests {
     use super::cue_time_update_payload;
@@ -538,6 +569,166 @@ mod cue_state_event_tests {
         let payload = cue_state_change_payload("cue", CueState::Running, CueState::Paused).unwrap();
         assert_eq!(payload["old_state"], json!("running"));
         assert_eq!(payload["new_state"], json!("paused"));
+    }
+}
+
+#[cfg(test)]
+mod stop_tree_notification_tests {
+    use super::{cue_list_states, stop_notification_payloads};
+    use crate::{
+        cue::{
+            audio_cue::AudioCue,
+            context::{CueContext, CueEvent},
+            group_cue::GroupCue,
+            traits::{Cue, RuntimeState},
+            types::CueState,
+            video_cue::VideoCue,
+        },
+        engine::{
+            audio_engine::AudioEngine,
+            dmx_engine::DmxEngine,
+            engine_traits::OutputEngineApi,
+            output_engine::ContentRequest,
+            ring_command::VoiceId,
+        },
+        preferences::MachineAudioConfig,
+        show::{cue_list::CueList, transport::Transport},
+    };
+    use anyhow::Result;
+    use crossbeam_channel::unbounded;
+    use std::{sync::Arc, time::Duration};
+
+    struct NullOutput;
+
+    impl OutputEngineApi for NullOutput {
+        fn show_content(&self, _req: ContentRequest<'_>) -> Result<VoiceId> {
+            anyhow::bail!("unused")
+        }
+        fn stop_content(&self, _voice_id: VoiceId, _visual_fade_ms: u32, _audio_fade_ms: u32) {}
+        fn hard_stop_current(&self) {}
+        fn panic_stop(&self) {}
+        fn video_audio_voice(&self, _voice_id: VoiceId) -> Option<VoiceId> {
+            None
+        }
+        fn resync_audio_to_video(&self, _voice_id: VoiceId) {}
+        fn get_voice_opacity(&self, _voice_id: VoiceId) -> f32 {
+            1.0
+        }
+        fn set_voice_opacity(&self, _voice_id: VoiceId, _opacity: f32) {}
+        fn stop_voice(&self, _voice_id: VoiceId, _fade_ms: u32) -> Result<()> {
+            Ok(())
+        }
+        fn pause_voice(&self, _voice_id: VoiceId) -> Result<()> {
+            Ok(())
+        }
+        fn resume_voice(&self, _voice_id: VoiceId) -> Result<()> {
+            Ok(())
+        }
+        fn seek_voice_ms(&self, _voice_id: VoiceId, _position_ms: u64) {}
+        fn show_text_overlay(&self, _ass_text: &str, _screen_index: Option<u32>) {}
+        fn clear_text_overlay(&self) {}
+        fn begin_eof_fade_out(&self, _voice_id: VoiceId, _fade_ms: u32) -> bool {
+            false
+        }
+        fn devamp_voice(&self, _voice_id: VoiceId, _stop_at_end: bool) {}
+        fn start_preloaded(&self, _voice_id: VoiceId) -> bool {
+            false
+        }
+    }
+
+    fn set_state(cue: &mut dyn Cue, state: CueState) {
+        cue.restore_runtime_state(RuntimeState {
+            state,
+            voice_id: None,
+            started_at: None,
+            action_started_at: None,
+        });
+    }
+
+    fn context() -> CueContext {
+        let (events, _receiver) = unbounded::<CueEvent>();
+        CueContext::new(
+            AudioEngine::new_silent(&MachineAudioConfig::default()),
+            Arc::new(NullOutput),
+            events,
+            0,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Arc::new(DmxEngine::new()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            256,
+        )
+    }
+
+    #[test]
+    fn stopping_number_reports_nested_media_resets_and_keeps_unrelated_cue() {
+        let ctx = context();
+        let mut number = GroupCue::new_number();
+        let number_id = number.id();
+        number.set_pre_wait(Duration::from_secs(3_600));
+        number.go(&ctx).unwrap();
+        let mut nested = GroupCue::new();
+        let nested_id = nested.id();
+        nested.set_pre_wait(Duration::from_secs(3_600));
+        nested.go(&ctx).unwrap();
+        let mut audio = AudioCue::new();
+        let audio_id = audio.id();
+        set_state(&mut audio, CueState::Running);
+        let mut video = VideoCue::new();
+        let video_id = video.id();
+        set_state(&mut video, CueState::Paused);
+        nested.children.push(Box::new(audio));
+        nested.children.push(Box::new(video));
+        number.children.push(Box::new(nested));
+
+        let mut unrelated = AudioCue::new();
+        let unrelated_id = unrelated.id();
+        set_state(&mut unrelated, CueState::Running);
+        let mut list = CueList::new("Nested stop");
+        list.push(Box::new(number));
+        list.push(Box::new(unrelated));
+
+        let before = cue_list_states(&list);
+        let mut transport = Transport::new(context());
+        transport.stop_cue(&mut list, &number_id).unwrap();
+        let after = cue_list_states(&list);
+        let events = stop_notification_payloads(&before, &after);
+        let changes: std::collections::HashMap<_, _> = events
+            .iter()
+            .filter(|(event, _)| *event == "cue-state-changed")
+            .map(|(_, payload)| (payload["cue_id"].as_str().unwrap().to_owned(), payload.clone()))
+            .collect();
+
+        for (id, old_state) in [
+            (number_id, "running"),
+            (nested_id, "running"),
+            (audio_id, "running"),
+            (video_id, "paused"),
+        ] {
+            let payload = changes
+                .get(&id.to_string())
+                .expect("expected child state event");
+            assert_eq!(payload["old_state"], old_state);
+            assert_eq!(payload["new_state"], "standby");
+        }
+        assert!(!changes.contains_key(&unrelated_id.to_string()));
+        assert_eq!(list.get(&unrelated_id).unwrap().state(), CueState::Running);
+        assert_eq!(events.last().unwrap().0, "cue-list-refresh");
+    }
+
+    #[test]
+    fn successful_stop_always_refreshes_even_when_state_is_already_standby() {
+        let id = uuid::Uuid::new_v4();
+        let events = stop_notification_payloads(
+            &[(id, CueState::Standby)],
+            &[(id, CueState::Standby)],
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "cue-list-refresh");
     }
 }
 

@@ -7,6 +7,19 @@ manual checks to run; an unchecked item is not a pass. / Эти изменени
 
 ## Manual checks / Ручные проверки
 
+## Stop nested cue state / Состояния вложенных cues после STOP
+
+- [ ] Stop a running Number that contains a nested Group with running Audio
+  and paused Video cues. Confirm the parent and every descendant publish their
+  real state transition to Standby, and the Cue List refresh removes stale
+  active rows and timing indicators. Confirm an unrelated running cue stays
+  active.
+- [ ] Repeat STOP when the target is already in Standby. Confirm the command
+  still refreshes the Cue List so stale frontend state clears.
+- [ ] Use soft STOP All and hard STOP All with nested cues. Confirm each
+  changed descendant receives a state event and no unrelated cue is reported
+  as stopped.
+
 - [ ] **Stage theme / Тема Stage.** Finish the profile migration, save status,
   output binding, transport, and column preference checks in [the Stage theme
   notes](flagship-theme.md). Browser UI QA passed for independent panel
