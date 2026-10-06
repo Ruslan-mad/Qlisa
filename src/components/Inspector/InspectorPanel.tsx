@@ -8,9 +8,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ScriptCueData, AudioCueData, BrowserCueData, CameraCueData, CueSummary, CueType, DevampCueData, FadeCueData, ImageCueData, LightCueData, MemoCueData, MicCueData, MidiCueData, MidiFileCueData, NumberCueData, OscCueData, StopCueData, TextCueData, TimecodeCueData, VideoCueData, WaitCueData } from "../../lib/types";
 import { isCommandCueType } from "../../lib/types";
-import { getCue, updateCue, setAudioFile, setVideoFile, setImageFile, setMidiFile } from "../../lib/commands";
-import { AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, IMAGE_EXTENSIONS, MIDI_EXTENSIONS } from "../../lib/mediaTypes";
-import { open } from "@tauri-apps/plugin-dialog";
+import { getCue, updateCue } from "../../lib/commands";
 import { BasicsTab } from "./BasicsTab";
 import { BasicQuickControls } from "./BasicQuickControls";
 import { TimeTab } from "./TimeTab";
@@ -40,7 +38,6 @@ import { CameraTab } from "./CameraTab";
 import { BrowserTab } from "./BrowserTab";
 import { MultiCueInspector } from "./MultiCueInspector";
 import { displayedOutputIds, OutputSelector, type OutputSelectableCue } from "./OutputSelector";
-import { NumberPreview } from "./NumberPreview";
 import { formatInspectorSaveError, isCurrentCueRequest, isFadeEdit, persistCurrentThenCommit } from "./singleCueSave";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useLocale } from "../../i18n";
@@ -52,7 +49,6 @@ import {
   inspectorTitleStyle,
 } from "./InspectorChrome";
 import { CueTypeIcon } from "../common/CueTypeIcon";
-import { EditorErrorBoundary } from "../common/EditorErrorBoundary";
 
 interface Props {
   selectedCue: CueSummary | null;
@@ -127,7 +123,6 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
   const selectionKey = selectedCueIds.join("\u0000");
   const cueLoadGeneration = useRef(0);
   const cueDataTargetRef = useRef<string | null>(null);
-  const mediaRequestGeneration = useRef(0);
   const singleSaveGeneration = useRef(0);
   const currentSaveSelectionKey = useRef(selectionKey);
   const currentSelectedCueId = useRef(selectedCueIds.length === 1 ? selectedCue?.id ?? null : null);
@@ -139,9 +134,7 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
       : null;
     if (!shouldRetainCueDataForTarget(cueDataTargetRef.current, target)) setCueData(null);
     cueDataTargetRef.current = target;
-    ++mediaRequestGeneration.current;
     setSaveError(null);
-    return () => { ++mediaRequestGeneration.current; };
   }, [selectedCue?.id, selectedCue?.cue_type, selectionKey, reloadToken]);
 
   useLayoutEffect(() => {
@@ -263,53 +256,6 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
     }
   };
 
-  const browseMedia = (kind: "audio" | "video" | "image" | "midi") => async () => {
-    const targetCueId = cueData.id;
-    const ticket = { cueId: targetCueId, generation: ++mediaRequestGeneration.current };
-    const isCurrent = () => isCurrentCueRequest(ticket, mediaRequestGeneration.current, currentSelectedCueId.current);
-    const filters = {
-      audio: { name: "Audio Files", extensions: [...AUDIO_EXTENSIONS] },
-      video: { name: "Video Files", extensions: [...VIDEO_EXTENSIONS] },
-      image: { name: "Image Files", extensions: [...IMAGE_EXTENSIONS] },
-      midi: { name: "MIDI Files", extensions: [...MIDI_EXTENSIONS] },
-    }[kind];
-    const setFile = { audio: setAudioFile, video: setVideoFile, image: setImageFile, midi: setMidiFile }[kind];
-    let result: string | string[] | null;
-    try {
-      result = await open({ multiple: false, filters: [filters] });
-    } catch (error) {
-      if (isCurrent()) setSaveError(formatInspectorSaveError(error, false, t));
-      return;
-    }
-    if (typeof result === "string") {
-      if (!isCurrent()) return;
-      try {
-        await setFile(targetCueId, result);
-        if (!isCurrent()) {
-          onRefresh();
-          return;
-        }
-        // The backend rebuilt the cue (a changed file also resets start/end/
-        // slices) — re-fetch rather than patching the attempted values locally.
-        const type = cueData.cue_type;
-        const data = await getCue(targetCueId);
-        if (!isCurrent() || data.id !== targetCueId) {
-          onRefresh();
-          return;
-        }
-        setCueData({ ...data, cue_type: type } as CueData);
-        setSaveError(null);
-        onRefresh();
-        onCueSaved?.(); // the clip editor dock reloads too
-      } catch (error) {
-        if (!isCurrent()) return;
-        console.error("Failed to replace cue media:", error);
-        setSaveError(formatInspectorSaveError(error, false, t));
-        setFormRevision((revision) => revision + 1);
-      }
-    }
-  };
-
   return (
     <div style={inspectorRootStyle}>
       {/* Title */}
@@ -372,21 +318,8 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
           <>
             <BasicsTab
               cue={cueData}
-              isAudio={isAudio}
-              isVideo={isVideo}
-              isImage={isImage}
-              isMidiFile={isMidiFile}
               onSave={save}
-              onBrowse={browseMedia("audio")}
-              onBrowseVideo={browseMedia("video")}
-              onBrowseImage={browseMedia("image")}
-              onBrowseMidi={browseMedia("midi")}
             />
-            {type === "number" && (
-              <EditorErrorBoundary label="Предпросмотр номера временно недоступен">
-                <NumberPreview cue={cueData as NumberCueData} />
-              </EditorErrorBoundary>
-            )}
           </>
         )}
         {activeTab === "fade-cue" && isFade && (

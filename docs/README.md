@@ -16,9 +16,11 @@
 
 ## Technical notes
 
+- [Cross-list commands](cross-list-commands.md) — UUID targets between Cue Lists,
+  per-list Playheads, persistence, and a native manual-check fixture.
 - [GO latency measurements](go-start-latency.md) — first media progress timing for audio, images, and video, with fixture sizes and measurement limits.
-- [Stage theme](flagship-theme.md) — live-operation layout, saved UI preferences,
-  and manual checks for the 1.5.12 release.
+- [Stage theme](flagship-theme.md) — live-operation layout, Media Dock, Cue List
+  search, per-list timecode settings, and manual checks.
 - [Audio bus routing](audio-bus-routing.md) — routing rules for cue audio.
 - [Multi-output behavior](qlisa-multi-output.md) — display/network destinations,
   routing, delivery, and platform limits.

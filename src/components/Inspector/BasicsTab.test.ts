@@ -4,12 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import { cueNotesUpdate } from "../../lib/cueNotes";
 import { BasicsTab } from "./BasicsTab";
 
-function renderBasics(cue: Record<string, unknown>, isAudio = false): string {
+function renderBasics(cue: Record<string, unknown>): string {
   return renderToStaticMarkup(createElement(BasicsTab, {
     cue,
-    isAudio,
     onSave: vi.fn(),
-    onBrowse: vi.fn(),
   }));
 }
 
@@ -43,7 +41,7 @@ describe("Basics tab notes", () => {
       notes: audio.notes,
       is_disabled: false,
       file_path: null,
-    }, true);
+    });
 
     expect(html).toMatch(/<textarea[^>]*>Keep quiet<\/textarea>/);
     expect(cueNotesUpdate(audio, "Edited note")).toEqual({ notes: "Edited note" });

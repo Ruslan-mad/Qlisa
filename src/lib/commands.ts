@@ -579,9 +579,10 @@ export const setCueTcTrigger = (
   rateStr: string | null,
   realTime: boolean,
 ) => invoke<void>("set_cue_tc_trigger", { cueId, positionStr, rateStr, realTime });
-export const getCuelistTcConfig = () => invoke<CueListTcConfig | null>("get_cuelist_tc_config");
-export const setCuelistTcConfig = (config: CueListTcConfig) =>
-  invoke<void>("set_cuelist_tc_config", { config });
+export const getCuelistTcConfig = (cueListId?: string) =>
+  invoke<CueListTcConfig | null>("get_cuelist_tc_config", { cueListId });
+export const setCuelistTcConfig = (config: CueListTcConfig, cueListId?: string) =>
+  invoke<void>("set_cuelist_tc_config", { config, cueListId });
 
 // ---------------------------------------------------------------------------
 // Audio inputs + Input Patches (Mic Cues)

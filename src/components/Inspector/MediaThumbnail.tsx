@@ -33,11 +33,13 @@ export function MediaThumbnail({
   path,
   seekInto,
   sourceRevision,
+  maxHeight = 180,
 }: {
   path: string;
   sourceRevision?: string;
   /** Pick a frame ~15% in (videos — frame 0 is often black). */
   seekInto: boolean;
+  maxHeight?: number;
 }) {
   const { t } = useLocale();
   const cacheKey = `${path}\u0000${sourceRevision ?? ""}\u0000${seekInto ? 1 : 0}`;
@@ -82,7 +84,7 @@ export function MediaThumbnail({
         <img
           src={url}
           alt=""
-          style={{ display: "block", width: "100%", maxHeight: 180, objectFit: "contain" }}
+          style={{ display: "block", width: "100%", maxHeight, objectFit: "contain" }}
         />
       ) : (
         <span style={{ fontSize: 11, color: "var(--wc-text-faint)" }}>{t("status.loading")}</span>
@@ -98,6 +100,7 @@ export function MediaPreview({
   startMs = 0,
   durationMs = 0,
   sourceRevision,
+  maxHeight = 180,
 }: {
   cueId: string;
   path: string;
@@ -105,12 +108,13 @@ export function MediaPreview({
   startMs?: number;
   durationMs?: number;
   sourceRevision?: string;
+  maxHeight?: number;
 }) {
   if (kind === "image") {
-    return <MediaThumbnail path={path} seekInto={false} sourceRevision={sourceRevision} />;
+    return <MediaThumbnail path={path} seekInto={false} sourceRevision={sourceRevision} maxHeight={maxHeight} />;
   }
 
-  return <VideoPreview cueId={cueId} path={path} sourceRevision={sourceRevision} startMs={startMs} durationMs={durationMs} />;
+  return <VideoPreview cueId={cueId} path={path} sourceRevision={sourceRevision} startMs={startMs} durationMs={durationMs} maxHeight={maxHeight} />;
 }
 
 type PreviewFrameMetadata = { mediaTime: number; presentedFrames: number };
@@ -125,12 +129,14 @@ function VideoPreview({
   sourceRevision,
   startMs,
   durationMs,
+  maxHeight,
 }: {
   cueId: string;
   path: string;
   sourceRevision?: string;
   startMs: number;
   durationMs: number;
+  maxHeight: number;
 }) {
   const { t } = useLocale();
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -264,7 +270,7 @@ function VideoPreview({
   }, [failed, source]);
 
   if (failed) {
-    return <MediaThumbnail path={path} seekInto sourceRevision={sourceRevision} />;
+    return <MediaThumbnail path={path} seekInto sourceRevision={sourceRevision} maxHeight={maxHeight} />;
   }
 
   return (
@@ -322,7 +328,7 @@ function VideoPreview({
             state.setReady(identity, false);
             state.stop(identity);
           }}
-          style={{ display: "block", width: "100%", maxHeight: 180, objectFit: "contain" }}
+          style={{ display: "block", width: "100%", maxHeight, objectFit: "contain" }}
         />
       ) : (
         <span style={{ fontSize: 11, color: "var(--wc-text-faint)" }}>{t("status.loading")}</span>

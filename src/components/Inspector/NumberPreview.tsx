@@ -9,7 +9,7 @@ import { toMediaAssetUrl } from "./mediaPreviewModel";
 import { useLocale } from "../../i18n";
 import { stepPreviewAndSyncHeadphones } from "../Editor/headphonePreviewTransport";
 
-type NumberPreviewProps = { cue: NumberCueData };
+type NumberPreviewProps = { cue: NumberCueData; compact?: boolean };
 
 /** The Number transport uses the same header placement and button contract as
  * the ordinary video preview. The viewport itself remains in the Inspector. */
@@ -80,7 +80,7 @@ export function NumberPreviewControls({
 }
 
 /** Inspector-side visual preview driven by the same cursor as Number's timeline. */
-export function NumberPreview({ cue }: NumberPreviewProps) {
+export function NumberPreview({ cue, compact = false }: NumberPreviewProps) {
   const { t } = useLocale();
   const durationMs = numberMasterDuration(cue);
   const positionMs = useNumberPreviewStore((state) => state.numberId === cue.id ? state.positionMs : 0);
@@ -215,12 +215,12 @@ export function NumberPreview({ cue }: NumberPreviewProps) {
   };
 
   return (
-    <div style={previewShell} aria-label="Number preview">
+    <div style={{ ...previewShell, ...(compact ? { marginBottom: 0, padding: 4 } : {}) }} aria-label="Number preview">
       <div style={previewHeader}>
         <span style={previewTitle}>Preview</span>
         <span style={previewTime}>{(positionMs / 1000).toFixed(2)} / {(durationMs / 1000).toFixed(2)}s</span>
       </div>
-      <div style={previewViewport}>
+      <div style={{ ...previewViewport, ...(compact ? { aspectRatio: "auto", height: 140, minHeight: 90 } : {}) }}>
         {!item ? (
           <span style={previewHint}>{t("numberUi.previewAudioOnly")}</span>
         ) : !renderAssetUrl ? (

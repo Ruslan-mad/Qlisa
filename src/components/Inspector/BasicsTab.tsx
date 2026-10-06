@@ -3,35 +3,17 @@
 
 import { Field, Grid2, MiniField, Section, ToggleRow, inputStyle } from "./Field";
 import { ColorPicker } from "./ColorPicker";
-import { MediaPreview } from "./MediaThumbnail";
-import { resolveMediaPreviewKind } from "./mediaPreviewModel";
 import { useLocale } from "../../i18n";
 import { cueNotesText, cueNotesUpdate } from "../../lib/cueNotes";
 
 export function BasicsTab({
   cue,
-  isAudio,
-  isVideo,
-  isImage,
-  isMidiFile,
   onSave,
-  onBrowse,
-  onBrowseVideo,
-  onBrowseImage,
-  onBrowseMidi,
 }: {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   cue: any;
-  isAudio: boolean;
-  isVideo?: boolean;
-  isImage?: boolean;
-  isMidiFile?: boolean;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   onSave: (p: Partial<any>) => void;
-  onBrowse: () => void;
-  onBrowseVideo?: () => void;
-  onBrowseImage?: () => void;
-  onBrowseMidi?: () => void;
 }) {
   const { t } = useLocale();
   return (
@@ -66,50 +48,6 @@ export function BasicsTab({
           />
         </Field>
       </Section>
-
-      {(isAudio || isVideo || isImage || isMidiFile) && (
-        <Section title={t("inspector.media")}>
-          {(isVideo || isImage) && cue.file_path && (
-            <MediaPreview
-              key={`${cue.id}\u0000${cue.file_path}\u0000${cue.media_source_revision ?? ""}`}
-              cueId={cue.id}
-              path={cue.file_path}
-              sourceRevision={cue.media_source_revision}
-              kind={resolveMediaPreviewKind(!!isVideo)}
-              startMs={cue.start_time_ms ?? 0}
-              durationMs={cue.cached_duration_ms ?? cue.file_duration_ms ?? cue.duration_ms ?? 0}
-            />
-          )}
-          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-            <input
-              style={{ ...inputStyle, flex: 1 }}
-              readOnly
-              value={cue.file_path ? cue.file_path.split(/[\\/]/).pop() ?? cue.file_path : t("common.none")}
-              title={cue.file_path ?? ""}
-            />
-            <button
-              style={{
-                padding: "4px 12px",
-                background: "var(--wc-bg-hover)",
-                border: "1px solid var(--wc-border-strong)",
-                borderRadius: 4,
-                color: "var(--wc-text)",
-                cursor: "pointer",
-                fontSize: 12,
-                flexShrink: 0,
-              }}
-              onClick={
-                isVideo ? onBrowseVideo
-                : isImage ? onBrowseImage
-                : isMidiFile ? onBrowseMidi
-                : onBrowse
-              }
-            >
-              {t("uiFixes.browse")}
-            </button>
-          </div>
-        </Section>
-      )}
 
       <Section title={t("inspector.flow")}>
         <ToggleRow

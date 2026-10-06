@@ -4,14 +4,24 @@ import { useState, useRef, useEffect } from "react";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import {
   addCueList, removeCueList, renameCueList, setActiveCueList, setCueListMode,
-  getCuelistTcConfig, setCuelistTcConfig,
 } from "../../lib/commands";
-import type { CueListTcConfig, TcRate, TcOnStop } from "../../lib/types";
-import { Select } from "../common/Select";
-import { DragNumber } from "../common/DragNumber";
 import { useLocale } from "../../i18n";
 
-export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
+export function CueListTabs({
+  onRefresh,
+  showTabs = true,
+  searchQuery = "",
+  onSearchQueryChange,
+  showSearchBar = false,
+  searchInputRef,
+}: {
+  onRefresh: () => void;
+  showTabs?: boolean;
+  searchQuery?: string;
+  onSearchQueryChange?: (value: string) => void;
+  showSearchBar?: boolean;
+  searchInputRef?: React.RefObject<HTMLInputElement>;
+}) {
   const { cueLists, activeCueListId, refreshCueLists } = useWorkspaceStore();
   const { t } = useLocale();
 
@@ -84,15 +94,22 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
   };
 
   return (
-    <div
+    <div style={{
+      display: "flex", flexDirection: "column", flexShrink: 0,
+      background: "var(--wc-bg-app)", borderBottom: "1px solid var(--wc-border)",
+    }}>
+      {(showTabs || showSearchBar) && <div
       style={{
         display: "flex", alignItems: "center", height: 30,
-        background: "var(--wc-bg-app)",
-        borderBottom: "1px solid var(--wc-border)",
-        flexShrink: 0, gap: 1, paddingLeft: 4, paddingRight: 4,
-        overflowX: "auto", overflowY: "hidden",
+        flexShrink: 0, minWidth: 0, gap: 8, paddingLeft: 4, paddingRight: 4,
+        overflow: "hidden",
       }}
     >
+      {showTabs && <>
+      <div style={{
+        display: "flex", alignItems: "center", flex: "1 1 auto", minWidth: 0,
+        gap: 1, overflowX: "auto", overflowY: "hidden", height: "100%",
+      }}>
       {cueLists.map((list) => {
         const isActive = list.id === activeCueListId;
         const isRenaming = list.id === renamingId;
@@ -170,9 +187,7 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
       >
         +
       </button>
-
-      {/* Per-list timecode sync */}
-      <CueListTcSync activeCueListId={activeCueListId} />
+      </div>
 
       {/* Context menu */}
       {contextMenu && (
@@ -207,153 +222,33 @@ export function CueListTabs({ onRefresh }: { onRefresh: () => void }) {
           />
         </div>
       )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Per-cue-list timecode sync control (lives at the right of the tab bar).
-// Gates whether incoming TC fires this list's cues (event_loop dispatcher reads
-// CueList.tc_config.enabled). Edits the *active* cue list via get/setCuelistTcConfig.
-// ---------------------------------------------------------------------------
-
-const TC_RATES: TcRate[] = ["24", "25", "29.97", "29.97df", "30"];
-const TC_RATE_LABELS: Record<TcRate, string> = {
-  "24": "24 fps", "25": "25 fps (PAL)", "29.97": "29.97 fps",
-  "29.97df": "29.97df (NTSC DF)", "30": "30 fps",
-};
-const ON_STOP_LABELS: Record<TcOnStop, string> = {
-  continue: "keepRunning", pause: "pauseRunning", stop: "stopRunning",
-};
-
-const tcFieldLabel: React.CSSProperties = { fontSize: 10, color: "var(--wc-text-muted)", marginBottom: 3 };
-const tcInputStyle: React.CSSProperties = {
-  background: "var(--wc-bg-app)", border: "1px solid var(--wc-border-strong)",
-  borderRadius: 4, color: "var(--wc-text)", fontSize: 12, padding: "4px 6px",
-  width: "100%", boxSizing: "border-box",
-};
-
-function CueListTcSync({ activeCueListId }: { activeCueListId: string | null }) {
-  const { t, locale } = useLocale();
-  const [cfg, setCfg] = useState<CueListTcConfig | null>(null);
-  const [open, setOpen] = useState(false);
-  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    getCuelistTcConfig()
-      .then((c) => setCfg(c ?? { enabled: false, rate: "30", freewheel_ms: 500, on_stop: "continue" }))
-      .catch(console.error);
-  }, [activeCueListId]);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = () => setOpen(false);
-    window.addEventListener("click", close);
-    return () => window.removeEventListener("click", close);
-  }, [open]);
-
-  if (!cfg) return null;
-
-  const apply = (patch: Partial<CueListTcConfig>) => {
-    const next = { ...cfg, ...patch };
-    setCfg(next);
-    setCuelistTcConfig(next).catch(console.error);
-  };
-
-  return (
-    <div style={{ marginLeft: "auto", position: "relative", flexShrink: 0 }}>
-      <button
-        ref={btnRef}
-        onClick={(e) => {
-          e.stopPropagation();
-          const r = btnRef.current?.getBoundingClientRect();
-          if (r) setAnchor({ x: r.right, y: r.bottom + 4 });
-          setOpen((v) => !v);
-        }}
-        title={t("transport.timecode")}
-        style={{
-          display: "flex", alignItems: "center", gap: 5, height: 22,
-          padding: "0 8px", borderRadius: 4, cursor: "pointer",
-          background: "transparent", fontSize: 11, fontWeight: 600, letterSpacing: "0.04em",
-          color: cfg.enabled ? "var(--wc-accent)" : "var(--wc-text-faint)",
-          border: `1px solid ${cfg.enabled ? "var(--wc-accent)" : "var(--wc-border)"}`,
-        }}
-      >
-        <span style={{
-          width: 6, height: 6, borderRadius: "50%",
-          background: cfg.enabled ? "var(--wc-accent)" : "var(--wc-text-faint)",
-        }} />
-        {locale === "ru" ? "СИНХРОНИЗАЦИЯ TC" : "TC SYNC"}
-      </button>
-
-      {open && anchor && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            position: "fixed", left: anchor.x, top: anchor.y, transform: "translateX(-100%)",
-            background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)",
-            borderRadius: 6, padding: 12, zIndex: 9999, width: 240,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.7)",
-            display: "flex", flexDirection: "column", gap: 10,
-          }}
-        >
-          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-            <input
-              type="checkbox"
-              checked={cfg.enabled}
-              onChange={(e) => apply({ enabled: e.target.checked })}
-              style={{ accentColor: "var(--wc-accent)", width: 14, height: 14 }}
-            />
-            {locale === "ru" ? "Синхронизировать cue с входящим таймкодом" : "Sync cues from incoming timecode"}
-          </label>
-
-          <div>
-            <div style={tcFieldLabel}>{t("components.expectedRate")}</div>
-            <Select
-              style={{ ...tcInputStyle, cursor: "pointer" }}
-              value={cfg.rate}
-              onChange={(e) => apply({ rate: e.target.value as TcRate })}
-            >
-              {TC_RATES.map((r) => <option key={r} value={r}>{TC_RATE_LABELS[r]}</option>)}
-            </Select>
-          </div>
-
-          <div>
-            <div style={tcFieldLabel}>{t("components.freewheel")}</div>
-            <DragNumber
-              min={0}
-              max={2000}
-              step={50}
-              value={cfg.freewheel_ms}
-              onChange={(e) => apply({ freewheel_ms: Math.max(0, Math.min(2000, Number(e.target.value) || 0)) })}
-              style={{ ...tcInputStyle, fontFamily: "monospace" }}
-            />
-          </div>
-
-          <div>
-            <div style={tcFieldLabel}>{t("components.onStop")}</div>
-            <Select
-              style={{ ...tcInputStyle, cursor: "pointer" }}
-              value={cfg.on_stop}
-              onChange={(e) => apply({ on_stop: e.target.value as TcOnStop })}
-            >
-              {(["continue", "pause", "stop"] as TcOnStop[]).map((s) => (
-                <option key={s} value={s}>{t(`sweepUi.${ON_STOP_LABELS[s]}`)}</option>
-              ))}
-            </Select>
-          </div>
-
-          <div style={{ fontSize: 10, color: "var(--wc-text-faint)", lineHeight: 1.4 }}>
-            {locale === "ru"
-              ? "Включите приём TC в Настройки → Сеть, затем задайте время срабатывания каждого cue на вкладке Инспектор → Триггеры."
-              : "Enable TC receive in Preferences → Network, then set per-cue trigger times in the Inspector → Triggers tab."}
-          </div>
+      </>}
+      {showSearchBar && (
+        <div style={{ flex: "0 0 180px", width: 180, minWidth: 160, marginLeft: "auto" }}>
+          <input
+            ref={searchInputRef}
+            type="search"
+            value={searchQuery}
+            onChange={(e) => onSearchQueryChange?.(e.target.value)}
+            placeholder={t("cueList.searchPlaceholder")}
+            aria-label={t("common.search")}
+            style={{
+              width: "100%", height: 23, boxSizing: "border-box",
+              padding: "2px 7px", border: "1px solid var(--wc-border-strong)",
+              borderRadius: 4, background: "var(--wc-bg-surface)",
+              color: "var(--wc-text)", fontSize: 12, outline: "none",
+            }}
+          />
         </div>
       )}
+      </div>}
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Per-cue-list TC configuration now lives under Preferences → Network.
+// ---------------------------------------------------------------------------
 
 function ContextMenuItem({
   label, onClick, danger, disabled,

@@ -1,11 +1,14 @@
 // Timecode section shown in Preferences → Network.
 // Configures the TC receiver (enable, source, MIDI input port).
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import type { TcMachineConfig, DeviceInfo } from "../../lib/types";
-import { getTcConfig, setTcConfig, listTcMidiInputPorts, listInputDevices } from "../../lib/commands";
+import { getCueLists, getTcConfig, setTcConfig, listTcMidiInputPorts, listInputDevices } from "../../lib/commands";
+import type { CueListSummary } from "../../lib/types";
 import { Select } from "../common/Select";
 import { useLocale } from "../../i18n";
+import { CueListTcPreferences } from "./CueListTcPreferences";
 
 const inputStyle: React.CSSProperties = {
   background: "var(--wc-bg-app)",
@@ -32,11 +35,41 @@ export function TcPreferences() {
   });
   const [ports, setPorts] = useState<string[]>([]);
   const [inputDevices, setInputDevices] = useState<DeviceInfo[]>([]);
+  const [cueLists, setCueLists] = useState<CueListSummary[]>([]);
+  const [selectedCueListId, setSelectedCueListId] = useState("");
+  const cueListsGeneration = useRef(0);
 
   useEffect(() => {
     getTcConfig().then(setConfigState).catch(console.error);
     listTcMidiInputPorts().then(setPorts).catch(console.error);
     listInputDevices().then(setInputDevices).catch(console.error);
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const refreshCueListChoices = (clearWhileRefreshing = false) => {
+      const request = ++cueListsGeneration.current;
+      if (clearWhileRefreshing) {
+        setCueLists([]);
+      }
+      getCueLists().then((lists) => {
+        if (disposed || cueListsGeneration.current !== request) return;
+        setCueLists(lists);
+        setSelectedCueListId((current) => lists.some((list) => list.id === current) ? current : (lists[0]?.id ?? ""));
+      }).catch((error) => {
+        if (!disposed && cueListsGeneration.current === request) console.error(error);
+      });
+    };
+    refreshCueListChoices();
+    const subscribe = async (event: string) => {
+      const unlisten = await listen(event, () => refreshCueListChoices(true));
+      if (disposed) unlisten();
+      else unlisteners.push(unlisten);
+    };
+    void Promise.all([subscribe("workspace-replaced"), subscribe("cue-lists-changed")]).catch(console.error);
+    return () => {
+      disposed = true;
+      cueListsGeneration.current += 1;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
   }, []);
 
   const apply = async (next: TcMachineConfig) => {
@@ -143,6 +176,17 @@ export function TcPreferences() {
             {t("preferencesUi.timecodeHint")}
           </div>
         </>
+      )}
+
+      {cueLists.length > 0 && cueLists.some((list) => list.id === selectedCueListId) && (
+        <div style={{ marginTop: 18, paddingTop: 12, borderTop: "1px solid var(--wc-border)" }}>
+          <div style={{ ...labelStyle, marginBottom: 10 }}>{t("transport.timecode")}</div>
+          <CueListTcPreferences
+            lists={cueLists}
+            selectedListId={selectedCueListId}
+            onSelectedListIdChange={setSelectedCueListId}
+          />
+        </div>
       )}
     </div>
   );

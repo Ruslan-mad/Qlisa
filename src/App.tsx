@@ -13,6 +13,7 @@ import { ActiveCuesView } from "./components/ActiveCues/ActiveCuesView";
 import { toggleRightPanel, type RightPanelMode, flattenCatalogActiveCues } from "./components/ActiveCues/activeCueModel";
 import { CueListTabs } from "./components/CueList/CueListTabs";
 import { InspectorPanel } from "./components/Inspector/InspectorPanel";
+import { MediaDock } from "./components/Inspector/MediaDock";
 import { ClipEditorDock } from "./components/Editor/ClipEditorDock";
 import { CurveEditorDock } from "./components/Curve/CurveEditorDock";
 import { TransportBar } from "./components/Transport/TransportBar";
@@ -33,6 +34,7 @@ import { QlabImportDialog } from "./components/Import/QlabImportDialog";
 import type { CueSummary } from "./lib/types";
 import { useLocale } from "./i18n";
 import { CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, normalizeClipEditorVisibility, resolveClipEditorTargetCueId, toggleClipEditorPanel } from "./lib/clipEditorPrefs";
+import { CLIP_EDITOR_DOCK_HEIGHT } from "./components/Editor/clipEditorLayout";
 import { hasActivePlayback } from "./lib/closeGuard";
 import { normalizeNumberCueData } from "./components/Inspector/numberModel";
 import { resolveMonitorPreviewSelection } from "./components/Inspector/numberPreviewSelection";
@@ -1501,6 +1503,8 @@ export default function App() {
       ? t("stageUi.savedStatus")
       : t("stageUi.savedAt", { time: new Date(confirmedSavedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) });
 
+  const clipEditorVisible = clipEditorDockVisible(showLivePanel, showSlicePanel);
+
   useEffect(() => {
     const title = workspaceInfo?.name
       ? t("app.workspaceTitle", { name: workspaceInfo.name })
@@ -1734,8 +1738,25 @@ export default function App() {
                 <button type="button" onClick={() => setActiveCuesOpen(true)} title={t("toolbar.activeCuesToggle")} aria-label={t("toolbar.activeCuesToggle")} aria-expanded={false} style={{ border: 0, background: "transparent", color: "var(--wc-text-muted)", cursor: "pointer", writingMode: "vertical-rl", fontSize: 10, padding: "8px 4px" }}>{t("menus.activeCues")}</button>
               </div>
             )}
-            <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-              {showCueListTabs && <CueListTabs onRefresh={handleRefresh} />}
+            <div style={{
+              flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden", display: "grid",
+              gridTemplateColumns: `minmax(0, 1fr) ${inspectorWidth}px`,
+              gridTemplateRows: `minmax(0, 1fr) ${CLIP_EDITOR_DOCK_HEIGHT}px`,
+              position: "relative",
+            }}>
+              <div style={{
+                gridColumn: rightPanel === "closed" ? "1 / -1" : "1",
+                gridRow: clipEditorVisible || rightPanel === "closed" ? "1" : "1 / -1",
+                minWidth: 0, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative",
+              }}>
+              {(showCueListTabs || showSearchBar) && <CueListTabs
+                onRefresh={handleRefresh}
+                showTabs={showCueListTabs}
+                searchQuery={searchQuery}
+                onSearchQueryChange={setSearchQuery}
+                showSearchBar={showSearchBar}
+                searchInputRef={searchInputRef}
+              />}
               {searchQuery.trim() ? (
                 <SearchResults
                   query={searchQuery.trim()}
@@ -1782,99 +1803,62 @@ export default function App() {
                   reloadToken={editorReload}
                 />
               )}
-
-              {/* Clip editor dock — trim + slices for the opened cue */}
-              {clipEditorDockVisible(showLivePanel, showSlicePanel) && (
-                <ClipEditorDock
-                  // A Number owns the multi-track Live timeline. Its child
-                  // cues open their own editor for Slice, trim, and crop.
-                  cueId={resolveClipEditorTargetCueId(
-                    selectedCueId,
-                    editorCueId,
-                    selectedCue?.cue_type,
-                    numberTimelineCueId,
-                  )}
-                  showLivePanel={showLivePanel}
-                  showSlicePanel={showSlicePanel}
-                  activeTab={activeClipTab}
-                  onActiveTabChange={handleClipTabChange}
-                  onClose={() => setEditorCueId(null)}
-                  onSaved={() => {
-                    void handleRefresh();
-                    setInspectorReload((n) => n + 1);
-                    // Re-fetch the active ClipEditorDock target as well. A
-                    // child can be trimmed from its own dock while a Number
-                    // parent remains the timeline owner; without this bump
-                    // the parent keeps its old nested child timings/assets.
-                    setEditorReload((n) => n + 1);
-                  }}
-                  reloadToken={editorReload}
-                />
-              )}
-
-              {/* Search bar — anchored at the bottom of the cue list */}
-              {showSearchBar && (
-                <div style={{ padding: "4px 8px", borderTop: "1px solid var(--wc-border)", flexShrink: 0 }}>
-                  <input
-                    ref={searchInputRef}
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Escape") setSearchQuery(""); }}
-                    placeholder={t("cueList.searchPlaceholder")}
-                    style={{
-                      width: "100%", boxSizing: "border-box",
-                      background: searchQuery ? "var(--wc-bg-surface)" : "transparent",
-                      border: searchQuery ? "1px solid var(--wc-accent)" : "1px solid transparent",
-                      borderRadius: 4, color: "var(--wc-text)", fontSize: 12,
-                      padding: "4px 8px", outline: "none",
-                      transition: "border-color 0.15s, background 0.15s",
+            </div>
+            {clipEditorVisible && <div style={{ gridColumn: "1", gridRow: "2", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+              <ClipEditorDock
+                cueId={resolveClipEditorTargetCueId(selectedCueId, editorCueId, selectedCue?.cue_type, numberTimelineCueId)}
+                showLivePanel={showLivePanel}
+                showSlicePanel={showSlicePanel}
+                activeTab={activeClipTab}
+                onActiveTabChange={handleClipTabChange}
+                onClose={() => setEditorCueId(null)}
+                onSaved={() => {
+                  void handleRefresh();
+                  setInspectorReload((n) => n + 1);
+                  setEditorReload((n) => n + 1);
+                }}
+                reloadToken={editorReload}
+              />
+            </div>}
+            {rightPanel !== "closed" && (
+              <div className="stage-panel-right" style={{ gridColumn: "2", gridRow: "1", minWidth: 0, minHeight: 0, position: "relative", borderLeft: "1px solid var(--wc-border)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                <div id="stage-inspector" style={{ flex: 1, minHeight: 0, position: "relative", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                  <div onPointerDown={handleInspectorResizeStart} title={t("toolbar.resize")} style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 5, cursor: "ew-resize", zIndex: 2 }} />
+                  <InspectorPanel
+                    selectedCue={selectedCue}
+                    selectedCueIds={selectedCueIds}
+                    allCues={cues}
+                    onRefresh={handleRefresh}
+                    onOpenEditor={(id) => {
+                      setEditorCueId(id);
+                      setShowSlicePanel(true);
+                      setActiveClipTab("Slice");
+                      persistClipEditorPrefs({ show_slice_panel: true, clip_editor_active_tab: "Slice" });
                     }}
+                    onOpenCurveEditor={(id) => setCurveCueId(id)}
+                    reloadToken={inspectorReload}
+                    onCueSaved={() => {
+                      setInspectorReload((n) => n + 1);
+                      setEditorReload((n) => n + 1);
+                    }}
+                    onSelectCue={(id) => useWorkspaceStore.getState().setSelectedCueId(id)}
                   />
                 </div>
-              )}
-            </div>
-            {rightPanel !== "closed" ? (
-              <div
-                id="stage-inspector"
-                className="stage-panel-right"
-                style={{
-                  width: inspectorWidth, position: "relative",
-                  borderLeft: "1px solid var(--wc-border)",
-                  overflow: "hidden", display: "flex", flexDirection: "column", flexShrink: 0,
-                }}
-              >
-                <div
-                  onPointerDown={handleInspectorResizeStart}
-                  title={t("toolbar.resize")}
-                  style={{
-                    position: "absolute", left: 0, top: 0, bottom: 0, width: 5,
-                    cursor: "ew-resize", zIndex: 2,
-                  }}
-                />
-                <InspectorPanel
-                  selectedCue={selectedCue}
-                  selectedCueIds={selectedCueIds}
-                  allCues={cues}
-                  onRefresh={handleRefresh}
-                  onOpenEditor={(id) => {
-                    setEditorCueId(id);
-                    // Inspector's expand affordance is specifically the Slice
-                    // editor. Reveal it even if View previously hid Slice.
-                    setShowSlicePanel(true);
-                    setActiveClipTab("Slice");
-                    persistClipEditorPrefs({ show_slice_panel: true, clip_editor_active_tab: "Slice" });
-                  }}
-                  onOpenCurveEditor={(id) => setCurveCueId(id)}
-                  reloadToken={inspectorReload}
-                  onCueSaved={() => setEditorReload((n) => n + 1)}
-                  onSelectCue={(id) => useWorkspaceStore.getState().setSelectedCueId(id)}
-                />
-              </div>
-            ) : (
-              <div className="stage-panel-right-collapsed" style={{ width: 34, flex: "0 0 34px", display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 8, borderLeft: "1px solid var(--wc-border)" }}>
-                <button type="button" onClick={() => setRightPanel("inspector")} title={t("toolbar.inspectorToggle")} aria-label={t("toolbar.inspectorToggle")} aria-expanded={false} style={{ border: 0, background: "transparent", color: "var(--wc-text-muted)", cursor: "pointer", writingMode: "vertical-rl", fontSize: 10, padding: "8px 4px" }}>{t("menus.inspector")}</button>
               </div>
             )}
+            <div style={{ gridColumn: "2", gridRow: "2", minWidth: 0, minHeight: 0, borderLeft: "1px solid var(--wc-border)", overflow: "hidden" }}>
+              <MediaDock
+                cue={selectedCue ?? null}
+                selectedCueCount={selectedCueIds.length}
+                reloadToken={inspectorReload}
+                onRefresh={handleRefresh}
+                onCueSaved={() => {
+                  setInspectorReload((n) => n + 1);
+                  setEditorReload((n) => n + 1);
+                }}
+              />
+            </div>
+            </div>
           </>
         )}
       </div>
