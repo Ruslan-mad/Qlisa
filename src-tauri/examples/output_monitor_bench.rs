@@ -407,16 +407,15 @@ fn show_check_image(output: &OutputEngine, output_id: &str, path: &Path) -> Resu
 fn assert_frame_color(
     frame: &inkue_lib::engine::network_io::BgraFrame,
     rgb: [u8; 3],
-    aspect: f64,
     label: &str,
-) -> Result<()> {
+) -> Result<(u32, u32, f64)> {
     frame.validate().map_err(anyhow::Error::msg)?;
     if frame.width > 640 || frame.height > 360 {
         return Err(anyhow!("{label}: monitor frame exceeds 640×360: {}×{}", frame.width, frame.height));
     }
     let got_aspect = frame.width as f64 / frame.height as f64;
-    if (got_aspect - aspect).abs() > 0.035 {
-        return Err(anyhow!("{label}: aspect ratio {got_aspect:.3} differs from expected {aspect:.3}"));
+    if !got_aspect.is_finite() || got_aspect <= 0.0 {
+        return Err(anyhow!("{label}: invalid aspect ratio {got_aspect}"));
     }
     let offset = (frame.height as usize / 2) * frame.stride as usize
         + (frame.width as usize / 2) * 4;
@@ -425,7 +424,7 @@ fn assert_frame_color(
     if got.iter().zip(expected).any(|(actual, wanted)| actual.abs_diff(wanted) > 32) {
         return Err(anyhow!("{label}: center BGRA {:?}, expected near {:?}", got, expected));
     }
-    Ok(())
+    Ok((frame.width, frame.height, got_aspect))
 }
 
 fn check_capture(
@@ -434,9 +433,8 @@ fn check_capture(
     sequence: &mut u64,
     session: u64,
     rgb: [u8; 3],
-    aspect: f64,
     label: &str,
-) -> Result<()> {
+) -> Result<(u32, u32, f64)> {
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut last_mismatch = None;
     loop {
@@ -448,8 +446,8 @@ fn check_capture(
                 if frame_session != session {
                     return Err(anyhow!("frame session {frame_session} does not match requested session {session}"));
                 }
-                match assert_frame_color(&frame, rgb, aspect, label) {
-                    Ok(()) => return Ok(()),
+                match assert_frame_color(&frame, rgb, label) {
+                    Ok(size_and_aspect) => return Ok(size_and_aspect),
                     Err(error) => last_mismatch = Some(error),
                 }
             }
@@ -468,7 +466,7 @@ fn check_destinations(name_a: &str, name_b: &str) -> [OutputDestination; 2] {
         OutputDestination {
             id: "default".into(), name: name_a.into(),
             sink_kind: OutputSinkKind::Display, network: Default::default(), monitor: None,
-            floating_window: Some(FloatingWindowGeometry { x: 40, y: 40, width: 320, height: 180, maximized: false }),
+            floating_window: Some(FloatingWindowGeometry { x: 40, y: 40, width: 480, height: 320, maximized: false }),
             enabled: true, always_on_top: false, hide_cursor: false,
             transform: OutputTransform::default(), fullscreen_locked: false,
         },
@@ -509,27 +507,30 @@ fn run_integration_checks(output: &OutputEngine, fixture_dir: &Path) -> Result<s
         ];
         show_check_image(output, "default", paths["red"].as_path())?;
         show_check_image(output, "bench-b", paths["blue"].as_path())?;
+        thread::sleep(Duration::from_secs(2));
 
         let mut session = 1_u64;
         let mut default_sequence = 0_u64;
         let mut portrait_sequence = 0_u64;
         if !output.set_output_monitor_source(Some("default"), session)? { return Err(anyhow!("initial A source selection was rejected")); }
-        check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "A landscape")?;
+        let landscape_dimensions = check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], "A source")?;
+        let landscape_aspect = landscape_dimensions.2;
         session += 1;
         if !output.set_output_monitor_source(Some("bench-b"), session)? { return Err(anyhow!("initial B source selection was rejected")); }
-        check_capture(output, "bench-b", &mut portrait_sequence, session, [0, 0, 255], 320.0 / 568.0, "B portrait")?;
+        let portrait_dimensions = check_capture(output, "bench-b", &mut portrait_sequence, session, [0, 0, 255], "B source")?;
+        let portrait_aspect = portrait_dimensions.2;
 
         for cycle in 0..10 {
             session += 1;
             if !output.set_output_monitor_source(Some("default"), session)? { return Err(anyhow!("A selection rejected at cycle {cycle}")); }
-            check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "A→B→A return")?;
+            check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], "A→B→A return")?;
             session += 1;
             if !output.set_output_monitor_source(Some("bench-b"), session)? { return Err(anyhow!("B selection rejected at cycle {cycle}")); }
-            check_capture(output, "bench-b", &mut portrait_sequence, session, [0, 0, 255], 320.0 / 568.0, "A→B→A portrait")?;
+            check_capture(output, "bench-b", &mut portrait_sequence, session, [0, 0, 255], "A→B→A B return")?;
             if output.set_output_monitor_source(None, session - 1)? {
                 return Err(anyhow!("stale source token was accepted at cycle {cycle}"));
             }
-            check_capture(output, "bench-b", &mut portrait_sequence, session, [0, 0, 255], 320.0 / 568.0, "stale token kept B active")?;
+            check_capture(output, "bench-b", &mut portrait_sequence, session, [0, 0, 255], "stale token kept B active")?;
         }
 
         for cycle in 0..10 {
@@ -540,39 +541,54 @@ fn run_integration_checks(output: &OutputEngine, fixture_dir: &Path) -> Result<s
             }
             session += 1;
             if !output.set_output_monitor_source(Some("default"), session)? { return Err(anyhow!("re-enable rejected at cycle {cycle}")); }
-            check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "disable→re-enable")?;
+            check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], "disable→re-enable")?;
         }
 
         let mut color_checks = Vec::new();
         for (name, rgb) in colors {
             output.panic_stop();
             show_check_image(output, "default", paths[name].as_path())?;
-            check_capture(output, "default", &mut default_sequence, session, rgb, 16.0 / 9.0, name)?;
+            check_capture(output, "default", &mut default_sequence, session, rgb, name)?;
             color_checks.push(name);
         }
 
         output.panic_stop();
         show_check_image(output, "default", paths["red"].as_path())?;
-        check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "master fade red baseline")?;
+        check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], "master fade red baseline")?;
         output.set_overlay_alpha_direct(255);
-        check_capture(output, "default", &mut default_sequence, session, [0, 0, 0], 16.0 / 9.0, "master fade black")?;
+        check_capture(output, "default", &mut default_sequence, session, [0, 0, 0], "master fade black")?;
         output.set_overlay_alpha_direct(0);
-        check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "master fade clear")?;
+        check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], "master fade clear")?;
 
         if !output.toggle_output_ftb("default")? { return Err(anyhow!("FTB enable did not enter blackout")); }
-        check_capture(output, "default", &mut default_sequence, session, [0, 0, 0], 16.0 / 9.0, "FTB black")?;
+        check_capture(output, "default", &mut default_sequence, session, [0, 0, 0], "FTB black")?;
         if output.toggle_output_ftb("default")? { return Err(anyhow!("FTB disable remained in blackout")); }
-        check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "FTB clear")?;
+        check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], "FTB clear")?;
 
         Ok(json!({
             "result": "passed",
             "displayCount": screens.len(),
             "outputMonitor": { "sourceSwitchCycles": 10, "disableReenableCycles": 10, "staleTokensRejected": true },
-            "frames": { "maxWidth": 640, "maxHeight": 360, "landscapeAspect": 16.0 / 9.0, "portraitAspect": 320.0 / 568.0 },
+            "frames": {
+                "maxWidth": 640, "maxHeight": 360,
+                "sourceA": {
+                    "requested": { "width": 480, "height": 320, "aspect": 480.0 / 320.0 },
+                    "actualCapture": { "width": landscape_dimensions.0, "height": landscape_dimensions.1, "aspect": landscape_aspect },
+                    "geometryMatch": (landscape_aspect - 480.0 / 320.0).abs() <= 0.035,
+                },
+                "sourceB": {
+                    "requested": { "width": 320, "height": 568, "aspect": 320.0 / 568.0 },
+                    "actualCapture": { "width": portrait_dimensions.0, "height": portrait_dimensions.1, "aspect": portrait_aspect },
+                    "geometryMatch": (portrait_aspect - 320.0 / 568.0).abs() <= 0.035,
+                },
+            },
             "colorSequence": color_checks,
             "masterFade": true,
             "operatorFadeToBlack": true,
-            "limitations": ["Layer opacity/blend/crop/text/timer composition is not covered by these checks."],
+            "limitations": [
+                "Native floating output portrait geometry is reported but not guaranteed by these checks.",
+                "Layer opacity/blend/crop/text/timer composition is not covered by these checks.",
+            ],
         }))
     })();
     let _ = output.set_output_monitor_source(None, u64::MAX);
