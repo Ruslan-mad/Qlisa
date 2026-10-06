@@ -1629,7 +1629,7 @@ export default function App() {
         }}
       >
         {/* Main title row. Menus stay in their own compact row below. */}
-        <div className="stage-header-main" style={{ display: "flex", alignItems: "center", height: 64, padding: "0 12px", gap: 12, position: "relative" }}>
+        <div className="stage-header-main" style={{ display: "flex", alignItems: "center", height: 64, padding: "0 12px", gap: 12, position: "relative", zIndex: 2 }}>
           <div data-tauri-drag-region style={{ flex: "1 1 0", maxWidth: "max(0px, calc(50% - 125px))", minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: 10, overflow: "hidden" }}>
             <div data-tauri-drag-region style={{ flexShrink: 0, pointerEvents: "none", display: "flex" }}>
               <InkueMark size={30} />

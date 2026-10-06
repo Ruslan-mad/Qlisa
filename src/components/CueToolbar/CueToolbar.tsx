@@ -23,6 +23,7 @@ const buttonStyle: React.CSSProperties = {
 export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggleRightPanel, onAdd, onDragStart }: Props) {
   const { t, locale } = useLocale();
   const leftRef = useRef<HTMLDivElement>(null);
+  const moreRef = useRef<HTMLDivElement>(null);
   const measureRefs = useRef(new Map<CueType, HTMLButtonElement>());
   const moreMeasureRef = useRef<HTMLButtonElement>(null);
   const [availableWidth, setAvailableWidth] = useState(0);
@@ -33,6 +34,15 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
   const [hoveredMore, setHoveredMore] = useState(false);
   const descriptors = CUE_TOOLBAR_DESCRIPTORS;
   const layout = useMemo(() => resolveCueToolbarLayout(availableWidth, dimensions.widths, dimensions.more), [availableWidth, dimensions]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!moreRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [open]);
 
   useEffect(() => {
     const container = leftRef.current;
@@ -101,7 +111,7 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
   });
 
   return (
-    <div className="stage-toolbar-row" style={{ display: "flex", flexWrap: "nowrap", gap: 8, padding: "0 12px 8px", alignItems: "center", minWidth: 0 }} onClick={(event) => {
+    <div className="stage-toolbar-row" style={{ display: "flex", flexWrap: "nowrap", gap: 8, padding: "0 12px 8px", alignItems: "center", minWidth: 0, position: "relative", zIndex: 0 }} onClick={(event) => {
       const button = (event.target as HTMLElement).closest("button");
       button?.animate([
         { transform: "scale(1)", filter: "brightness(1)" },
@@ -111,7 +121,7 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
     }}>
       <div ref={leftRef} className="stage-cue-actions" style={{ display: "flex", flex: "1 1 0", minWidth: 0, flexWrap: "nowrap", alignItems: "center", gap: 8, overflow: "visible" }}>
         {layout.visible.map((type) => mainButton(type))}
-        {layout.showMore && <div style={{ position: "relative", flexShrink: 0, zIndex: open ? 10002 : undefined }}>
+        {layout.showMore && <div ref={moreRef} style={{ position: "relative", flexShrink: 0, zIndex: open ? 10002 : undefined }}>
           {open && <div style={{ position: "fixed", inset: 0, zIndex: 10000 }} onClick={() => setOpen(false)} />}
           <button aria-haspopup="menu" aria-expanded={open} style={{ ...buttonStyle, position: "relative", width: "max-content", minWidth: 72, minHeight: 62, padding: "6px 10px", borderRadius: 6, display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3, flexShrink: 0, userSelect: "none", fontSize: 13, fontWeight: 600, color: hoveredMore || open ? "var(--wc-text)" : "var(--wc-text-secondary)", borderColor: hoveredMore || open ? "var(--wc-text-secondary)" : "var(--wc-border-strong)", background: hoveredMore || open ? "var(--wc-bg-hover)" : "var(--wc-bg-surface)", transition: "color 0.12s, border-color 0.12s, background 0.12s" }}
             onClick={(event) => { event.stopPropagation(); setOpen((value) => !value); }} onMouseEnter={() => setHoveredMore(true)} onMouseLeave={() => setHoveredMore(false)} title={t("toolbar.otherTitle")}>
