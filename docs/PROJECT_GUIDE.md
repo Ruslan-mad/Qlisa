@@ -702,7 +702,10 @@ path. Compatibility results are heuristics for the playback engine; they do
 not guarantee decode quality on every platform. Conversion and metadata probes
 run outside the audio callback and transport path. Windows first launch
 downloads `ffmpeg.exe` and `ffprobe.exe` from one pinned BtbN archive directly
-from upstream. See [Windows network runtime packaging](windows-network-runtime.md).
+from upstream. Cue assignment and source restoration use UUID lookup, including
+nested visual cues. See the [media conversion note](media-conversion.md) for
+restore guards, metadata refresh, and video preload behavior, and
+[Windows network runtime packaging](windows-network-runtime.md) for runtime details.
 
 ### Diagnostics
 

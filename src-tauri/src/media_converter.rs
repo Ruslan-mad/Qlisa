@@ -263,7 +263,7 @@ impl MediaConverterManager {
             .lock()
             .map_err(|e| e.to_string())?
             .applied_to_cue = applied;
-        emit_job(&record.app, &record);
+        emit_job_with_kind(&record.app, &record, "applied-state");
         Ok(())
     }
 
@@ -1149,7 +1149,11 @@ fn conversion_worker(
             );
         }
     }
-    emit_job(&app, &record);
+    if record.snapshot().status == ConversionStatus::Completed {
+        emit_job_with_kind(&app, &record, "worker");
+    } else {
+        emit_job(&app, &record);
+    }
     // Release the single FFmpeg slot only after this job has fully reaped its
     // child and finalized its output.  Then immediately promote the next job.
     queue.active.store(false, Ordering::Release);
@@ -1171,7 +1175,21 @@ fn append_diagnostic_line(path: &Path, line: &str) {
 }
 
 fn emit_job(app: &tauri::AppHandle, record: &JobRecord) {
-    let _ = app.emit(MEDIA_CONVERSION_EVENT, record.snapshot());
+    emit_job_with_kind(app, record, "state");
+}
+
+#[derive(Clone, Serialize)]
+struct MediaConversionEvent {
+    #[serde(flatten)]
+    job: MediaConversionJob,
+    kind: &'static str,
+}
+
+fn emit_job_with_kind(app: &tauri::AppHandle, record: &JobRecord, event_kind: &'static str) {
+    let _ = app.emit(
+        MEDIA_CONVERSION_EVENT,
+        MediaConversionEvent { job: record.snapshot(), kind: event_kind },
+    );
 }
 
 #[cfg(windows)]

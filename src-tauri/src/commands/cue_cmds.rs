@@ -4176,6 +4176,42 @@ fn set_file_path_resetting_clip(json: &mut serde_json::Value, file_path: &str) {
     }
 }
 
+/// Rebuild a file-backed visual cue after changing its media path. Resolve and
+/// replace by UUID so cues nested in Groups and Numbers behave like top-level
+/// cues.
+fn replace_file_backed_cue_path(
+    cue_list: &mut crate::show::cue_list::CueList,
+    registry: &crate::cue::registry::CueRegistry,
+    id: &Uuid,
+    cue_type: CueType,
+    file_path: &str,
+) -> Result<(), String> {
+    let cue = cue_list.get_mut_recursive(id).ok_or("Cue not found")?;
+    if cue.cue_type() != cue_type {
+        return Err(match cue_type {
+            CueType::Video => "set_video_file only applies to Video Cues",
+            CueType::Image => "set_image_file only applies to Image Cues",
+            _ => "set_file_path only applies to visual media Cues",
+        }.to_string());
+    }
+    let mut json = cue.serialize();
+    update_auto_media_name(&mut json, &cue_type, file_path);
+    if cue_type == CueType::Video {
+        set_file_path_resetting_clip(&mut json, file_path);
+    } else if let Some(obj) = json.as_object_mut() {
+        obj.insert("file_path".to_string(), serde_json::json!(file_path));
+    }
+    let new_cue = registry.from_json(json).map_err(|e| e.to_string())?;
+    if !cue_list.replace_cue_recursive(id, new_cue) {
+        return Err("Cue not found".to_string());
+    }
+    Ok(())
+}
+
+fn video_preload_matches_current_path(cue: &dyn Cue, path: &std::path::Path) -> bool {
+    cue.media_file_path() == Some(path)
+}
+
 /// Set the file path of an audio cue.
 /// Uses the same JSON-merge-and-rebuild strategy as [`update_cue`].
 #[tauri::command]
@@ -5320,19 +5356,16 @@ pub fn set_video_file(
         .map(|path| path.to_owned());
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-
-    let idx = cue_list.index_of(&id).ok_or("Cue not found")?;
-    if cue_list.cues[idx].cue_type() != CueType::Video {
-        return Err("set_video_file only applies to Video Cues".to_string());
+    if let Some(cue) = cue_list.get_mut_recursive(&id) {
+        if cue.cue_type() != CueType::Video {
+            return Err("set_video_file only applies to Video Cues".to_string());
+        }
+        stop_if_live(cue, &state, stop_fade_ms);
+    } else {
+        return Err("Cue not found".to_string());
     }
-
-    stop_if_live(cue_list.cues[idx].as_mut(), &state, stop_fade_ms);
-    let mut json = cue_list.cues[idx].serialize();
-    update_auto_media_name(&mut json, &CueType::Video, &file_path);
-    set_file_path_resetting_clip(&mut json, &file_path);
-    let new_cue = registry.from_json(json).map_err(|e| e.to_string())?;
+    replace_file_backed_cue_path(cue_list, &registry, &id, CueType::Video, &file_path)?;
     drop(registry);
-    cue_list.cues[idx] = new_cue;
 
     // Mark as loading — the audio track is decoded off-thread (the indicator
     // clears when decoding finishes), mirroring Audio Cues.
@@ -5366,15 +5399,25 @@ pub fn set_video_file(
                 let audio = crate::cue::media_decode::probe_audio_track(&path);
 
                 // Search all cue lists — the user may have switched lists while loading.
+                let mut assignment_is_current = false;
+                let mut cue_still_exists = false;
                 if let Ok(mut ws) = workspace2.lock() {
                     'store: {
                         for cl in ws.cue_lists.iter_mut() {
-                            if let Some(idx2) = cl.index_of(&cue_id) {
+                            if let Some(cue) = cl.get_mut_recursive(&cue_id) {
+                                cue_still_exists = true;
+                                // A later file assignment may have replaced this source
+                                // while its probe was running. Do not apply stale duration
+                                // or audio state to the newly assigned media.
+                                if !video_preload_matches_current_path(cue, &path) {
+                                    break 'store;
+                                }
+                                assignment_is_current = true;
                                 if let Some(dur) = duration {
-                                    cl.cues[idx2].set_runtime_duration(dur);
+                                    cue.set_runtime_duration(dur);
                                 }
                                 match audio {
-                                    Ok(Some(info)) => cl.cues[idx2].accept_preloaded_stream(
+                                    Ok(Some(info)) => cue.accept_preloaded_stream(
                                         path.clone(),
                                         info.channels,
                                         info.sample_rate,
@@ -5392,8 +5435,10 @@ pub fn set_video_file(
                         }
                     }
                 }
-                if let Ok(mut loading) = loading_cues.lock() {
-                    loading.remove(&cue_id);
+                if assignment_is_current || !cue_still_exists {
+                    if let Ok(mut loading) = loading_cues.lock() {
+                        loading.remove(&cue_id);
+                    }
                 }
                 let _ = handle2.emit("workspace-modified", serde_json::json!({}));
             })
@@ -5512,21 +5557,16 @@ pub fn set_image_file(
         .map(|path| path.to_owned());
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-
-    let idx = cue_list.index_of(&id).ok_or("Cue not found")?;
-    if cue_list.cues[idx].cue_type() != CueType::Image {
-        return Err("set_image_file only applies to Image Cues".to_string());
+    if let Some(cue) = cue_list.get_mut_recursive(&id) {
+        if cue.cue_type() != CueType::Image {
+            return Err("set_image_file only applies to Image Cues".to_string());
+        }
+        stop_if_live(cue, &state, stop_fade_ms);
+    } else {
+        return Err("Cue not found".to_string());
     }
-
-    stop_if_live(cue_list.cues[idx].as_mut(), &state, stop_fade_ms);
-    let mut json = cue_list.cues[idx].serialize();
-    update_auto_media_name(&mut json, &CueType::Image, &file_path);
-    if let Some(obj) = json.as_object_mut() {
-        obj.insert("file_path".to_string(), serde_json::json!(file_path));
-    }
-    let new_cue = registry.from_json(json).map_err(|e| e.to_string())?;
+    replace_file_backed_cue_path(cue_list, &registry, &id, CueType::Image, &file_path)?;
     drop(registry);
-    cue_list.cues[idx] = new_cue;
 
     drop(ws);
     invalidate_media_metadata_path(
@@ -6044,7 +6084,9 @@ mod tests {
         apply_new_cue_output_defaults, new_cue_output_ids_for_type,
         number_preview_child_is_active, number_source_elapsed_ms, preview_source_position_ms,
         preview_request_is_current, preview_session_matches, preserve_preview_pause,
-        probe_media_metadata_file, set_file_path_resetting_clip, should_replace_generated_name,
+        media_metadata_key, probe_media_metadata_file, replace_file_backed_cue_path,
+        set_file_path_resetting_clip,
+        should_replace_generated_name,
         take_inactive_preview_session, take_preview_session_for_cue,
         take_preview_session_for_voice, wait_for_preview_stream_ready,
         PreviewStreamWaitError,
@@ -6058,6 +6100,8 @@ mod tests {
         control_cue::{ControlCueFactory, ALL_CONTROL_ACTIONS},
         devamp_cue::DevampCueFactory,
         fade_cue::FadeCueFactory,
+        group_cue::GroupCue,
+        image_cue::ImageCueFactory,
         registry::CueRegistry,
         video_cue::{VideoCue, VideoCueFactory},
         stop_cue::StopCue,
@@ -6081,6 +6125,102 @@ mod tests {
             registry.register(action.cue_type(), Box::new(ControlCueFactory(action)));
         }
         registry
+    }
+
+    #[test]
+    fn nested_visual_media_assignment_and_restore_keep_original_and_neighbor_paths() {
+        use crate::cue::traits::CueFactory;
+        use crate::cue::video_cue::VideoCueFactory;
+
+        let temp = std::env::temp_dir().join(format!("qlisa-nested-media-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
+        let original = temp.join("original-4k.mp4");
+        let converted = temp.join("converted-1080.mp4");
+        let converted_image = temp.join("converted.png");
+        let original_image = temp.join("original.png");
+        let neighbor_path = temp.join("neighbor.png");
+        for path in [&original, &converted, &converted_image, &original_image, &neighbor_path] {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+
+        let mut registry = CueRegistry::new();
+        registry.register(CueType::Video, Box::new(VideoCueFactory));
+        registry.register(CueType::Image, Box::new(ImageCueFactory));
+
+        for cue_type in [CueType::Video, CueType::Image] {
+            let is_video = cue_type == CueType::Video;
+            let source = if is_video { &original } else { &original_image };
+            let mut visual = match cue_type {
+                CueType::Video => VideoCueFactory.create(),
+                CueType::Image => ImageCueFactory.create(),
+                _ => unreachable!(),
+            };
+            let mut serialized = visual.serialize();
+            serialized["file_path"] = serde_json::json!(source.to_string_lossy());
+            visual = registry.from_json(serialized).unwrap();
+            let cue_id = visual.id();
+
+            let mut group = GroupCue::new();
+            group.children.push(visual);
+            let mut neighbor = ImageCueFactory.create();
+            let mut neighbor_json = neighbor.serialize();
+            neighbor_json["file_path"] = serde_json::json!(neighbor_path.to_string_lossy());
+            neighbor = registry.from_json(neighbor_json).unwrap();
+            let neighbor_id = neighbor.id();
+            let mut list = CueList::new("nested conversion restore");
+            list.push(Box::new(group));
+            list.push(neighbor);
+
+            let output_path = if is_video { &converted } else { &converted_image };
+            replace_file_backed_cue_path(
+                &mut list,
+                &registry,
+                &cue_id,
+                cue_type.clone(),
+                &output_path.to_string_lossy(),
+            )
+            .unwrap();
+            assert_eq!(
+                list.get_recursive(&cue_id).unwrap().media_file_path(),
+                Some(output_path.as_path())
+            );
+
+            replace_file_backed_cue_path(
+                &mut list,
+                &registry,
+                &cue_id,
+                cue_type.clone(),
+                &source.to_string_lossy(),
+            )
+            .unwrap();
+            assert_eq!(
+                list.get_recursive(&cue_id).unwrap().media_file_path(),
+                Some(source.as_path())
+            );
+            assert_eq!(
+                media_metadata_key(list.get_recursive(&cue_id).unwrap(), None)
+                    .unwrap()
+                    .path,
+                source.as_path()
+            );
+            assert_eq!(
+                list.get_recursive(&neighbor_id).unwrap().media_file_path(),
+                Some(neighbor_path.as_path())
+            );
+            if is_video {
+                assert!(list.get_recursive(&cue_id).unwrap().serialize()["cached_duration_ms"].is_null());
+                assert!(!super::video_preload_matches_current_path(
+                    list.get_recursive(&cue_id).unwrap(),
+                    output_path,
+                ));
+                assert!(super::video_preload_matches_current_path(
+                    list.get_recursive(&cue_id).unwrap(),
+                    source,
+                ));
+            }
+        }
+
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

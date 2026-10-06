@@ -42,6 +42,8 @@
   source fixes after the 1.5.11 baseline; unchecked items are not verified.
 - [Media preview cache](cache.md) — project-scoped waveform, thumbnail, and
   filmstrip cache behavior, invalidation, promotion, and storage limits.
+- [Media conversion](media-conversion.md) — output assignment, restoring the
+  source path, and metadata/preload refresh behavior.
 - [Audio underrun diagnostics](audio-underrun-diagnostics.md) — callback-safe
   underrun context, reproduced cold-start evidence, and real-device test setup.
 - [Windows network runtime](windows-network-runtime.md) — NDI and FFmpeg/SRT

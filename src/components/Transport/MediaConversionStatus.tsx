@@ -1,39 +1,46 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useLocale } from "../../i18n";
 import { getMediaConversionStatus, listMediaConversions, replaceCueMedia } from "../../lib/commands";
 import { useMediaConversionStore } from "../../stores/mediaConversionStore";
 import { conversionProgress } from "../MediaConversion/mediaConversionModel";
+import {
+  handleMediaConversionJobUpdate,
+  subscribeToMediaConversionEvents,
+} from "./mediaConversionEvents";
 
 export function MediaConversionStatus() {
   const { t } = useLocale();
   const jobs = useMediaConversionStore((state) => state.jobs);
   const clearFinished = useMediaConversionStore((state) => state.clearFinished);
   const upsert = useMediaConversionStore((state) => state.upsert);
+  const handledCompletionIds = useRef(new Set<string>());
   const [open, setOpen] = useState(false);
   const active = jobs.filter((job) => job.status === "queued" || job.status === "running");
   const finished = jobs.filter((job) => job.status === "completed" || job.status === "failed" || job.status === "cancelled");
   const activeIds = active.map((job) => job.id).join(",");
   const statusLabel = (status: string) => status === "completed" ? t("mediaConversion.completed") : status === "failed" ? t("mediaConversion.failed") : t("mediaConversion.cancelled");
+  const acceptWorkerEvent = useCallback((event: Parameters<typeof handleMediaConversionJobUpdate>[0]) => {
+    handleMediaConversionJobUpdate(
+      event,
+      upsert,
+      replaceCueMedia,
+      handledCompletionIds.current,
+    );
+  }, [upsert]);
 
   useEffect(() => {
-    void listMediaConversions().then((items) => items.forEach(upsert)).catch(() => undefined);
-    const subscription = listen("media-conversion-event", (event) => {
-      const job = event.payload as Parameters<typeof upsert>[0];
-      upsert(job);
-      // The worker emits `completed` only after the temporary output has been
-      // atomically renamed and validated. Apply it through the existing Cue
-      // command so the original path remains tracked for Restore original.
-      // Jobs without a Cue (or already applied) are intentionally untouched.
-      if (job.status === "completed" && job.cue_id && !job.applied_to_cue) {
-        void replaceCueMedia(job.id)
-          .then(() => upsert({ ...job, applied_to_cue: true }))
-          .catch((reason) => console.warn("automatic media replacement failed", reason));
-      }
-    });
-    return () => { void subscription.then((unlisten) => unlisten()); };
-  }, [upsert]);
+    void listMediaConversions().then((items) => items.forEach((job) => {
+      // Initial snapshots are history, not a worker completion transition.
+      // Preserve jobs that already received a live event while this request ran.
+      if (!useMediaConversionStore.getState().jobs.some((item) => item.id === job.id)) upsert(job);
+    })).catch(() => undefined);
+    return subscribeToMediaConversionEvents(
+      (handler) => listen("media-conversion-event", (event) => handler({ payload: event.payload })),
+      acceptWorkerEvent,
+    );
+  }, [acceptWorkerEvent, upsert]);
 
   useEffect(() => {
     if (!activeIds) return;
