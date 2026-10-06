@@ -1,6 +1,6 @@
 //! Native Output Monitor benchmark.
 //!
-//! Run with `cargo run --release --example output_monitor_bench -- <video> [seconds] [off|4|30] [layers] [webview|checks]`.
+//! Run with `cargo run --release --example output_monitor_bench -- <video> [seconds] [off|4|30] [layers] [webview|checks|webview-checks]`.
 //! This measures the native renderer, mailbox, and production packet encoder.
 //! Add `webview` as the final argument to exercise the real Output Monitor window,
 //! Tauri IPC, and Canvas conversion. It does not measure display scanout.
@@ -30,7 +30,7 @@ use tauri::{Emitter, Manager, State};
 struct BenchState {
     output: Arc<OutputEngine>,
     frontend: Arc<std::sync::Mutex<FrontendAggregate>>,
-    capture_enabled: bool,
+    sources: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -117,11 +117,7 @@ impl FrontendAggregate {
 
 #[tauri::command]
 fn list_output_monitor_sources(state: State<'_, BenchState>) -> Vec<OutputMonitorSource> {
-    if state.capture_enabled {
-        vec![OutputMonitorSource { id: "default".into(), name: "Main".into() }]
-    } else {
-        Vec::new()
-    }
+    state.sources.iter().map(|(id, name)| OutputMonitorSource { id: id.clone(), name: name.clone() }).collect()
 }
 
 #[tauri::command]
@@ -146,9 +142,14 @@ async fn get_output_monitor_frame(
     let output = Arc::clone(&state.output);
     let frame = output.output_monitor_frame(&source_id, after_sequence.unwrap_or(0), selection_token)
         .map_err(|error| error.to_string())?;
+    let request_delay_ms = env::var("QLISA_MONITOR_BENCH_REQUEST_DELAY_MS")
+        .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0).min(1000);
     tauri::async_runtime::spawn_blocking(move || {
         use inkue_lib::engine::output_engine::OutputMonitorFrameRead;
         let started = Instant::now();
+        if request_delay_ms > 0 {
+            thread::sleep(Duration::from_millis(request_delay_ms));
+        }
         match frame {
                 OutputMonitorFrameRead::NoFrame => encode_output_monitor_packet(0, 0, 0, 0,
                     0, selection_token, 0, started.elapsed().as_micros().min(u32::MAX as u128) as u32, &[]),
@@ -185,7 +186,7 @@ fn report_output_monitor_frontend_diagnostics(
     metrics: OutputMonitorFrontendMetrics,
     state: State<'_, BenchState>,
 ) -> Result<(), String> {
-    if metrics.source_id.as_deref().is_some_and(|source_id| source_id != "default") {
+    if metrics.source_id.as_ref().is_some_and(|source_id| !state.sources.iter().any(|(id, _)| id == source_id)) {
         return Err("unexpected output monitor source id".into());
     }
     let values = [metrics.received_fps, metrics.displayed_fps, metrics.frame_age_last_ms,
@@ -462,39 +463,52 @@ fn check_capture(
     }
 }
 
-fn run_integration_checks(output: &OutputEngine, fixture_dir: &Path) -> Result<serde_json::Value> {
-    let checks = (|| -> Result<serde_json::Value> {
-        let screens = output.list_screens();
-        if screens.is_empty() { return Err(anyhow!("no connected display available")); }
-        let default = OutputDestination {
-            id: "default".into(), name: "Bench landscape".into(),
+fn check_destinations(name_a: &str, name_b: &str) -> [OutputDestination; 2] {
+    [
+        OutputDestination {
+            id: "default".into(), name: name_a.into(),
             sink_kind: OutputSinkKind::Display, network: Default::default(), monitor: None,
             floating_window: Some(FloatingWindowGeometry { x: 40, y: 40, width: 320, height: 180, maximized: false }),
             enabled: true, always_on_top: false, hide_cursor: false,
             transform: OutputTransform::default(), fullscreen_locked: false,
-        };
-        let portrait = OutputDestination {
-            id: "bench-portrait".into(), name: "Bench portrait".into(),
+        },
+        OutputDestination {
+            id: "bench-b".into(), name: name_b.into(),
             sink_kind: OutputSinkKind::Display, network: Default::default(), monitor: None,
             floating_window: Some(FloatingWindowGeometry { x: 400, y: 40, width: 320, height: 568, maximized: false }),
             enabled: true, always_on_top: false, hide_cursor: false,
             transform: OutputTransform::default(), fullscreen_locked: false,
-        };
-        output.configure_outputs(&[default, portrait], "default")?;
+        },
+    ]
+}
 
+fn create_check_fixtures(fixture_dir: &Path) -> Result<std::collections::HashMap<&'static str, std::path::PathBuf>> {
+    let colors = [
+        ("red", [255, 0, 0]), ("green", [0, 255, 0]), ("blue", [0, 0, 255]),
+        ("white", [255, 255, 255]), ("black", [0, 0, 0]),
+    ];
+    std::fs::create_dir_all(fixture_dir)?;
+    let mut paths = std::collections::HashMap::new();
+    for (name, rgb) in colors {
+        let path = fixture_dir.join(format!("{name}.bmp"));
+        write_solid_bmp(&path, rgb)?;
+        paths.insert(name, path);
+    }
+    Ok(paths)
+}
+
+fn run_integration_checks(output: &OutputEngine, fixture_dir: &Path) -> Result<serde_json::Value> {
+    let checks = (|| -> Result<serde_json::Value> {
+        let screens = output.list_screens();
+        if screens.is_empty() { return Err(anyhow!("no connected display available")); }
+        output.configure_outputs(&check_destinations("Bench landscape", "Bench portrait"), "default")?;
+        let paths = create_check_fixtures(fixture_dir)?;
         let colors = [
             ("red", [255, 0, 0]), ("green", [0, 255, 0]), ("blue", [0, 0, 255]),
             ("white", [255, 255, 255]), ("black", [0, 0, 0]),
         ];
-        std::fs::create_dir_all(fixture_dir)?;
-        let mut paths = std::collections::HashMap::new();
-        for (name, rgb) in colors {
-            let path = fixture_dir.join(format!("{name}.bmp"));
-            write_solid_bmp(&path, rgb)?;
-            paths.insert(name, path);
-        }
         show_check_image(output, "default", paths["red"].as_path())?;
-        show_check_image(output, "bench-portrait", paths["blue"].as_path())?;
+        show_check_image(output, "bench-b", paths["blue"].as_path())?;
 
         let mut session = 1_u64;
         let mut default_sequence = 0_u64;
@@ -502,20 +516,20 @@ fn run_integration_checks(output: &OutputEngine, fixture_dir: &Path) -> Result<s
         if !output.set_output_monitor_source(Some("default"), session)? { return Err(anyhow!("initial A source selection was rejected")); }
         check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "A landscape")?;
         session += 1;
-        if !output.set_output_monitor_source(Some("bench-portrait"), session)? { return Err(anyhow!("initial B source selection was rejected")); }
-        check_capture(output, "bench-portrait", &mut portrait_sequence, session, [0, 0, 255], 320.0 / 568.0, "B portrait")?;
+        if !output.set_output_monitor_source(Some("bench-b"), session)? { return Err(anyhow!("initial B source selection was rejected")); }
+        check_capture(output, "bench-b", &mut portrait_sequence, session, [0, 0, 255], 320.0 / 568.0, "B portrait")?;
 
         for cycle in 0..10 {
             session += 1;
             if !output.set_output_monitor_source(Some("default"), session)? { return Err(anyhow!("A selection rejected at cycle {cycle}")); }
             check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "A→B→A return")?;
             session += 1;
-            if !output.set_output_monitor_source(Some("bench-portrait"), session)? { return Err(anyhow!("B selection rejected at cycle {cycle}")); }
-            check_capture(output, "bench-portrait", &mut portrait_sequence, session, [0, 0, 255], 320.0 / 568.0, "A→B→A portrait")?;
+            if !output.set_output_monitor_source(Some("bench-b"), session)? { return Err(anyhow!("B selection rejected at cycle {cycle}")); }
+            check_capture(output, "bench-b", &mut portrait_sequence, session, [0, 0, 255], 320.0 / 568.0, "A→B→A portrait")?;
             if output.set_output_monitor_source(None, session - 1)? {
                 return Err(anyhow!("stale source token was accepted at cycle {cycle}"));
             }
-            check_capture(output, "bench-portrait", &mut portrait_sequence, session, [0, 0, 255], 320.0 / 568.0, "stale token kept B active")?;
+            check_capture(output, "bench-b", &mut portrait_sequence, session, [0, 0, 255], 320.0 / 568.0, "stale token kept B active")?;
         }
 
         for cycle in 0..10 {
@@ -537,11 +551,12 @@ fn run_integration_checks(output: &OutputEngine, fixture_dir: &Path) -> Result<s
             color_checks.push(name);
         }
 
+        output.panic_stop();
+        show_check_image(output, "default", paths["red"].as_path())?;
+        check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "master fade red baseline")?;
         output.set_overlay_alpha_direct(255);
         check_capture(output, "default", &mut default_sequence, session, [0, 0, 0], 16.0 / 9.0, "master fade black")?;
         output.set_overlay_alpha_direct(0);
-        output.panic_stop();
-        show_check_image(output, "default", paths["red"].as_path())?;
         check_capture(output, "default", &mut default_sequence, session, [255, 0, 0], 16.0 / 9.0, "master fade clear")?;
 
         if !output.toggle_output_ftb("default")? { return Err(anyhow!("FTB enable did not enter blackout")); }
@@ -573,6 +588,7 @@ fn run_webview_benchmark(
     layers: u32,
     mode: String,
     is_image: bool,
+    reopen_hidden_window: bool,
 ) -> Result<()> {
     thread::sleep(Duration::from_millis(500));
     let open_started = Instant::now();
@@ -594,6 +610,7 @@ fn run_webview_benchmark(
     let (drop_start, delay_start) = video_runtime_drop_counts(&output);
     let mut dropped_observed_max = drop_start;
     let mut delayed_observed_max = delay_start;
+    let mut window_reopens = 0_u64;
     while started.elapsed() < run_for {
         let (cpu, ram) = process_metrics();
         if let Some(value) = cpu { cpu_total += value; cpu_max = cpu_max.max(value); cpu_samples += 1; }
@@ -601,12 +618,23 @@ fn run_webview_benchmark(
         let (dropped, delayed) = video_runtime_drop_counts(&output);
         dropped_observed_max = dropped_observed_max.max(dropped);
         delayed_observed_max = delayed_observed_max.max(delayed);
+        if reopen_hidden_window {
+            let window = handle.get_webview_window("output-monitor")
+                .ok_or_else(|| anyhow!("configured output-monitor window disappeared"))?;
+            if !window.is_visible().unwrap_or(false) {
+                window.show().map_err(|error| anyhow!("show output-monitor window: {error}"))?;
+                handle.emit("output-monitor-opened", ())?;
+                window_reopens = window_reopens.saturating_add(1);
+            }
+        }
         thread::sleep(Duration::from_secs(1));
     }
     let (_, ram_end) = process_metrics();
     let frontend_summary = frontend.lock().map(|metrics| metrics.summary()).unwrap_or_else(|_| json!({"error":"metrics lock poisoned"}));
     let video_end = video_runtime_summary(&output);
     let capture = output.output_monitor_diagnostics(Some("default")).ok();
+    let request_response_delay_ms = env::var("QLISA_MONITOR_BENCH_REQUEST_DELAY_MS")
+        .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(0).min(1000);
     output.panic_stop();
     println!("{}", json!({
         "mode": mode, "durationSeconds": seconds, "layers": layers, "imageInput": is_image,
@@ -619,6 +647,8 @@ fn run_webview_benchmark(
             "droppedFrames": dropped_observed_max,
             "delayedFrames": delayed_observed_max,
         },
+        "outputMonitorWindowReopens": window_reopens,
+        "requestResponseDelayMs": request_response_delay_ms,
         "capture": capture,
         "frontend": frontend_summary, "includesIpcOrWebView": true,
     }));
@@ -638,7 +668,8 @@ fn main() -> Result<()> {
     let mode = args.next().unwrap_or_else(|| "30".into());
     let layers = args.next().map(|value| value.parse()).transpose()?.unwrap_or(1_u32).clamp(1, 3);
     let fifth_arg = args.next();
-    let webview = fifth_arg.as_deref() == Some("webview");
+    let webview_checks = fifth_arg.as_deref() == Some("webview-checks");
+    let webview = fifth_arg.as_deref().is_some_and(|arg| matches!(arg, "webview" | "webview-checks"));
     let checks = fifth_arg.as_deref() == Some("checks");
     let capture_fps = match mode.as_str() {
         "off" => None,
@@ -657,7 +688,7 @@ fn main() -> Result<()> {
     let isolated_profile = env::temp_dir().join(format!("QlisaOutputMonitorBench-{}", std::process::id()));
     std::fs::create_dir_all(&isolated_profile)?;
     env::set_var("APPDATA", &isolated_profile);
-    let monitor_capture_fps = if checks { Some(30) } else { capture_fps };
+    let monitor_capture_fps = if checks || webview_checks { Some(30) } else { capture_fps };
     if let Some(fps) = monitor_capture_fps {
         env::set_var("QLISA_MONITOR_CAPTURE_FPS", fps.to_string());
     } else {
@@ -679,6 +710,7 @@ fn main() -> Result<()> {
     let mut builder = tauri::Builder::default();
     if webview {
         let webview_video_path = video_path.clone();
+        let webview_fixture_dir = isolated_profile.join("check-fixtures");
         builder = builder
             .invoke_handler(tauri::generate_handler![
                 list_output_monitor_sources,
@@ -689,11 +721,19 @@ fn main() -> Result<()> {
             .setup(move |app| {
                 let audio = AudioEngine::new_silent(&MachineAudioConfig::default());
                 let output = Arc::new(OutputEngine::new(audio, app.handle().clone())?);
-                configure_output(&output, &webview_video_path, layers, is_image)?;
-                if !no_overlay { output.set_output_timer(Some("Output Monitor Bench")); }
-                let capture_enabled = capture_fps.is_some();
-                if capture_enabled { output.set_output_monitor_source(Some("default"), 1)?; }
-                app.manage(BenchState { output, frontend: Arc::default(), capture_enabled });
+                let sources = if webview_checks {
+                    output.configure_outputs(&check_destinations("BenchA", "BenchB"), "default")?;
+                    let paths = create_check_fixtures(&webview_fixture_dir)?;
+                    show_check_image(&output, "default", paths["red"].as_path())?;
+                    show_check_image(&output, "bench-b", paths["blue"].as_path())?;
+                    vec![("default".into(), "BenchA".into()), ("bench-b".into(), "BenchB".into())]
+                } else {
+                    configure_output(&output, &webview_video_path, layers, is_image)?;
+                    if !no_overlay { output.set_output_timer(Some("Output Monitor Bench")); }
+                    if monitor_capture_fps.is_some() { vec![("default".into(), "Main".into())] } else { Vec::new() }
+                };
+                if monitor_capture_fps.is_some() { output.set_output_monitor_source(Some("default"), 1)?; }
+                app.manage(BenchState { output, frontend: Arc::default(), sources });
                 Ok(())
             });
     }
@@ -701,6 +741,7 @@ fn main() -> Result<()> {
     if webview {
         let handle = app.handle().clone();
         let worker_handle = handle.clone();
+        let run_mode = if webview_checks { "30".to_string() } else { mode };
         let worker = thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -712,8 +753,9 @@ fn main() -> Result<()> {
                             state.frontend.clone(),
                             seconds,
                             layers,
-                            mode,
+                            run_mode.clone(),
                             is_image,
+                            webview_checks,
                         );
                     }
                     if Instant::now() >= deadline {
