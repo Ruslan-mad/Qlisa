@@ -5,10 +5,10 @@ output. Она берётся из существующего renderer; мони
 decoder и не захватывает desktop. Максимальный кадр предпросмотра — 640 × 360.
 Browser Cue не входит в OpenGL-композицию и может отсутствовать в этом окне.
 
-**Статус:** реализация и предварительные измерения доступны в исходниках после
-1.5.11. Проверка не имеет статуса READY: финальные результаты ещё ожидаются.
-Таблица ниже фиксирует отдельные прогоны, включая короткий трёхслойный smoke.
-Она не подтверждает работу физического display scanout или аппаратуры.
+**Статус:** ПО готово к локальному review после успешного 300-секундного прогона
+и проверок UI/native окна. Это не подтверждает готовность к event use: реальное
+аудио, многовыходной 60 FPS прогон и физический display scanout не проверены.
+Изменения относятся к исходникам после 1.5.11 и не меняют статус публикации.
 
 ## Изменение пути кадра
 
@@ -125,7 +125,7 @@ Status `black` содержит размеры и stride без payload. Ста�
 последние capture sequence и timestamp. Парсер проверяет полный header и длину
 payload до создания pixel view.
 
-## Предварительные измерения WebView
+## Измерения WebView
 
 Логи: `tmp/monitor-validation/monitor-video-off-webview.log`,
 `monitor-video-4-webview.log`, `monitor-video-30-webview.log` и
@@ -161,22 +161,111 @@ capture FPS и UI displayed FPS — отдельные счётчики.
 прогон. Трёхслойный результат — 15-секундный smoke test, не длительный стресс
 тест и не критерий готовности.
 
+## Native и browser проверки
+
+**Native validation harness:** журнал `monitor-native-validation-final.log`
+фиксирует успешные проверки RGB red/green/blue, white и black; master fade и
+FTB; 10 циклов A→B→A; 10 циклов disable/re-enable; отклонение stale selection
+token. Output A измерен как 480 × 320 с ratio 1.5. Для B запрашивался portrait,
+но фактически получено 640 × 350 (`geometryMatch=false`). Проверка portrait
+layout в browser UI пройдена выше; native portrait geometry остаётся
+непроверенной.
+
+**Native window reopen:** `monitor-native-window-reopen.log` записывает два
+повторных открытия окна за 90 секунд: одно через GUI close, второе через
+Escape. За тест показано 83 кадра (`displayedFpsAverage=0.9725`). Каждый IPC
+ответ намеренно задерживался на 1000 ms, поэтому частота около 1 FPS вызвана
+тестовой задержкой и не является оценкой производительности. Harness
+использовал настоящий `OutputMonitorWindow` и native engine, но IPC commands
+были test adapters, разделявшие production packet encoder. Это не полный
+`AppState`, не реальный audio path и не проверка физической аппаратуры.
+
+Native floating geometry не прошла portrait assertion. Для A запрос 320 × 180
+упирался в минимальную высоту окна 240; фактический client area был примерно
+320 × 212. Для B запрошенная portrait geometry отобразилась landscape. Здесь
+учтены фактические размеры; исправления engine не вносились.
+
+**Browser UI с IPC mock:** проверялось реальное React окно Output Monitor при
+эмулированных ответах IPC. Portrait источник 202 × 360 в viewport 1280 × 720
+получил Canvas 350.125 × 624; в viewport 400 × 300 — 114.45 × 204. Кадр
+160 × 90 правильно масштабировался к максимуму 640 × 360. `black` очистил
+предыдущий blue кадр, `no_frame` очистил Canvas, вкладка Preview отключила
+backend source. Console errors: 0. Это подтверждает обработку UI-пакетов, не
+portrait geometry renderer или реальные кадры устройства.
+
+**Production app IPC smoke:** debug `qlisa.exe` был запущен с отдельным
+`APPDATA` profile `tmp/stage-native-qa-profile`; общий Runtime cache оставался
+доступен. Output Monitor открыли через View menu, выбрали source Main;
+реальный AppState и production commands вернули black status, а окно показало
+«На выходе чёрный экран». Скрытие окна через GUI сработало. Этот smoke проверил
+интеграцию production IPC и состояние black; он не запускал media playback и
+не подтверждает реальное физическое видео или аудио.
+
+**Трёхслойный стресс-прогон:** 3 × 1920 × 1080 при 60 FPS, два логических CPU,
+priority `BelowNormal`. OFF длился 30 s; ON длился 60 s. Измерения относятся к
+запущенному benchmark process; GPU usage не измерялось.
+
+| Режим | Длительность | CPU process | RSS начало → конец, MB | RSS пик, MB | Preview FPS | Frame age среднее / максимум, ms | Skipped PBO | Dropped stale | Максимум droppedFrames mpv |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| OFF | 30 s | 2.665% | 728 → 778 | — | — | — | — | — | 630 |
+| ON | 60 s | 3.388% | 729 → 798 | 808 | 29.515 | 39.676 / 61 | 0 | 1 | 677 |
+
+В OFF baseline droppedFrames уже достигал 630. ON зафиксировал максимум 677;
+поэтому эти прогоны не подтверждают нулевые drops и не дают оснований
+объявлять safe event use. PBO не пропускались; один кадр был отброшен как stale.
+Это отдельные ограниченные прогоны, не длительная event-ready проверка.
+
+**Длительный прогон:** проверка 3 × 1280 × 720 при 30 FPS длительностью
+300 секунд завершилась с exit code 0. Нагрузка шла на двух логических CPU с
+priority `BelowNormal`; pressure guard не сработал, новых перезагрузок не было.
+
+| Длительность, layers | Renderer capture FPS | Canvas displayed FPS | Active samples | Frame age average / max, ms | Conversion average / max, ms | IPC request average / max, ms | Published / displayed frames | PBO skips / stale / mailbox drops | mpv dropped snapshots: start / max observed / end | CPU average / max | Native RSS: start / peak / end, MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 300 s, 3 × 1280 × 720 @ 30 FPS | 30.001 | 29.449 | 297 | 39.457 / 62 | 0.507 / 2.6 | 7.788 / 23 | 9028 / 8876 | 0 / 0 / 0 | 2 / 2 / 0 | 2.796% / 3.513% | 645.2 / 678.8 / 673.7 |
+
+Показания счётчика пропущенных кадров mpv — моментальные снимки, а не
+накопительный итог. Счётчик показывал 2 в начале, достигал 2 во время прогона
+и после сброса показывал 0 в конце. Отложенных кадров не зафиксировано. Эти
+значения не доказывают, что за всё время воспроизведения пропусков не было.
+
+Отдельный журнал процессов фиксировал память после прогрева. RSS основного
+процесса вырос с 664,9 MB на 30,6-й секунде до 673,6 MB на 302-й секунде
+(+8,7 MB); выделенная частная память снизилась с 2029,1 до 2017,3 MB. Шесть
+дочерних процессов WebView использовали 411,4 MB RSS на 30,6-й секунде,
+достигли пика 438,4 MB и завершили прогон с 392,2 MB. Их общая выделенная
+частная память составляла 215,8 MB на 30,6-й секунде, достигала 241,8 MB и
+завершила прогон на 192,2 MB. Пятиминутный прогон не заменяет длительную
+проверку перед мероприятием и не подтверждает работу реального аудио или
+выходных устройств.
+
 ## Как запустить необязательный WebView benchmark
 
 Запускайте из `src-tauri` с локальным видеофайлом. Аргументы: файл, длительность
 в секундах, capture mode (`off`, `4` или `30`), число compositor layers (`1`–`3`)
-и финальный маркер `webview`.
+и маркер режима (`webview`, `checks` или `webview-checks`).
 
 ```powershell
 $env:CARGO_BUILD_JOBS = "2"
-cargo run --release --example output_monitor_bench --features asio-support -- "C:\media\test.mp4" 30 off 1 webview
-cargo run --release --example output_monitor_bench --features asio-support -- "C:\media\test.mp4" 30 4 1 webview
-cargo run --release --example output_monitor_bench --features asio-support -- "C:\media\test.mp4" 30 30 1 webview
+$benchProcess = [System.Diagnostics.Process]::GetCurrentProcess()
+$benchProcess.ProcessorAffinity = [IntPtr]3
+$benchProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+cargo build --example output_monitor_bench --features asio-support
+$bench = ".\target\debug\examples\output_monitor_bench.exe"
+& $bench "C:\media\test.mp4" 30 off 1 webview
+& $bench "C:\media\test.mp4" 30 4 1 webview
+& $bench "C:\media\test.mp4" 30 30 1 webview
+& $bench "C:\media\test.mp4" 30 30 1 checks
+& $bench "C:\media\test.mp4" 30 30 1 webview-checks
+& $bench "C:\media\stress-720p.mp4" 300 30 3 webview
 ```
 
-Для сопоставимых Windows прогонов установите priority процесса в `BelowNormal`
-и ограничьте его двумя логическими CPU; записывайте эти условия вместе с
-результатом. `off` нужен как baseline с тем же видео и открытым WebView.
+Команды задают priority `BelowNormal`, affinity mask `3` (два логических CPU) и
+`CARGO_BUILD_JOBS=2` до запуска CLI. Сначала собирается debug example один раз;
+затем исполняемый файл запускается напрямую для OFF/4/30 FPS и native checks.
+Эти PowerShell ограничения действуют только в текущем процессе/session; они не
+меняют постоянные настройки машины. Не используйте `--release` для этой
+ограниченной проверки. `off` нужен как baseline с тем же видео и открытым
+WebView. Записывайте условия вместе с результатом.
 Повторите прогон несколько раз на каждой машине и отдельно запишите разрешение
 источника, FPS, duration и количество слоёв. Не считайте один короткий smoke
 тест финальным acceptance result. На других ОС опустите
@@ -189,24 +278,27 @@ JSON summary выводится одной строкой; лог WebView мож
 ## Тесты и ограничения
 
 В логах текущей проверки зафиксированы 488 frontend tests, успешный TypeScript
-type check и 22 сфокусированных Rust tests для packet, monitor selection,
-PBO/session ordering, cadence и mailbox. Rust прогон также содержит тесты
+type check, итоговый `pnpm tauri:check` и 22 сфокусированных Rust tests для
+packet, monitor selection, PBO/session ordering, cadence и mailbox. Rust прогон также содержит тесты
 назначения физических выходов. Тесты покрывают формат, malformed payload,
 channel conversion, текущую сессию, Canvas и ограничения layout. Это не
 заменяет нагрузочный прогон или ручной осмотр на целевых Windows дисплеях.
 
 Benchmark проходит через production renderer, mailbox, packet encoder, Tauri
-IPC, WebView polling, Canvas conversion и frontend metrics. Он не измеряет
-физический scanout, LED latency, UI presentation timestamp или GPU usage.
+IPC, WebView polling, Canvas conversion и frontend metrics. В минимальном
+benchmark App команды являются test adapters; production encoder и renderer
+используются, но полный AppState и реальный audio path не поднимаются. Он не
+измеряет физический scanout, LED latency, UI presentation timestamp или GPU usage.
 Browser Cue не является частью OpenGL композиции. CPU/RAM таблицы не включают
 WebView process. Output Monitor не создаёт второй decoder, но пример может
 запускать несколько media slots для измерения композиции.
 
 Во время сборки 6 октября 2026 около 02:03 произошёл Windows BSOD `0x101`.
-Точная причина неизвестна. Последующие ограниченные проверки завершились без
-новой перезагрузки. Этот факт не устанавливает причинную связь между сборкой и
-BSOD.
+Точная причина неизвестна. Последующие ограниченные проверки и 300-секундный
+прогон завершились без новой перезагрузки. Эти факты не указывают причину сбоя.
 
-Проверка остаётся **WIP / не READY** до получения и просмотра финальных
-результатов. Табличные измерения — наблюдения конкретных прогонов, не обещание
-производительности и не готовность выпуска.
+ПО: **READY для локального review** по имеющимся UI/native validation и
+300-секундному трёхслойному прогону. Event/hardware readiness: **NOT CONFIRMED**.
+Для этого нужен отдельный запуск с реальным аудио, несколькими видеовыходами при
+60 FPS и обычными настройками машины. Результаты не являются готовностью выпуска
+или обещанием производительности.
