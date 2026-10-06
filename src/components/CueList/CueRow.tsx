@@ -316,21 +316,35 @@ function CueRowImpl({
   });
 
   const colorAccent = COLOR_SWATCHES[cue.color] ?? "transparent";
-  const fullRowTint = cueColorStyle === "full_row" && colorAccent !== "transparent"
-    ? hexToRgba(colorAccent, isStage ? (isGroup ? 0.28 : 0.12) : 0.28)
+  const hasFullRowColor = cueColorStyle === "full_row" && colorAccent !== "transparent";
+  const isNeutralWhite = colorAccent.toLowerCase() === COLOR_SWATCHES.white;
+  // Keep the pale swatch restrained so its row text stays readable.
+  const fullRowTintAlpha = !hasFullRowColor ? null : isStage
+    ? isNeutralWhite ? (isGroup || cue.cue_type === "number" ? 0.2 : 0.12)
+      : (isGroup || cue.cue_type === "number" ? 0.45 : 0.28)
+    : 0.28;
+  const fullRowTint = fullRowTintAlpha === null ? null : hexToRgba(colorAccent, fullRowTintAlpha);
+  const stickyTintBase = isGroup ? "var(--wc-bg-group)"
+    : cue.cue_type === "number" ? "var(--wc-bg-surface)"
+    : "var(--wc-bg-app)";
+  const opaqueStageTint = isStage && fullRowTintAlpha !== null
+    ? `color-mix(in srgb, ${colorAccent} ${Math.round(fullRowTintAlpha * 100)}%, ${stickyTintBase})`
     : null;
 
-  let bg = fullRowTint ?? "transparent";
+  let bg = isStage && opaqueStageTint ? opaqueStageTint : fullRowTint ?? "transparent";
   if (isDragOver)      bg = "var(--wc-bg-drag-over)";
   else if (isStage && isSelected) bg = "var(--wc-bg-selected)";
-  else if (isStage && isGroup && fullRowTint) bg = fullRowTint;
+  else if (isStage && isGroup && fullRowTint) bg = opaqueStageTint ?? fullRowTint;
+  else if (isStage && isRunning && fullRowTint) bg = opaqueStageTint ?? fullRowTint;
   else if (isRunning)  bg = "var(--wc-bg-running)";
   else if (isPaused)   bg = "var(--wc-bg-paused)";
   else if (isSelected) bg = "var(--wc-accent-dim)";
 
   // Solid background for sticky-right cells (must be opaque to cover scrolled content).
-  const stickyBg = isStage && isSelected ? "var(--wc-bg-selected)"
-    : isStage && isGroup && fullRowTint ? fullRowTint
+  const stickyBg = isStage && isDragSource ? "transparent"
+    : isStage && isDragOver ? "var(--wc-bg-drag-over)"
+    : isStage && isSelected ? "var(--wc-bg-selected)"
+    : isStage && fullRowTint && (isGroup || !isPaused) ? opaqueStageTint ?? "var(--wc-bg-app)"
     : isRunning  ? "var(--wc-bg-running)"
     : isPaused ? "var(--wc-bg-paused)"
     : isSelected ? "var(--wc-accent-dim)"
@@ -354,7 +368,7 @@ function CueRowImpl({
     userSelect: "none",
     background: isDragSource ? "transparent"
       : cue.cue_type === "number" && !isDragOver && !isRunning && !isPaused && !isSelected
-        ? fullRowTint ?? "var(--wc-bg-surface)"
+        ? (isStage && opaqueStageTint ? opaqueStageTint : fullRowTint ?? "var(--wc-bg-surface)")
       : isGroup && !isSelected ? (bg === "transparent" ? "var(--wc-bg-group)" : bg) : bg,
     borderBottom: isDragSource ? "1px dashed var(--wc-border)"
       : isDragOver ? "1px solid var(--wc-accent)" : "1px solid var(--wc-border)",
