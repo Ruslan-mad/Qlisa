@@ -16,7 +16,16 @@ Invalid state falls back to the configured startup window size.
 The frontend does not normalize the main window on mount. That old behavior
 forced every launch back to a windowed state and would have undone restoration.
 
-The placement reducer has Rust tests for monitor clamping and preserving the
-normal rectangle through maximize/minimize events. Native close/relaunch and
-maximized restore checks are still required; updater restart behavior and
-multi-monitor hardware layouts have not been verified here.
+## Verification
+
+- Three focused Rust tests pass for monitor clamping, invalid state, and
+  preserving the normal rectangle through maximize/minimize events.
+- `pnpm tauri:check` passes.
+- On Windows, moving and resizing the normal window, then closing and relaunching
+  restored its position and size. Maximizing, closing, and relaunching restored
+  the maximized state; restoring to normal returned to the saved normal
+  rectangle. Repeated close/relaunch checks showed no size drift.
+
+The physical monitor-disconnect and mixed-DPI cases were not tested on hardware.
+Updater-specific restart behavior was also not tested. The invalid and
+off-screen placement cases are covered by pure geometry tests.
