@@ -22,6 +22,8 @@ import type {
   CueType,
   DeviceInfo,
   DisplayPreferences,
+  SystemStatusSnapshot,
+  StatusRuntimeSnapshot,
   OutputDestination,
   DmxUniverseSnapshot,
   FixtureConflict,
@@ -453,6 +455,8 @@ export const updateGeneralPreferences = (prefs: GeneralPreferences) =>
   invoke<void>("update_general_preferences", { prefs });
 export const updateDisplayPreferences = (prefs: DisplayPreferences) =>
   invoke<void>("update_display_preferences", { prefs });
+export const getSystemStatus = () => invoke<SystemStatusSnapshot>("get_system_status");
+export const getStatusRuntimeSnapshot = () => invoke<StatusRuntimeSnapshot>("get_status_runtime_snapshot");
 export const listOutputDestinations = () =>
   invoke<OutputDestination[]>("list_output_destinations");
 export const getOutputControlStatuses = () =>

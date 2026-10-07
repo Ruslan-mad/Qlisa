@@ -17,6 +17,7 @@ import { MediaDock } from "./components/Inspector/MediaDock";
 import { ClipEditorDock } from "./components/Editor/ClipEditorDock";
 import { CurveEditorDock } from "./components/Curve/CurveEditorDock";
 import { TransportBar } from "./components/Transport/TransportBar";
+import { StatusBar } from "./components/Transport/StatusBar";
 import { FullscreenControl } from "./components/Transport/FullscreenControl";
 import { useTauriEvents } from "./hooks/useTauriEvents";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -1864,6 +1865,7 @@ export default function App() {
       </div>
 
       <TransportBar onRefresh={handleRefresh} />
+      <StatusBar />
     </div>
   );
 }

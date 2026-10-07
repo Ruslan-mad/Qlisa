@@ -5,6 +5,27 @@
  */
 export const en = {
   stageUi: { savedStatus: 'Saved', savedAt: 'Saved at {time}', modified: 'Modified', fullscreen: 'Fullscreen' },
+  statusBarUi: {
+    title: 'Status bar', show: 'Show status bar', settings: 'Status bar metrics', gpuAdapter: 'GPU adapter',
+    automatic: 'Automatic', adapterFallback: 'Selected GPU is unavailable; showing the automatic choice.',
+    moveLeft: 'Move to left', moveRight: 'Move to right', moveUp: 'Move up', moveDown: 'Move down',
+    moveMetricUp: 'Move {metric} up', moveMetricDown: 'Move {metric} down',
+    metrics: { cue_count: 'Cue count', duration: 'Declared duration', active: 'Active cues', problems: 'Cue problems', cpu: 'System CPU', gpu: 'GPU load', vram: 'GPU memory', ram: 'System memory', audio_gaps: 'Audio underruns', video_fps: 'Video output FPS', network_drops: 'Stream media drops', app_ram: 'Qlisa memory', disk: 'Project disk free' },
+    short: { cue_count: 'Cues', duration: 'Time', active: 'Active', problems: 'Issues', cpu: 'CPU', gpu: 'GPU', vram: 'VRAM', ram: 'RAM', audio_gaps: 'Gaps', video_fps: 'FPS', network_drops: 'I/O', app_ram: 'App', disk: 'Disk' },
+    summary: 'Nested cues are included. Groups: {groups}; Numbers: {numbers}; disabled: {disabled}.',
+    durationDetails: 'Declared duration. Disabled cues are excluded. Unknown: {unknown}; infinite: {infinite}. Manual GO/Goto and remote starts can change the actual show length.',
+    activeDetails: 'Active in this list: {local}; across all lists: {project}.',
+    problemsDetails: 'Warnings or broken cues: {problems}; missing media: {missing}.',
+    leftSide: 'Left side', rightSide: 'Right side', enabled: 'Show metric',
+    fpsUnavailable: 'Video output FPS is unavailable', networkUnavailable: 'Active stream drop counters are unavailable',
+    audioDetails: 'Underrun events: {events}; silent frames: {frames}.',
+    videoDecode: 'Video decode', vramDetails: '{name} dedicated memory', appRamDetails: 'Qlisa process memory', diskDetails: 'Project volume free space',
+    networkRow: '{name} ({direction} {kind}): video frames {frames}; audio samples {samples}; audio frames {audioFrames}{pacing}', networkPacing: '; {count} frames superseded by queue pacing',
+    networkValues: 'V:{video} AS:{audioSamples} AF:{audioFrames}',
+    fpsRow: '{name}: {fps}/{target} fps; dropped frames: {dropped}',
+    networkCounters: 'Local stream counters. Video frames, audio samples, and audio frames use separate units; queue pacing is listed separately.',
+    noFreshData: 'No fresh sample. Values are hidden until the next successful update.', selectedList: 'Selected cue list: {name}',
+  },
   app: {
     name: 'Qlisa',
     untitled: 'Untitled',
@@ -578,6 +599,27 @@ export type TranslationDictionary = WidenStrings<typeof en>;
 
 export const ru: TranslationDictionary = {
   stageUi: { savedStatus: 'Сохранено', savedAt: 'Сохранено в {time}', modified: 'Изменено', fullscreen: 'Полный экран' },
+  statusBarUi: {
+    title: 'Строка состояния', show: 'Показывать строку состояния', settings: 'Показатели строки состояния', gpuAdapter: 'Графический адаптер',
+    automatic: 'Автоматически', adapterFallback: 'Выбранный GPU недоступен; показан автоматический выбор.',
+    moveLeft: 'Переместить влево', moveRight: 'Переместить вправо', moveUp: 'Переместить выше', moveDown: 'Переместить ниже',
+    moveMetricUp: 'Переместить «{metric}» выше', moveMetricDown: 'Переместить «{metric}» ниже',
+    metrics: { cue_count: 'Количество cue', duration: 'Заявленная длительность', active: 'Активные cue', problems: 'Проблемы cue', cpu: 'Загрузка CPU', gpu: 'Загрузка GPU', vram: 'Память GPU', ram: 'Системная память', audio_gaps: 'Сбои аудио', video_fps: 'FPS видеовыхода', network_drops: 'Потери медиа в потоке', app_ram: 'Память Qlisa', disk: 'Свободно на диске проекта' },
+    short: { cue_count: 'Cue', duration: 'Время', active: 'Активн.', problems: 'Пробл.', cpu: 'CPU', gpu: 'GPU', vram: 'VRAM', ram: 'RAM', audio_gaps: 'Сбои', video_fps: 'FPS', network_drops: 'Ввод/вывод', app_ram: 'Qlisa', disk: 'Диск' },
+    summary: 'Вложенные cue включены. Группы: {groups}; Number: {numbers}; отключено: {disabled}.',
+    durationDetails: 'Заявленная длительность. Отключённые cue не учитываются. Неизвестно: {unknown}; бесконечно: {infinite}. Фактическая длительность изменится при ручных GO/Goto и удалённых запусках.',
+    activeDetails: 'Активны в этом списке: {local}; во всех списках: {project}.',
+    problemsDetails: 'Предупреждения или ошибки: {problems}; медиа отсутствует: {missing}.',
+    leftSide: 'Слева', rightSide: 'Справа', enabled: 'Показывать показатель',
+    fpsUnavailable: 'FPS видеовыхода недоступен', networkUnavailable: 'Счётчики потерь активных потоков недоступны',
+    audioDetails: 'События прерывания: {events}; тихие кадры: {frames}.',
+    videoDecode: 'Декодирование видео', vramDetails: 'Выделенная память {name}', appRamDetails: 'Память процесса Qlisa', diskDetails: 'Свободное место на диске проекта',
+    networkRow: '{name} ({direction} {kind}): видеокадры {frames}; аудиосэмплы {samples}; аудиокадры {audioFrames}{pacing}', networkPacing: '; {count} кадров снято очередью из-за темпа обработки',
+    networkValues: 'В:{video} АС:{audioSamples} АК:{audioFrames}',
+    fpsRow: '{name}: {fps}/{target} FPS; потеряно видеокадров: {dropped}',
+    networkCounters: 'Локальные счётчики потоков. Видеокадры, аудиосэмплы и аудиокадры показаны в отдельных единицах; темп очереди указан отдельно.',
+    noFreshData: 'Нет свежего снимка. Значения скрыты до следующего успешного обновления.', selectedList: 'Выбранный список cue: {name}',
+  },
   personalizationUi: {
     stripe: 'Полоса (только левый край)', fullRow: 'Вся строка'
   },

@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
 import { machineAudioConfigsEqual } from "../../lib/types";
-import type { AppPreferences, AudioPreferences, AudioRuntimeStatus, CueColor, CueColorStyle, CueType, DeviceInfo, DisplayPreferences, GeneralPreferences, MachineAudioConfig, NetworkIoStatus, NetworkOutputRuntimeStatus, OscReceiveConfig, ScreenInfo, TimerPosition, OutputDestination } from "../../lib/types";
+import type { AppPreferences, AudioPreferences, AudioRuntimeStatus, CueColor, CueColorStyle, CueType, DeviceInfo, DisplayPreferences, GeneralPreferences, MachineAudioConfig, NetworkIoStatus, NetworkOutputRuntimeStatus, OscReceiveConfig, ScreenInfo, TimerPosition, OutputDestination, GpuAdapterSnapshot, StatusBarMetricId, StatusBarPreferences } from "../../lib/types";
 import { cloneNetworkOutputSettings, cloneOutputTransform, createOutputId, DEFAULT_DISPLAY_PREFS, DEFAULT_MACHINE_AUDIO_CONFIG, findDuplicateDisplayMonitor, normalizeOutputDestinations, validateOutputDestinations } from "../../lib/types";
 import { CurveSelect } from "../common/CurveSelect";
 import { Select } from "../common/Select";
@@ -51,6 +51,8 @@ import { useLocale } from "../../i18n";
 import { ColorPicker } from "../Inspector/ColorPicker";
 import { mergeOutputMonitorAssignments } from "./preferencesModel";
 import { MediaRuntimeSection } from "./MediaRuntimeSection";
+import { DEFAULT_STATUS_BAR_PREFERENCES, moveStatusMetric, normalizeStatusBarPreferences, reorderStatusMetric } from "../Transport/statusBarModel";
+import { acquireStatusBarPolling, useStatusBarStore } from "../../stores/statusBarStore";
 
 // ---------------------------------------------------------------------------
 // Sidebar categories
@@ -1307,14 +1309,47 @@ const CUE_COLOR_STYLES: { value: CueColorStyle }[] = [
   { value: "stripe" },
   { value: "full_row" },
 ];
+const EMPTY_GPU_ADAPTERS: GpuAdapterSnapshot[] = [];
 
 function PersonalizationContent({
-  theme, onThemeChange,
+  theme, onThemeChange, statusBar, onStatusBarChange,
 }: {
   theme: Pick<DisplayPreferences, "theme" | "cue_color_style">;
   onThemeChange: (t: Pick<DisplayPreferences, "theme" | "cue_color_style">) => void;
+  statusBar: StatusBarPreferences;
+  onStatusBarChange: (prefs: StatusBarPreferences) => void;
 }) {
   const { locale, setLocale, t } = useLocale();
+  const adapters = useStatusBarStore((state) => state.system?.gpuAdapters ?? EMPTY_GPU_ADAPTERS);
+  useEffect(() => {
+    return acquireStatusBarPolling({ system: true, runtime: false });
+  }, []);
+  const updateMetric = (id: StatusBarMetricId, enabled: boolean) => {
+    const next = normalizeStatusBarPreferences(statusBar);
+    const metric = [...next.left, ...next.right].find((item) => item.id === id);
+    if (metric) metric.enabled = enabled;
+    onStatusBarChange(next);
+  };
+  const updateSide = (id: StatusBarMetricId, side: "left" | "right") => onStatusBarChange(moveStatusMetric(statusBar, id, side));
+  const metricRows = (side: "left" | "right") => statusBar[side].map(({ id, enabled }) => {
+    const items = statusBar[side];
+    const index = items.findIndex((item) => item.id === id);
+    const metricLabel = t(`statusBarUi.metrics.${id}`);
+    const buttonStyle: React.CSSProperties = { border: "1px solid var(--wc-border-strong)", borderRadius: 3, color: "var(--wc-text-secondary)", background: "var(--wc-bg-surface)", fontSize: 11, minWidth: 26, height: 24, cursor: "pointer" };
+    return <div key={id} style={{ display: "grid", gridTemplateColumns: "minmax(160px, 1fr) 92px 92px 28px 28px", alignItems: "center", gap: 6, padding: "3px 0", borderBottom: "1px solid var(--wc-border)" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: "var(--wc-text)" }}>
+        <input type="checkbox" checked={enabled} onChange={(event) => updateMetric(id, event.target.checked)} />
+        {metricLabel}
+      </label>
+      <Select style={selectStyle} value={side} onChange={(event) => updateSide(id, event.target.value as "left" | "right")} aria-label={metricLabel}>
+        <option value="left">{t("statusBarUi.leftSide")}</option>
+        <option value="right">{t("statusBarUi.rightSide")}</option>
+      </Select>
+      <span style={{ color: "var(--wc-text-faint)", fontSize: 10, textAlign: "right" }}>{index + 1}</span>
+      <button type="button" style={buttonStyle} disabled={index <= 0} aria-label={t("statusBarUi.moveMetricUp", { metric: metricLabel })} title={t("statusBarUi.moveUp")} onClick={() => onStatusBarChange(reorderStatusMetric(statusBar, side, id, -1))}>↑</button>
+      <button type="button" style={buttonStyle} disabled={index < 0 || index >= items.length - 1} aria-label={t("statusBarUi.moveMetricDown", { metric: metricLabel })} title={t("statusBarUi.moveDown")} onClick={() => onStatusBarChange(reorderStatusMetric(statusBar, side, id, 1))}>↓</button>
+    </div>;
+  });
   return (
     <>
       <Section title={t("preferencesLabels.cueAppearance")}>
@@ -1345,6 +1380,22 @@ function PersonalizationContent({
             <option value="system">{t("preferences.system")} ({t("preferencesLabels.followOs")})</option>
           </Select>
         </Row>
+      </Section>
+      <Section title={t("statusBarUi.settings")}>
+        <Row label={t("statusBarUi.show")}>
+          <input type="checkbox" checked={statusBar.visible} onChange={(event) => onStatusBarChange({ ...statusBar, visible: event.target.checked })} />
+        </Row>
+        <Row label={t("statusBarUi.gpuAdapter")}>
+          <Select style={selectStyle} value={statusBar.gpu_adapter_id ?? ""} onChange={(event) => onStatusBarChange({ ...statusBar, gpu_adapter_id: event.target.value || null })}>
+            <option value="">{t("statusBarUi.automatic")}</option>
+            {statusBar.gpu_adapter_id && !adapters.some((adapter) => adapter.id === statusBar.gpu_adapter_id) && <option value={statusBar.gpu_adapter_id}>{statusBar.gpu_adapter_id} · {t("statusBarUi.adapterFallback")}</option>}
+            {adapters.map((adapter) => <option key={adapter.id} value={adapter.id}>{adapter.name}</option>)}
+          </Select>
+        </Row>
+        <h4 style={{ margin: "12px 0 3px", color: "var(--wc-text-secondary)", fontSize: 11 }}>{t("statusBarUi.leftSide")}</h4>
+        <div>{metricRows("left")}</div>
+        <h4 style={{ margin: "12px 0 3px", color: "var(--wc-text-secondary)", fontSize: 11 }}>{t("statusBarUi.rightSide")}</h4>
+        <div>{metricRows("right")}</div>
       </Section>
       <Section title={t("preferences.language")}>
         <Row label={t("preferences.language")}>
@@ -1537,6 +1588,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
   const [draftTimerFloating, setDraftTimerFloating] = useState(false);
   const [theme, setTheme] = useState({ ...DEFAULT_DISPLAY_PREFS });
   const [draftTheme, setDraftTheme] = useState({ ...DEFAULT_DISPLAY_PREFS });
+  const [draftStatusBar, setDraftStatusBar] = useState<StatusBarPreferences>(DEFAULT_STATUS_BAR_PREFERENCES);
   const [availableBackends, setAvailableBackends] = useState<string[]>(["wasapi_shared", "wasapi_exclusive"]);
   const [oscConfig, setOscConfig_] = useState<OscReceiveConfig>({ enabled: false, port: 53001, allowed_ips: [], feedback_enabled: false, feedback_host: "127.0.0.1", feedback_port: 53000, feedback_progress_hz: 10 });
   const [applyError, setApplyError] = useState<string | null>(null);
@@ -1563,6 +1615,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
     setOutputScreen_(normalizedDefault?.monitor ?? null);
     setDraftOutputScreen(normalizedDefault?.monitor ?? null);
     const nextTheme = { ...DEFAULT_DISPLAY_PREFS, ...p.display };
+    setDraftStatusBar(normalizeStatusBarPreferences(p.display.status_bar));
     setTheme(nextTheme);
     setDraftTheme(nextTheme);
     const timer = p.display.show_output_timer ?? false;
@@ -1795,6 +1848,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
       show_live_panel: draft.display.show_live_panel ?? true,
       show_slice_panel: draft.display.show_slice_panel ?? true,
       clip_editor_active_tab: draft.display.clip_editor_active_tab ?? "Live",
+      status_bar: draftStatusBar,
     };
     const displayPayload: DisplayPreferences = {
       ...committedDisplay,
@@ -1822,6 +1876,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
       }
       setPrefs({ ...draft, display: committedDisplay });
       setDraft({ ...draft, display: committedDisplay });
+      setDraftStatusBar(committedDisplay.status_bar ?? DEFAULT_STATUS_BAR_PREFERENCES);
       setDraftOutputs(normalizedOutputs.destinations);
       setDraftDefaultOutputId(normalizedOutputs.defaultOutputId);
       setDraftNewCueOutputIds(draftNewCueOutputIds);
@@ -2047,6 +2102,8 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
                   <PersonalizationContent
                     theme={draftTheme}
                     onThemeChange={setDraftTheme}
+                    statusBar={draftStatusBar}
+                    onStatusBarChange={setDraftStatusBar}
                   />
                 )}
                 {category === "network" && (

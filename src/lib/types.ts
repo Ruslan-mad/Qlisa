@@ -1286,6 +1286,42 @@ export type TimerPosition = "center" | "top_left" | "top_right" | "bottom_left" 
 /** How a cue's colour tag is rendered in the Cue List. */
 export type CueColorStyle = "stripe" | "full_row";
 
+export type StatusBarMetricId = "cue_count" | "duration" | "active" | "problems" | "cpu" | "gpu" | "vram" | "ram" | "audio_gaps" | "video_fps" | "network_drops" | "app_ram" | "disk";
+export interface StatusBarMetricPreference { id: StatusBarMetricId; enabled: boolean; }
+export interface StatusBarPreferences {
+  visible: boolean;
+  left: StatusBarMetricPreference[];
+  right: StatusBarMetricPreference[];
+  gpu_adapter_id?: string | null;
+}
+
+export interface GpuAdapterSnapshot {
+  id: string;
+  name: string;
+  usagePercent: number | null;
+  dedicatedUsedBytes: number | null;
+  dedicatedTotalBytes: number | null;
+  videoDecodePercent: number | null;
+}
+export interface SystemStatusSnapshot {
+  timestampMs: number;
+  systemCpuPercent: number | null;
+  systemRamUsedBytes: number | null;
+  systemRamTotalBytes: number | null;
+  processCpuPercent: number | null;
+  processRamBytes: number | null;
+  gpuAdapters: GpuAdapterSnapshot[];
+}
+export interface StatusRuntimeSnapshot {
+  generation: number;
+  timestampMs: number;
+  networkTimestampMs?: number | null;
+  audio?: { underrunEvents: number | null; silentFrames: number | null } | null;
+  videoOutputs?: { id: string; name: string; fps: number | null; targetFps: number | null; droppedFrames: number | null }[] | null;
+  network?: { id: string; name: string; kind: string; direction: string; active: boolean; droppedFrames: number | null; droppedAudioSamples: number | null; droppedAudioFrames: number | null; supersededFrames: number | null }[] | null;
+  projectDisk?: { path: string | null; totalBytes: number | null; freeBytes: number | null; source: string | null } | null;
+}
+
 export interface DisplayPreferences {
   /** Monitor index for the unified output surface. null = floating window. */
   output_screen: number | null;
@@ -1321,6 +1357,7 @@ export interface DisplayPreferences {
   show_slice_panel?: boolean;
   /** Last selected Clip Editor tab, mirrored in the workspace for compatibility. */
   clip_editor_active_tab?: "Live" | "Slice";
+  status_bar?: StatusBarPreferences;
 }
 
 export type OutputSinkKind = "display" | "ndi" | "srt";
