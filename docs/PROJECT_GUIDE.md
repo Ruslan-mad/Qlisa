@@ -18,8 +18,9 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. The published baseline was Qlisa 1.5.11. Qlisa 1.5.12 is the current
-release; see its [release notes](RELEASE_NOTES_1.5.12.md) and the
+1.5.8. Qlisa 1.5.12 was the previous published release. This checkout describes
+Qlisa 1.5.13; see its [release notes](RELEASE_NOTES_1.5.13.md), the
+[1.5.12 notes](RELEASE_NOTES_1.5.12.md), and the
 [Releases page](https://github.com/Ruslan-mad/Qlisa/releases) for available
 binaries. This is not an official
 upstream Inkue release checkout. The source repository is public at
@@ -74,6 +75,16 @@ for remaining technical limits.
 Focused implementation notes: [Cue List navigation](cue-list-navigation.md),
 [headphone preview transport](headphone-preview-transport.md), and
 [Wait progress and held video frames](cue-wait-and-hold.md).
+
+## Changes in Qlisa 1.5.13
+
+This version adds UUID-based cross-list commands, an always-visible Media Dock,
+compact Cue List search, per-list timecode sync settings, and centered cue
+numbers. Automated checks passed: 503 frontend tests across 72 files, 1,010
+Rust tests passed with 11 ignored, and `pnpm tauri:check`. Browser review used
+mock IPC. Native GUI and cross-list end-to-end playback were not tested. See the
+[release notes](RELEASE_NOTES_1.5.13.md), [cross-list guide](cross-list-commands.md),
+and [GO latency study](go-start-latency.md).
 
 Features represented in the current tree include:
 

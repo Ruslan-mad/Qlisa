@@ -1,8 +1,8 @@
 # Cross-list commands
 
-This note describes the cross-list target model in the current source tree. The
-manual checks below are a checklist; no result is implied until each check is
-run on the target desktop build.
+This note describes the cross-list target model in Qlisa 1.5.13. The manual
+checks below are a checklist; no result is implied until each check is run on
+the target desktop build.
 
 ## Ownership and identity
 
