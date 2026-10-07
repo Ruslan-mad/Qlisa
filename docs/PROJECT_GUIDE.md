@@ -105,6 +105,11 @@ metrics. This feature is not part of the published 1.5.13 installer. See the
 [status bar guide](status-bar.md) for metric meanings, sampling, and data
 limits.
 
+The main window now saves its normal position and size, plus whether it was
+maximized, in the machine-local `Inkue/main-window-state.json` file. It restores
+the placement at startup and moves a window back into the primary work area if
+its previous monitor is no longer available. See the [window state note](window-state.md).
+
 Features represented in the current tree include:
 
 - Cue-list editing, multi-selection, reorder/group, cue colors and notes,

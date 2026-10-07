@@ -1210,22 +1210,6 @@ export default function App() {
   // Close-request interception
   // -------------------------------------------------------------------------
 
-  // On Linux, GNOME/Mutter may restore a previous maximised *or* fullscreen state
-  // from the session — overriding tauri.conf.json ("maximized": false,
-  // "fullscreen": false) — and it applies that state *after* the window is mapped.
-  // Normalise the window on mount and once more on the next tick so we reliably win
-  // that race and always start at the configured 1280×800 size.
-  useEffect(() => {
-    const normalize = () => {
-      const win = getCurrentWindow();
-      void win.setFullscreen(false).catch(() => {});
-      void win.unmaximize().catch(() => {});
-    };
-    normalize();
-    const id = setTimeout(normalize, 150);
-    return () => clearTimeout(id);
-  }, []);
-
   useEffect(() => {
     const win = getCurrentWindow();
     let unlisten: (() => void) | undefined;

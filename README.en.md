@@ -71,6 +71,8 @@ Qlisa 1.5.13 adds UUID-based commands between Cue Lists. Goto moves the target l
 
 The current source checkout also contains a configurable status bar under Settings → Personalization. This feature is not included in the published 1.5.13 installer; see the [status bar guide](docs/status-bar.md).
 
+The unreleased source also remembers the main window's size, position, and maximized state between launches. See the [window state note](docs/window-state.md).
+
 The previous Qlisa 1.5.12 release includes the Stage theme for live operation, with a
 compact Cue List, independently collapsible panels, and large transport
 controls. See the [Stage theme notes](docs/flagship-theme.md) and [1.5.12 release notes](docs/RELEASE_NOTES_1.5.12.md).

@@ -6,6 +6,7 @@ pub mod cue;
 pub mod engine;
 pub mod health;
 pub mod logger;
+pub mod main_window_state;
 pub mod machine_config;
 pub mod media_converter;
 pub mod media_runtime;
@@ -125,6 +126,12 @@ pub fn run() {
         &startup_cwd,
     ));
     let second_instance_queue = Arc::clone(&pending_project_opens);
+    let main_window_state = main_window_state::shared();
+    let window_state_ready = Arc::new(AtomicBool::new(false));
+    let window_state_for_events = Arc::clone(&main_window_state);
+    let window_state_ready_for_events = Arc::clone(&window_state_ready);
+    let window_state_for_setup = Arc::clone(&main_window_state);
+    let window_state_ready_for_setup = Arc::clone(&window_state_ready);
 
     tauri::Builder::default()
         .manage(pending_project_opens)
@@ -149,12 +156,34 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .on_window_event(|window, event| {
+        .on_window_event(move |window, event| {
             if window.label() == "diagnostics" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
                     return;
+                }
+            }
+            if window.label() == "main" {
+                match event {
+                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                        if window_state_ready_for_events.load(Ordering::Acquire) {
+                            if let Some(main) = window.app_handle().get_webview_window("main") {
+                                main_window_state::track(&main, &window_state_for_events);
+                            }
+                        }
+                    }
+                    tauri::WindowEvent::CloseRequested { .. } => {
+                        if window_state_ready_for_events.load(Ordering::Acquire) {
+                            if let Some(main) = window.app_handle().get_webview_window("main") {
+                                main_window_state::flush_window(&main, &window_state_for_events);
+                            }
+                        }
+                    }
+                    tauri::WindowEvent::Destroyed => {
+                        main_window_state::flush(&window_state_for_events);
+                    }
+                    _ => {}
                 }
             }
             // When the main window is destroyed, the Win32 output-window thread
@@ -171,7 +200,11 @@ pub fn run() {
                 std::process::exit(0);
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
+            if let Some(window) = app.get_webview_window("main") {
+                main_window_state::restore(&window, &window_state_for_setup);
+            }
+            window_state_ready_for_setup.store(true, Ordering::Release);
             // ----------------------------------------------------------------
             // Initialise engines and managed state.
             // OutputEngine creates the persistent Win32 window + libmpv context
@@ -819,8 +852,13 @@ pub fn run() {
             update_fixture_group,
             remove_fixture_group,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Qlisa");
+        .build(tauri::generate_context!())
+        .expect("error while building Qlisa")
+        .run(move |_app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+                main_window_state::flush(&main_window_state);
+            }
+        });
 }
 
 /// Per-OS instruction for restoring video output, appended to the health banner.
