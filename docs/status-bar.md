@@ -66,6 +66,13 @@ frame can be normal when an output runs at a lower rate.
 - Keyboard overflow check passed at a 1,024 px viewport width. The left strip was
   512 px wide and its content was 625 px; End reached scroll position 113 and
   Home returned to position 0. The fixture contained eight cues.
+- A follow-up found that the native `update_display_preferences` command used a
+  field whitelist that omitted `status_bar`. The earlier mock IPC fixture did
+  not exercise that backend write. The command now persists the status bar
+  preferences, and a Rust regression test covers the production update helper
+  while checking that output routing fields remain unchanged. All 15 targeted
+  `preferences_cmds` Rust tests passed after the fix. The native GUI has not yet
+  been re-tested with this fix.
 
 These checks do not establish real physical-display FPS or drop rates, audio
 underrun rates on playback hardware, NDI/SRT receiver behavior, or full native

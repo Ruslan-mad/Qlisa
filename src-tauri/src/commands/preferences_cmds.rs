@@ -1231,23 +1231,7 @@ pub fn update_display_preferences(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let saved = update_global_preferences(&state, |next| {
-        // Preserve fields managed by their dedicated commands and the output
-        // destination apply gate.
-        next.display.theme = prefs.theme;
-        next.display.show_output_timer = prefs.show_output_timer;
-        next.display.timer_floating = prefs.timer_floating;
-        next.display.timer_count_down = prefs.timer_count_down;
-        next.display.timer_show_ms = prefs.timer_show_ms;
-        next.display.timer_font = prefs.timer_font;
-        next.display.timer_font_size = prefs.timer_font_size;
-        next.display.timer_position = prefs.timer_position;
-        next.display.timer_margin = prefs.timer_margin;
-        next.display.cue_color_style = prefs.cue_color_style;
-        next.display.show_live_panel = prefs.show_live_panel;
-        next.display.show_slice_panel = prefs.show_slice_panel;
-        next.display.clip_editor_active_tab = prefs.clip_editor_active_tab;
-    })?;
+    let saved = update_global_preferences(&state, |next| apply_display_preferences(next, prefs))?;
     let font = saved.display.timer_font.clone();
     let font_size = saved.display.timer_font_size;
     let position = saved.display.timer_position;
@@ -1264,6 +1248,57 @@ pub fn update_display_preferences(
     state.output_engine.set_timer_preview(None);
     let _ = app_handle.emit("preferences-updated", serde_json::json!({}));
     Ok(())
+}
+
+/// Apply fields owned by the display preferences command while preserving
+/// output routing fields handled by their dedicated commands.
+fn apply_display_preferences(next: &mut AppPreferences, prefs: DisplayPreferences) {
+    next.display.theme = prefs.theme;
+    next.display.show_output_timer = prefs.show_output_timer;
+    next.display.timer_floating = prefs.timer_floating;
+    next.display.timer_count_down = prefs.timer_count_down;
+    next.display.timer_show_ms = prefs.timer_show_ms;
+    next.display.timer_font = prefs.timer_font;
+    next.display.timer_font_size = prefs.timer_font_size;
+    next.display.timer_position = prefs.timer_position;
+    next.display.timer_margin = prefs.timer_margin;
+    next.display.cue_color_style = prefs.cue_color_style;
+    next.display.show_live_panel = prefs.show_live_panel;
+    next.display.show_slice_panel = prefs.show_slice_panel;
+    next.display.clip_editor_active_tab = prefs.clip_editor_active_tab;
+    next.display.status_bar = prefs.status_bar;
+}
+
+#[cfg(test)]
+mod display_preferences_tests {
+    use super::*;
+    use crate::preferences::{StatusBarMetricPreference, StatusBarPreferences};
+
+    #[test]
+    fn display_update_applies_status_bar_and_preserves_output_routing() {
+        let mut current = AppPreferences::default();
+        current.display.output_screen = Some(2);
+        current.display.output_destinations[0].monitor = Some(2);
+        let output_screen_before = current.display.output_screen;
+        let outputs_before = current.display.output_destinations.clone();
+
+        let mut requested = current.display.clone();
+        requested.output_screen = Some(0);
+        requested.output_destinations[0].monitor = Some(0);
+        requested.status_bar = StatusBarPreferences {
+            visible: false,
+            left: vec![StatusBarMetricPreference { id: "audio_gaps".into(), enabled: true }],
+            right: vec![StatusBarMetricPreference { id: "gpu".into(), enabled: false }],
+            gpu_adapter_id: Some("render-luid".into()),
+        };
+        let expected_status_bar = requested.status_bar.clone();
+
+        apply_display_preferences(&mut current, requested);
+
+        assert_eq!(current.display.status_bar, expected_status_bar);
+        assert_eq!(current.display.output_screen, output_screen_before);
+        assert_eq!(current.display.output_destinations, outputs_before);
+    }
 }
 
 /// Apply timer style settings immediately (without persisting) and show or hide
