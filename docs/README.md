@@ -2,6 +2,8 @@
 
 ## Project and contribution
 
+- [Release notes for 1.5.14](RELEASE_NOTES_1.5.14.md) — prepared for the next
+  release; publication is pending.
 - [Release notes for 1.5.13](RELEASE_NOTES_1.5.13.md) — changes in the current
   published release.
 - [Release notes for 1.5.12](RELEASE_NOTES_1.5.12.md) — changes in the previous
@@ -23,6 +25,8 @@
   per-list Playheads, persistence, and a native manual-check fixture.
 - [Status bar](status-bar.md) — configurable system, playback, output, network,
   and project metrics, with sampling and unavailable-data limits.
+- [Main window placement](window-state.md) — persisted window placement and
+  maximized state, startup restoration, and monitor fallback behavior.
 - [GO latency measurements](go-start-latency.md) — first media progress timing for audio, images, and video, with fixture sizes and measurement limits.
 - [Stage theme](flagship-theme.md) — live-operation layout, Media Dock, Cue List
   search, per-list timecode settings, and manual checks.

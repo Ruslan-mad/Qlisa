@@ -69,9 +69,7 @@ Configurable automatic transitions complement manual control through the Playhea
 
 Qlisa 1.5.13 adds UUID-based commands between Cue Lists. Goto moves the target list's Playhead while the visible tab stays unchanged. The version also updates the Media Dock, search field, and per-list timecode settings. [Qlisa 1.5.13 is now published](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.13); see the [release notes](docs/RELEASE_NOTES_1.5.13.md) and [cross-list command guide](docs/cross-list-commands.md).
 
-The current source checkout also contains a configurable status bar under Settings → Personalization. This feature is not included in the published 1.5.13 installer; see the [status bar guide](docs/status-bar.md).
-
-The unreleased source also remembers the main window's size, position, and maximized state between launches. See the [window state note](docs/window-state.md).
+Qlisa 1.5.14 is the next release in preparation. It adds a configurable status bar under Settings → Personalization, saves its preferences, and restores the main window's position, size, and maximized state. Publication is pending. See the [1.5.14 release notes](docs/RELEASE_NOTES_1.5.14.md), [status bar guide](docs/status-bar.md), and [window state note](docs/window-state.md).
 
 The previous Qlisa 1.5.12 release includes the Stage theme for live operation, with a
 compact Cue List, independently collapsible panels, and large transport

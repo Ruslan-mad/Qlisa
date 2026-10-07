@@ -18,11 +18,11 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. Qlisa 1.5.12 was the previous published release. This checkout describes
-Qlisa 1.5.13; see its [release notes](RELEASE_NOTES_1.5.13.md), the
-[1.5.12 notes](RELEASE_NOTES_1.5.12.md), and the
+1.5.8. Qlisa 1.5.13 is the latest published release. This checkout prepares
+Qlisa 1.5.14; see its [prepared release notes](RELEASE_NOTES_1.5.14.md), the
+[1.5.13 notes](RELEASE_NOTES_1.5.13.md), and the
 [1.5.13 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.13) for
-the current installer. This is not an official
+the current installer. Publication of 1.5.14 is pending. This is not an official
 upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
 downloads. The Tauri updater is configured for signed GitHub Releases. The
@@ -98,17 +98,20 @@ hashes. [Windows CI](https://github.com/Ruslan-mad/Qlisa/actions/runs/3755047405
 passed for the build source. Native GUI, physical cross-list playback, and
 updater end-to-end checks were not run.
 
-## Unreleased source changes
+## Next release: Qlisa 1.5.14 (prepared)
 
-The current working tree adds a configurable status bar for system and runtime
-metrics. This feature is not part of the published 1.5.13 installer. See the
-[status bar guide](status-bar.md) for metric meanings, sampling, and data
-limits.
+The prepared 1.5.14 changes add a configurable 13-metric status bar, persistence
+for its settings, and restoration of the main window's normal position, client
+size, and maximized state. Some hardware and output measurements remain
+unavailable or unverified. See the [release notes](RELEASE_NOTES_1.5.14.md),
+[status bar guide](status-bar.md), and [window state note](window-state.md).
+Publication is pending.
 
-The main window now saves its normal position and size, plus whether it was
-maximized, in the machine-local `Inkue/main-window-state.json` file. It restores
-the placement at startup and moves a window back into the primary work area if
-its previous monitor is no longer available. See the [window state note](window-state.md).
+Focused checks covered status bar preference persistence (15 Rust tests) and
+window restoration/placement (three Rust tests). `pnpm tauri:check` passed.
+Windows checks covered status bar preference persistence and main-window
+restoration. They do not establish physical output FPS/audio drop rates, NDI/SRT
+receiver behavior, or updater end-to-end behavior.
 
 Features represented in the current tree include:
 
