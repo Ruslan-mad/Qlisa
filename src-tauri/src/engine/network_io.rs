@@ -2214,6 +2214,10 @@ impl SrtFfmpegSender {
         stats
     }
 
+    pub fn audio_dropped_frames(&self) -> u64 {
+        self.audio_queue.0.lock().map(|queue| queue.dropped_frames).unwrap_or(0)
+    }
+
     /// Stop the encoder deterministically before rebuilding/removing an output.
     pub fn stop(mut self) -> Result<(), String> {
         self.stop_inner()
@@ -3139,6 +3143,10 @@ pub struct NetworkOutputRuntimeStatus {
     pub state: NetworkOutputState,
     pub submitted_frames: u64,
     pub superseded_frames: u64,
+    /// SRT audio frames dropped by Qlisa's bounded sender queue. This is not
+    /// packet loss or a remote receiver statistic. NDI has no equivalent.
+    #[serde(default)]
+    pub dropped_audio_frames: Option<u64>,
     pub last_error: Option<String>,
 }
 
@@ -3155,6 +3163,8 @@ pub struct NetworkOutputDiagnostics {
     pub latency_ms: Option<u32>,
     pub submitted_frames: u64,
     pub superseded_frames: u64,
+    #[serde(default)]
+    pub dropped_audio_frames: Option<u64>,
     pub last_error: Option<String>,
 }
 
@@ -3165,6 +3175,7 @@ impl NetworkOutputRuntimeStatus {
             state: NetworkOutputState::WaitingForFrame,
             submitted_frames: 0,
             superseded_frames: 0,
+            dropped_audio_frames: None,
             last_error: None,
         }
     }
@@ -3490,6 +3501,7 @@ impl NetworkOutputManager {
                         latency_ms,
                         submitted_frames: status.submitted_frames,
                         superseded_frames: status.superseded_frames,
+                        dropped_audio_frames: status.dropped_audio_frames,
                         last_error: status.last_error,
                     }
                 })
@@ -3622,6 +3634,7 @@ impl NetworkOutputEndpoint {
                 state: NetworkOutputState::Error,
                 submitted_frames: 0,
                 superseded_frames: 0,
+                dropped_audio_frames: None,
                 last_error: Some("Network output status lock poisoned".into()),
             })
     }
@@ -3656,6 +3669,9 @@ fn network_output_loop(
     let mut retry = NetworkRetryBackoff::default();
     let mut audio_samples = Vec::with_capacity(8_192);
     let mut latest_frame: Option<BgraFrame> = None;
+    let mut last_audio_drop_sample = Instant::now();
+    let mut audio_drop_total = 0u64;
+    let mut last_audio_drop_count = 0u64;
     let configured_audio_sample_rate = expected_format
         .map(|format| format.sample_rate)
         .unwrap_or(audio_sample_rate);
@@ -3703,6 +3719,7 @@ fn network_output_loop(
             match start_network_senders(&config, frame, configured_audio_sample_rate) {
                 Ok(value) => {
                     senders = Some(value);
+                    last_audio_drop_count = 0;
                     if let Some(audio) = audio.as_mut() {
                         let discarded = audio.discard_queued();
                         if discarded > 0 {
@@ -3773,6 +3790,21 @@ fn network_output_loop(
                     }
                 }
             }
+        }
+        if last_audio_drop_sample.elapsed() >= Duration::from_secs(1) {
+            if let Some(sender) = srt.as_ref() {
+                let current_drops = sender.audio_dropped_frames();
+                audio_drop_total = audio_drop_total.saturating_add(if current_drops >= last_audio_drop_count {
+                    current_drops - last_audio_drop_count
+                } else {
+                    current_drops
+                });
+                last_audio_drop_count = current_drops;
+                if let Ok(mut current) = status.lock() {
+                    current.dropped_audio_frames = Some(audio_drop_total);
+                }
+            }
+            last_audio_drop_sample = Instant::now();
         }
         // SRT repeats the last packed program image inside its paced pipe
         // writer. NDI intentionally receives only a fresh compositor image.

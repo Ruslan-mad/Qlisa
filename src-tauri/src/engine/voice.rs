@@ -453,6 +453,10 @@ pub struct Voice {
     pub underrun_events: AtomicU64,
     /// Number of diagnostic events that could not enter the bounded status ring.
     pub dropped_underrun_reports: AtomicU64,
+    /// Optional lifetime counters owned by the submitting AudioEngine.
+    /// These are read-only from non-RT callers and never reset by diagnostics.
+    pub runtime_underrun_events: Option<Arc<AtomicU64>>,
+    pub runtime_silent_frames: Option<Arc<AtomicU64>>,
     /// True after a loop boundary has occurred in this voice's current run.
     pub has_looped: AtomicBool,
 
@@ -511,6 +515,8 @@ impl Voice {
             loop_start_frame: AtomicU64::new(0),
             underrun_events: AtomicU64::new(0),
             dropped_underrun_reports: AtomicU64::new(0),
+            runtime_underrun_events: None,
+            runtime_silent_frames: None,
             has_looped: AtomicBool::new(false),
             state: AtomicU8::new(VoiceState::Idle as u8),
             inner: Arc::new(VoiceInner {
@@ -554,6 +560,8 @@ impl Voice {
             loop_start_frame: AtomicU64::new(0),
             underrun_events: AtomicU64::new(0),
             dropped_underrun_reports: AtomicU64::new(0),
+            runtime_underrun_events: None,
+            runtime_silent_frames: None,
             has_looped: AtomicBool::new(false),
             state: AtomicU8::new(VoiceState::Idle as u8),
             inner: Arc::new(VoiceInner {
@@ -596,6 +604,8 @@ impl Voice {
             loop_start_frame: AtomicU64::new(0),
             underrun_events: AtomicU64::new(0),
             dropped_underrun_reports: AtomicU64::new(0),
+            runtime_underrun_events: None,
+            runtime_silent_frames: None,
             has_looped: AtomicBool::new(false),
             state: AtomicU8::new(VoiceState::Idle as u8),
             inner: Arc::new(VoiceInner {

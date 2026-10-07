@@ -536,6 +536,73 @@ pub struct DisplayPreferences {
     /// `Some([])` is an explicit choice to use the regular default routing.
     #[serde(default)]
     pub new_cue_output_ids: Option<Vec<String>>,
+    /// Machine-global status bar layout and metric visibility.
+    #[serde(default)]
+    pub status_bar: StatusBarPreferences,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusBarMetricPreference {
+    pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusBarPreferences {
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default)]
+    pub left: Vec<StatusBarMetricPreference>,
+    #[serde(default)]
+    pub right: Vec<StatusBarMetricPreference>,
+    #[serde(default)]
+    pub gpu_adapter_id: Option<String>,
+}
+
+impl Default for StatusBarPreferences {
+    fn default() -> Self {
+        fn metric(id: &str, enabled: bool) -> StatusBarMetricPreference {
+            StatusBarMetricPreference { id: id.into(), enabled }
+        }
+        Self {
+            visible: true,
+            left: vec![
+                metric("cue_count", true), metric("duration", true),
+                metric("active", true), metric("problems", true),
+                metric("audio_gaps", false), metric("video_fps", false),
+                metric("network_drops", false),
+            ],
+            right: vec![
+                metric("cpu", true), metric("gpu", true), metric("vram", true),
+                metric("ram", true), metric("app_ram", false), metric("disk", false),
+            ],
+            gpu_adapter_id: None,
+        }
+    }
+}
+
+impl StatusBarPreferences {
+    fn normalize(&mut self) {
+        const METRICS: &[(&str, bool)] = &[
+            ("cue_count", true), ("duration", true), ("active", true),
+            ("problems", true), ("audio_gaps", true), ("video_fps", true),
+            ("network_drops", true), ("cpu", false), ("gpu", false),
+            ("vram", false), ("ram", false), ("app_ram", false), ("disk", false),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        self.left.retain(|item| METRICS.iter().any(|(id, _)| *id == item.id) && seen.insert(item.id.clone()));
+        self.right.retain(|item| METRICS.iter().any(|(id, _)| *id == item.id) && seen.insert(item.id.clone()));
+        for (id, default_left) in METRICS {
+            if seen.insert((*id).to_owned()) {
+                let item = StatusBarMetricPreference { id: (*id).into(), enabled: false };
+                if *default_left { self.left.push(item); } else { self.right.push(item); }
+            }
+        }
+        if self.gpu_adapter_id.as_deref().is_some_and(|id| id.trim().is_empty()) {
+            self.gpu_adapter_id = None;
+        }
+    }
 }
 
 /// Output sink kind.  `Display` is intentionally an extensible enum: network
@@ -714,6 +781,7 @@ impl Default for DisplayPreferences {
             }],
             default_output_id: Self::default_output_id(),
             new_cue_output_ids: Some(vec![Self::default_output_id()]),
+            status_bar: StatusBarPreferences::default(),
         }
     }
 }
@@ -750,6 +818,7 @@ pub fn inject_runtime_audio_buffer_size(preferences: &mut AppPreferences, buffer
 pub fn normalize_global_preferences(preferences: &mut AppPreferences) -> bool {
     let before = serde_json::to_value(&*preferences).ok();
     preferences.display.migrate_outputs();
+    preferences.display.status_bar.normalize();
 
     let mut seen_ids = std::collections::HashSet::new();
     preferences.display.output_destinations.retain(|destination| {
@@ -1048,6 +1117,39 @@ mod tests {
         preferences.display.new_cue_output_ids = Some(vec![]);
         normalize_global_preferences(&mut preferences);
         assert_eq!(preferences.display.new_cue_output_ids, Some(vec![]));
+    }
+
+    #[test]
+    fn status_bar_defaults_and_old_settings_migrate_safely() {
+        let legacy: DisplayPreferences = serde_json::from_value(serde_json::json!({
+            "output_screen": null,
+            "theme": "stage"
+        })).unwrap();
+        assert_eq!(legacy.status_bar, StatusBarPreferences::default());
+
+        let mut preferences: AppPreferences = serde_json::from_value(serde_json::json!({
+            "display": { "status_bar": {
+                "visible": false,
+                "left": [
+                    { "id": "duration", "enabled": false },
+                    { "id": "unknown", "enabled": true },
+                    { "id": "duration", "enabled": true },
+                    { "id": "gpu", "enabled": true }
+                ],
+                "right": [{ "id": "cpu", "enabled": false }],
+                "gpu_adapter_id": "adapter-1"
+            }}
+        })).unwrap();
+        normalize_global_preferences(&mut preferences);
+        let status = &preferences.display.status_bar;
+        assert!(!status.visible);
+        assert_eq!(status.left.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["duration", "gpu", "cue_count", "active", "problems", "audio_gaps", "video_fps", "network_drops"]);
+        assert_eq!(status.right.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["cpu", "vram", "ram", "app_ram", "disk"]);
+        assert!(!status.left[2].enabled);
+        assert!(!status.right[0].enabled);
+        assert_eq!(status.gpu_adapter_id.as_deref(), Some("adapter-1"));
     }
 
     #[test]

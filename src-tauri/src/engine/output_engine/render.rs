@@ -83,6 +83,7 @@ pub(crate) struct RenderShared {
     pub shutting_down: AtomicBool,
     pub text_overlay_active: AtomicBool,
     pub visible: AtomicBool,
+    pub successful_physical_presents: AtomicU64,
     pub width: AtomicU32,
     pub height: AtomicU32,
     pub warp: Mutex<Option<[f32; 9]>>,
@@ -204,7 +205,7 @@ pub(crate) struct RenderRuntime {
 impl RenderRuntime {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
-            shared: Arc::new(RenderShared { signal: Arc::new((Mutex::new(false), Condvar::new())), shutting_down: AtomicBool::new(false), text_overlay_active: AtomicBool::new(false), visible: AtomicBool::new(false), width: AtomicU32::new(1920), height: AtomicU32::new(1080), warp: Mutex::new(None), warp_dirty: AtomicBool::new(false), overlay_dirty: AtomicBool::new(false), network_capture_active: AtomicBool::new(false), monitor_capture_active: AtomicBool::new(false) }),
+            shared: Arc::new(RenderShared { signal: Arc::new((Mutex::new(false), Condvar::new())), shutting_down: AtomicBool::new(false), text_overlay_active: AtomicBool::new(false), visible: AtomicBool::new(false), successful_physical_presents: AtomicU64::new(0), width: AtomicU32::new(1920), height: AtomicU32::new(1080), warp: Mutex::new(None), warp_dirty: AtomicBool::new(false), overlay_dirty: AtomicBool::new(false), network_capture_active: AtomicBool::new(false), monitor_capture_active: AtomicBool::new(false) }),
             #[cfg(not(target_os = "macos"))] window: Mutex::new(None),
             #[cfg(target_os = "macos")] mac_window: Mutex::new(None),
             output_id: Mutex::new(String::new()),
@@ -220,6 +221,9 @@ impl RenderRuntime {
         })
     }
     pub(super) fn wake(&self) { if let Ok(mut r) = self.shared.signal.0.lock() { *r = true; self.shared.signal.1.notify_one(); } }
+    pub(crate) fn successful_physical_present_count(&self) -> u64 {
+        self.shared.successful_physical_presents.load(Ordering::Relaxed)
+    }
     /// Stop the GL loop.  This is intentionally irreversible: a native output
     /// pipeline is retired rather than restarted after its mpv contexts are
     /// torn down.
@@ -1867,6 +1871,9 @@ fn render_thread_main(
                 if output_visible {
                     draw_blit_pass_to(&gl, blit_program, blit_vao, target.tex, w_px, h_px, None);
                     if let Err(e) = surface.swap_buffers(&ctx) { log::warn!("[render] swap: {e:?}"); }
+                    else if !runtime.shared.network_capture_active.load(Ordering::Relaxed) {
+                        runtime.shared.successful_physical_presents.fetch_add(1, Ordering::Relaxed);
+                    }
                 } else {
                     unsafe { gl.flush(); }
                 }
@@ -1881,6 +1888,9 @@ fn render_thread_main(
             if alpha > 0 { draw_fade_quad(&gl, fade_program, fade_vao, alpha as f32 / 255.0); }
             if operator_alpha > 0 { draw_fade_quad(&gl, fade_program, fade_vao, operator_alpha as f32 / 255.0); }
             if let Err(e) = surface.swap_buffers(&ctx) { log::warn!("[render] swap: {e:?}"); }
+            else if !runtime.shared.network_capture_active.load(Ordering::Relaxed) {
+                runtime.shared.successful_physical_presents.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         // Tap the already-composited texture for the operator monitor.  This

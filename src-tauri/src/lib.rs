@@ -60,6 +60,8 @@ use commands::{
     },
     network_cmds::{get_network_config, list_network_interfaces, set_network_config},
     network_io_cmds::{get_network_io_status, get_network_output_statuses},
+    status_cmds::get_status_runtime_snapshot,
+    system_metrics::get_system_status,
     osc_cmds::{
         add_osc_patch, get_osc_config, list_osc_patches, remove_osc_patch, send_osc_test,
         set_osc_config, update_osc_patch,
@@ -597,6 +599,8 @@ pub fn run() {
             drain_pending_project_opens,
             is_backend_ready,
             get_media_runtime_status,
+            get_system_status,
+            get_status_runtime_snapshot,
             prepare_media_runtime,
             schedule_media_runtime_reinstall,
             // Transport

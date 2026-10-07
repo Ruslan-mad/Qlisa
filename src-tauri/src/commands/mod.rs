@@ -51,6 +51,8 @@ pub mod osc_cmds;
 pub mod preferences_cmds;
 pub mod preflight_cmds;
 pub mod recovery_cmds;
+pub mod status_cmds;
+pub mod system_metrics;
 pub mod transport_cmds;
 pub mod undo_cmds;
 pub mod workspace_cmds;

@@ -912,6 +912,22 @@ impl OutputEngine {
         self.network_outputs.statuses()
     }
 
+    /// Read per-display successful present counters without touching GL or
+    /// mpv. Hidden and network-only pipelines are not reported as displays.
+    pub fn physical_present_counters(&self) -> Vec<(String, String, u64)> {
+        self.active_display_pipelines().into_iter().filter_map(|pipeline| {
+            if !pipeline.render_runtime.shared.visible.load(Ordering::Relaxed) {
+                return None;
+            }
+            let config = pipeline.config();
+            Some((
+                config.id,
+                config.name,
+                pipeline.render_runtime.successful_physical_present_count(),
+            ))
+        }).collect()
+    }
+
     /// Read-only network diagnostics assembled from existing destination
     /// workers and configured transport settings.
     pub fn network_output_diagnostics(
@@ -3730,6 +3746,7 @@ mod tests {
             state: NetworkOutputState::WaitingForFrame,
             submitted_frames: 0,
             superseded_frames: 0,
+            dropped_audio_frames: None,
             last_error: None,
         };
         assert!(network_output_status_detail(Some(&waiting)).is_none());

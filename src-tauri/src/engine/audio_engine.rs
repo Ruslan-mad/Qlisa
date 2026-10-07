@@ -628,6 +628,8 @@ pub struct AudioEngine {
     /// device watchdog treats a count that stops advancing for ~2 s as a dead
     /// stream (kind-agnostic device-loss detection, even if cpal reports no error).
     output_callbacks: Arc<std::sync::atomic::AtomicU64>,
+    runtime_underrun_events: Arc<std::sync::atomic::AtomicU64>,
+    runtime_silent_frames: Arc<std::sync::atomic::AtomicU64>,
     /// Total output channel count of the current stream (updated on restart).
     output_channels: std::sync::atomic::AtomicU32,
     /// Output-channel offset applied to unpatched voices at submission — the
@@ -767,6 +769,8 @@ struct EngineCore {
     master_gain: Arc<std::sync::atomic::AtomicU32>,
     output_period: Arc<std::sync::atomic::AtomicU32>,
     output_callbacks: Arc<std::sync::atomic::AtomicU64>,
+    runtime_underrun_events: Arc<std::sync::atomic::AtomicU64>,
+    runtime_silent_frames: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EngineCore {
@@ -780,6 +784,8 @@ impl EngineCore {
             master_gain: Arc::new(std::sync::atomic::AtomicU32::new(f32::to_bits(1.0_f32))),
             output_period: Arc::new(std::sync::atomic::AtomicU32::new(256)),
             output_callbacks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            runtime_underrun_events: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            runtime_silent_frames: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -856,6 +862,8 @@ impl EngineCore {
                 config.device_id.clone()
             }),
             in_fallback: std::sync::atomic::AtomicBool::new(started_in_fallback),
+            runtime_underrun_events: self.runtime_underrun_events,
+            runtime_silent_frames: self.runtime_silent_frames,
         });
 
         // A broken configured device (HDMI with no display, unplugged interface)
@@ -888,6 +896,16 @@ impl EngineCore {
 }
 
 impl AudioEngine {
+    /// Lifetime post-readiness underruns and inserted silent frames. Initial
+    /// readiness and control-seek rebuffer silence are excluded; counters
+    /// survive voice collection.
+    pub fn runtime_audio_gap_counters(&self) -> (u64, u64) {
+        (
+            self.runtime_underrun_events.load(Ordering::Relaxed),
+            self.runtime_silent_frames.load(Ordering::Relaxed),
+        )
+    }
+
     /// Snapshot stream-backed voices without touching the realtime callback.
     pub fn streaming_voice_diagnostics(&self) -> Vec<StreamingVoiceDiagnostics> {
         let mut snapshots: Vec<StreamingVoiceDiagnostics> = self.voices
@@ -1216,6 +1234,8 @@ impl AudioEngine {
         self.reject_preview_channel_overlap(&voice)?;
         self.check_channel_bounds(&voice, self.output_channels());
         let id = voice.id;
+        voice.runtime_underrun_events = Some(Arc::clone(&self.runtime_underrun_events));
+        voice.runtime_silent_frames = Some(Arc::clone(&self.runtime_silent_frames));
         let arc = Arc::new(voice);
         arc.set_playing();
 
@@ -1239,6 +1259,8 @@ impl AudioEngine {
         self.reject_preview_channel_overlap(&voice)?;
         self.check_channel_bounds(&voice, self.output_channels());
         let id = voice.id;
+        voice.runtime_underrun_events = Some(Arc::clone(&self.runtime_underrun_events));
+        voice.runtime_silent_frames = Some(Arc::clone(&self.runtime_silent_frames));
         let arc = Arc::new(voice);
         arc.set_paused();
 
@@ -1594,12 +1616,16 @@ impl AudioEngine {
     /// caller, which must either report the error or keep it silent.
     fn submit_to_aux(
         &self,
-        voice: Voice,
+        mut voice: Voice,
         device_id: &str,
         start: bool,
         report_patch_channel_bounds: bool,
         clear_patch_device_health: bool,
     ) -> std::result::Result<VoiceId, (Voice, anyhow::Error)> {
+        if report_patch_channel_bounds {
+            voice.runtime_underrun_events = Some(Arc::clone(&self.runtime_underrun_events));
+            voice.runtime_silent_frames = Some(Arc::clone(&self.runtime_silent_frames));
+        }
         let mut aux = match self.aux_streams.lock() {
             Ok(g) => g,
             Err(_) => return Err((voice, anyhow!("aux_streams mutex poisoned"))),
@@ -3382,17 +3408,23 @@ fn mix_stream(
     }
     if underruns_after > underruns_before {
         let stream_snapshot = source.underrun_snapshot();
+        let silent_frames = (((underruns_after - underruns_before) as f64
+            * output_sample_rate as f64
+            / source.sample_rate.max(1) as f64)
+            .round() as u64)
+            .max(1);
+        if let Some(counter) = &voice.runtime_underrun_events {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(counter) = &voice.runtime_silent_frames {
+            counter.fetch_add(silent_frames, Ordering::Relaxed);
+        }
         let count = voice.underrun_events.fetch_add(1, Ordering::Relaxed) + 1;
         let boundary_window = (source.sample_rate as u64 / 10).max(1);
         let near_loop_boundary = source.is_loop_rebuffering()
             || (voice.has_looped.load(Ordering::Relaxed) && frame_pos <= boundary_window)
             || (voice.inner.loops_remaining.load(Ordering::Relaxed) != 0
                 && end.saturating_sub(frame_pos) <= boundary_window);
-        let silent_frames = (((underruns_after - underruns_before) as f64
-            * output_sample_rate as f64
-            / source.sample_rate.max(1) as f64)
-            .round() as u64)
-            .max(1);
         let dropped_before = voice.dropped_underrun_reports.swap(0, Ordering::Relaxed);
         if status_prod.try_push(AudioStatus::Underrun {
             voice_id: voice.id,
@@ -5574,7 +5606,12 @@ mod tests {
     #[test]
     fn control_seek_rebuffer_is_reported_separately_then_real_starvation_remains_visible() {
         let initial = vec![[0.25, -0.25]; 1024];
-        let (voice, source) = make_stream_voice(&initial, true, false);
+        let (mut voice, source) = make_stream_voice(&initial, true, false);
+        let underrun_events = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let silent_frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let voice_mut = Arc::get_mut(&mut voice).expect("test voice is not shared yet");
+        voice_mut.runtime_underrun_events = Some(Arc::clone(&underrun_events));
+        voice_mut.runtime_silent_frames = Some(Arc::clone(&silent_frames));
         let pool = rt_pool(vec![Arc::clone(&voice)]);
         source.request_control_seek(100);
         source.request_control_seek(200);
@@ -5590,10 +5627,22 @@ mod tests {
         assert!(recovered.iter().any(|status| matches!(status,
             AudioStatus::ControlSeekRebuffer { requests: 3, completed: true, silent_frames: 256, .. }
         )));
+        assert_eq!(underrun_events.load(Ordering::Relaxed), 0, "control-seek silence is not an underrun");
+        assert_eq!(silent_frames.load(Ordering::Relaxed), 0, "control-seek silence is not counted as an audio gap");
 
+        // This block may contain a real starvation event while the test
+        // drains the remaining PCM after seek recovery.
         let _ = run_block(&pool, None);
+        let before_final_starvation = underrun_events.load(Ordering::Relaxed);
         let starved = run_block(&pool, None);
         assert!(starved.iter().any(|status| matches!(status, AudioStatus::Underrun { .. })));
+        let after_starvation = underrun_events.load(Ordering::Relaxed);
+        assert!(after_starvation > before_final_starvation);
+        assert!(silent_frames.load(Ordering::Relaxed) > 0);
+        drop(pool);
+        drop(voice);
+        assert_eq!(underrun_events.load(Ordering::Relaxed), after_starvation,
+            "lifetime counter survives voice collection");
     }
 
     #[test]
