@@ -18,11 +18,11 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. Qlisa 1.5.13 is the latest published release. This checkout prepares
-Qlisa 1.5.14; see its [prepared release notes](RELEASE_NOTES_1.5.14.md), the
+1.5.8. Qlisa 1.5.14 is the latest published release. This checkout describes
+it; see the [release notes](RELEASE_NOTES_1.5.14.md), the previous
 [1.5.13 notes](RELEASE_NOTES_1.5.13.md), and the
-[1.5.13 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.13) for
-the current installer. Publication of 1.5.14 is pending. This is not an official
+[1.5.14 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.14) for
+the current installer. This is not an official
 upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
 downloads. The Tauri updater is configured for signed GitHub Releases. The
@@ -98,20 +98,30 @@ hashes. [Windows CI](https://github.com/Ruslan-mad/Qlisa/actions/runs/3755047405
 passed for the build source. Native GUI, physical cross-list playback, and
 updater end-to-end checks were not run.
 
-## Next release: Qlisa 1.5.14 (prepared)
+## Qlisa 1.5.14 publication
 
-The prepared 1.5.14 changes add a configurable 13-metric status bar, persistence
-for its settings, and restoration of the main window's normal position, client
-size, and maximized state. Some hardware and output measurements remain
-unavailable or unverified. See the [release notes](RELEASE_NOTES_1.5.14.md),
-[status bar guide](status-bar.md), and [window state note](window-state.md).
-Publication is pending.
+Published on 2026-10-07 at 12:26:09 UTC as GitHub release `405736571`:
+[Qlisa 1.5.14](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.14). Tag
+and build commit: `6de2d3a1cf39ea1739a6bb7e0d7548456bc25690`. The installer
+`Qlisa_1.5.14_x64-setup.exe` is 9,563,457 bytes, SHA-256
+`923ae6494195d69b677191af8142ac8afbfed41b720a06563a1db05d0c073de7`. Its
+416-byte signature was cryptographically verified with the configured public
+key. `latest.json` is 3,026 bytes and contains version 1.5.14 with the exact
+installer URL and signature. The `/releases/latest/download/latest.json`
+endpoint also reports 1.5.14. GitHub's digests and anonymous download SHA-256
+checks for all three release assets matched their expected hashes; the
+downloaded installer signature was verified again. The annotated tag resolves
+to the build commit.
 
-Focused checks covered status bar preference persistence (15 Rust tests) and
-window restoration/placement (three Rust tests). `pnpm tauri:check` passed.
-Windows checks covered status bar preference persistence and main-window
-restoration. They do not establish physical output FPS/audio drop rates, NDI/SRT
-receiver behavior, or updater end-to-end behavior.
+The fresh local release pipeline passed: 513 frontend tests, 1,021 Rust tests
+with 12 ignored, `cargo check`, Clippy, and the production NSIS build. Windows
+CI passed for the build source ([job](https://github.com/Ruslan-mad/Qlisa/actions/runs/37619814164/job/112786931015));
+Linux CI also passed. The macOS job reported an unsupported-platform failure.
+Automatic CI runs are disabled; maintainer-triggered Actions runs remain
+available. Updater end-to-end testing was not performed. Physical output
+FPS/audio drop rates and NDI/SRT receiver behavior remain unverified. See the
+[release notes](RELEASE_NOTES_1.5.14.md), [status bar guide](status-bar.md), and
+[window state note](window-state.md).
 
 Features represented in the current tree include:
 

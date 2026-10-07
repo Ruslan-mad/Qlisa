@@ -8,6 +8,10 @@ the pinned media archives directly from upstream when needed. This packaging
 choice does not determine or remove legal obligations for those upstream
 binaries.
 
+Automatic GitHub CI runs are disabled. Maintainers can start the available
+checks manually from GitHub Actions. A local release build and the GitHub
+Actions workflow are separate checks.
+
 ## Local build prerequisites
 
 - Windows, Node.js LTS, pnpm, Rust stable with the MSVC target, and Git for
@@ -39,11 +43,12 @@ key.
 
 ## Prepare a local build
 
-For the prepared next release, Qlisa 1.5.14, create and review the release notes,
-then run from the repository root:
+Create and review the release notes for the target version. Replace the
+`<target-version>` placeholder below with that version, then run from the
+repository root:
 
 ```powershell
-.\scripts\publish.ps1 -Version 1.5.14
+.\scripts\publish.ps1 -Version "<target-version>"
 ```
 
 The script checks the repository, runtime manifest pins, and signing setup. It runs
@@ -59,7 +64,7 @@ anything.
 version files or building artifacts:
 
 ```powershell
-.\scripts\publish.ps1 -Version 1.5.14 -DryRun
+.\scripts\publish.ps1 -Version "<target-version>" -DryRun
 ```
 
 Clippy warnings do not fail this check; a non-zero Clippy exit does. The
