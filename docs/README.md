@@ -2,8 +2,8 @@
 
 ## Project and contribution
 
-- [Release notes for 1.5.13](RELEASE_NOTES_1.5.13.md) — current version changes
-  and verification status.
+- [Release notes for 1.5.13](RELEASE_NOTES_1.5.13.md) — changes in the current
+  published release.
 - [Release notes for 1.5.12](RELEASE_NOTES_1.5.12.md) — changes in the previous
   published release.
 - [Release notes for 1.5.11](RELEASE_NOTES_1.5.11.md) — changes in the previous published release.

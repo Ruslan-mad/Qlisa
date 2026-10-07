@@ -67,7 +67,7 @@ Available Cue types include Audio, Video, Image, Text, Memo, Wait, Fade, Stop, G
 
 Configurable automatic transitions complement manual control through the Playhead, GO, STOP, and Active Cues panel. Waveform and media preview caches are stored alongside the project.
 
-Qlisa 1.5.13 adds UUID-based commands between Cue Lists. Goto moves the target list's Playhead while the visible tab stays unchanged. The version also updates the Media Dock, search field, and per-list timecode settings. See the [1.5.13 notes](docs/RELEASE_NOTES_1.5.13.md) and [cross-list command guide](docs/cross-list-commands.md).
+Qlisa 1.5.13 adds UUID-based commands between Cue Lists. Goto moves the target list's Playhead while the visible tab stays unchanged. The version also updates the Media Dock, search field, and per-list timecode settings. [Qlisa 1.5.13 is now published](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.13); see the [release notes](docs/RELEASE_NOTES_1.5.13.md) and [cross-list command guide](docs/cross-list-commands.md).
 
 The previous Qlisa 1.5.12 release includes the Stage theme for live operation, with a
 compact Cue List, independently collapsible panels, and large transport

@@ -21,8 +21,8 @@ extension changes and the `.qlisa` Windows file association shipped in Qlisa
 1.5.8. Qlisa 1.5.12 was the previous published release. This checkout describes
 Qlisa 1.5.13; see its [release notes](RELEASE_NOTES_1.5.13.md), the
 [1.5.12 notes](RELEASE_NOTES_1.5.12.md), and the
-[Releases page](https://github.com/Ruslan-mad/Qlisa/releases) for available
-binaries. This is not an official
+[1.5.13 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.13) for
+the current installer. This is not an official
 upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
 downloads. The Tauri updater is configured for signed GitHub Releases. The
@@ -85,6 +85,18 @@ Rust tests passed with 11 ignored, and `pnpm tauri:check`. Browser review used
 mock IPC. Native GUI and cross-list end-to-end playback were not tested. See the
 [release notes](RELEASE_NOTES_1.5.13.md), [cross-list guide](cross-list-commands.md),
 and [GO latency study](go-start-latency.md).
+
+Published 2026-10-07 UTC at
+https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.13. Tag and build commit:
+`94608f3e33042825df33d85ac43bc8977ca014b7`. The public installer
+`Qlisa_1.5.13_x64-setup.exe` is 9,486,540 bytes, SHA-256
+`965fec3b1c22fe740a8fb85be5f6bccb540c50d0c3aa85d21a903588da3020fa`; its
+416-byte signature was cryptographically verified with the matching public key.
+The 6,282-byte `latest.json` reports version 1.5.13 and the exact installer URL
+and signature. Anonymous downloads of all three assets matched their expected
+hashes. [Windows CI](https://github.com/Ruslan-mad/Qlisa/actions/runs/37550474050/job/112564460566)
+passed for the build source. Native GUI, physical cross-list playback, and
+updater end-to-end checks were not run.
 
 Features represented in the current tree include:
 
