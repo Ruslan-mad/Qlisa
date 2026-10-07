@@ -98,6 +98,13 @@ hashes. [Windows CI](https://github.com/Ruslan-mad/Qlisa/actions/runs/3755047405
 passed for the build source. Native GUI, physical cross-list playback, and
 updater end-to-end checks were not run.
 
+## Unreleased source changes
+
+The current working tree adds a configurable status bar for system and runtime
+metrics. This feature is not part of the published 1.5.13 installer. See the
+[status bar guide](status-bar.md) for metric meanings, sampling, and data
+limits.
+
 Features represented in the current tree include:
 
 - Cue-list editing, multi-selection, reorder/group, cue colors and notes,
