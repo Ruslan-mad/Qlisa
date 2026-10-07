@@ -71,9 +71,14 @@ frame can be normal when an output runs at a lower rate.
   not exercise that backend write. The command now persists the status bar
   preferences, and a Rust regression test covers the production update helper
   while checking that output routing fields remain unchanged. All 15 targeted
-  `preferences_cmds` Rust tests passed after the fix. The native GUI has not yet
-  been re-tested with this fix.
+  `preferences_cmds` Rust tests passed after the fix.
+- After the fix, native UI checks confirmed that disabling `cue_count` removes
+  it from the main status bar and persists its disabled state in
+  `%APPDATA%\Inkue\preferences.json`; metric reorder and moving `duration` to
+  the right also persisted and appeared in the main window. Applying
+  `visible: false` hid the footer.
+- `pnpm tauri:check` passed after the fix.
 
-These checks do not establish real physical-display FPS or drop rates, audio
-underrun rates on playback hardware, NDI/SRT receiver behavior, or full native
-GUI end-to-end behavior.
+Native UI checks covered status bar preference persistence and rendering. They
+do not establish real physical-display FPS or drop rates, audio underrun rates
+on playback hardware, or NDI/SRT receiver behavior.
