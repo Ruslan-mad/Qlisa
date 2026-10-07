@@ -116,7 +116,8 @@ to the build commit.
 The fresh local release pipeline passed: 513 frontend tests, 1,021 Rust tests
 with 12 ignored, `cargo check`, Clippy, and the production NSIS build. Windows
 CI passed for the build source ([job](https://github.com/Ruslan-mad/Qlisa/actions/runs/37619814164/job/112786931015));
-Linux CI also passed. The macOS job reported an unsupported-platform failure.
+Linux CI also passed. The macOS job failed; macOS is not a supported release
+platform.
 Automatic CI runs are disabled; maintainer-triggered Actions runs remain
 available. Updater end-to-end testing was not performed. Physical output
 FPS/audio drop rates and NDI/SRT receiver behavior remain unverified. See the
