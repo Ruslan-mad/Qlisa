@@ -33,6 +33,22 @@ export function flattenCatalogActiveCues(lists: WorkspaceCueCatalogList[]): Cata
   return result;
 }
 
+/** Active Group/Number cues summarize their descendants in the Active Cues view. */
+export function getActiveCueDisplayRows(lists: WorkspaceCueCatalogList[]): CatalogActiveCue[] {
+  const result: CatalogActiveCue[] = [];
+  const visit = (cues: WorkspaceCueCatalogEntry[], listName: string) => {
+    for (const cue of cues) {
+      const active = cue.state === "running" || cue.state === "paused";
+      if (active) result.push({ ...cue, listName });
+      if (cue.children?.length && !(active && (cue.cue_type === "group" || cue.cue_type === "number"))) {
+        visit(cue.children, listName);
+      }
+    }
+  };
+  for (const list of lists) visit(list.cues, list.name);
+  return result;
+}
+
 /** Global Pause toggles every running cue, or resumes paused cues when none run. */
 export function getCatalogPauseTargets(lists: WorkspaceCueCatalogList[]): CatalogActiveCue[] {
   const activeById = new Map(flattenCatalogActiveCues(lists).map((cue) => [cue.id, cue]));

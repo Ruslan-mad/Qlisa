@@ -1,12 +1,12 @@
 import { Pulse as Activity, Pause, Play, Stop } from "@phosphor-icons/react";
-import { pauseCue, resumeCue, stopCue } from "../../lib/commands";
+import { pauseCue, resumeCue, stopCueExplicit } from "../../lib/commands";
 import type { WorkspaceCueCatalogEntry } from "../../lib/types";
 import { useLocale } from "../../i18n";
 import { useTimingStore } from "../../stores/timingStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { formatDurationMs } from "../CueList/formatDuration";
 import { CueTypeIcon } from "../common/CueTypeIcon";
-import { cueProgressPercent, flattenCatalogActiveCues, type CatalogActiveCue } from "./activeCueModel";
+import { cueProgressPercent, getActiveCueDisplayRows, type CatalogActiveCue } from "./activeCueModel";
 
 const COLOR_SWATCHES: Record<string, string> = {
   none: "transparent", red: "#ef4444", orange: "#f97316", yellow: "#eab308",
@@ -19,7 +19,7 @@ const cueTypeLabelKey = (type: string) => `cueTypes.${type.replace(/_([a-z])/g, 
 export function ActiveCuesView() {
   const { t } = useLocale();
   const cueCatalog = useWorkspaceStore((s) => s.cueCatalog);
-  const activeCues = flattenCatalogActiveCues(cueCatalog);
+  const activeCues = getActiveCueDisplayRows(cueCatalog);
 
   return (
     <div className="stage-active-cues" style={{ width: "100%", height: "100%", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--wc-bg-surface)" }}>
@@ -78,7 +78,7 @@ function ActiveCueRow({ cue }: { cue: CatalogActiveCue }) {
           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--wc-text-bright)", fontSize: 13, fontWeight: 650 }}>{title}</span>
           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--wc-text-muted)", fontSize: 10 }}>{cue.listName} · {cue.number ? `${cue.number} · ` : ""}{t(cueTypeLabelKey(cue.cue_type))}</span>
         </div>
-        <button type="button" onClick={() => run(() => stopCue(cue.id))} title={t("activeCues.stop")} aria-label={t("activeCues.stop")} style={{ ...iconButtonStyle, color: "#ef4444" }}>
+        <button type="button" onClick={() => run(() => stopCueExplicit(cue.id))} title={t("activeCues.stop")} aria-label={t("activeCues.stop")} style={{ ...iconButtonStyle, color: "#ef4444" }}>
           <Stop size={14} weight="fill" />
         </button>
       </div>

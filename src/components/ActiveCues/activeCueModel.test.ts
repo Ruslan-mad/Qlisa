@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CueSummary, WorkspaceCueCatalogList } from "../../lib/types";
-import { cueProgressPercent, flattenActiveCues, flattenCatalogActiveCues, getCatalogPauseTargets, migrateRightPanelMode, toggleRightPanel } from "./activeCueModel";
+import { cueProgressPercent, flattenActiveCues, flattenCatalogActiveCues, getActiveCueDisplayRows, getCatalogPauseTargets, migrateRightPanelMode, toggleRightPanel } from "./activeCueModel";
 
 const cue = (id: string, state: CueSummary["state"], children?: CueSummary["children"]): CueSummary => ({
   id, cue_type: "group", number: null, name: id, color: "none", state,
@@ -30,6 +30,45 @@ describe("Active Cues model", () => {
     ];
     expect(flattenCatalogActiveCues(lists).map(({ id, listName }) => [id, listName])).toEqual([
       ["local-run", "Local"], ["remote-child", "Remote"],
+    ]);
+  });
+
+  it("shows active containers without descendants but keeps children active under inactive parents", () => {
+    const lists: WorkspaceCueCatalogList[] = [
+      { id: "one", name: "One", cues: [
+        { id: "running-group", cue_type: "group", name: "Running group", number: "1", state: "running", color: "none", duration_ms: null, is_disabled: false, children: [
+          { id: "hidden-running", cue_type: "audio", name: "Nested audio", number: "1.1", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+          { id: "hidden-paused", cue_type: "audio", name: "Nested paused", number: "1.2", state: "paused", color: "none", duration_ms: 10, is_disabled: false },
+        ] },
+        { id: "paused-number", cue_type: "number", name: "Paused number", number: "2", state: "paused", color: "none", duration_ms: null, is_disabled: false, children: [
+          { id: "hidden-number-child", cue_type: "audio", name: "Number audio", number: "2.1", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+        ] },
+        { id: "inactive-group", cue_type: "group", name: "Inactive group", number: "3", state: "standby", color: "none", duration_ms: null, is_disabled: false, children: [
+          { id: "independent-child", cue_type: "audio", name: "Independent child", number: "3.1", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+        ] },
+        { id: "independent", cue_type: "audio", name: "Independent", number: "4", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+      ] },
+      { id: "two", name: "Two", cues: [
+        { id: "other-list", cue_type: "audio", name: "Other list", number: "1", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+      ] },
+    ];
+
+    expect(getActiveCueDisplayRows(lists).map(({ id, listName }) => [id, listName])).toEqual([
+      ["running-group", "One"],
+      ["paused-number", "One"],
+      ["independent-child", "One"],
+      ["independent", "One"],
+      ["other-list", "Two"],
+    ]);
+    // Flattening remains complete for global controls, including descendants
+    // hidden by the Active Cues presentation.
+    expect(flattenCatalogActiveCues(lists).map(({ id }) => id)).toEqual([
+      "running-group", "hidden-running", "hidden-paused", "paused-number",
+      "hidden-number-child", "independent-child", "independent", "other-list",
+    ]);
+    expect(getCatalogPauseTargets(lists).map(({ id }) => id)).toEqual([
+      "running-group", "hidden-running", "hidden-number-child",
+      "independent-child", "independent", "other-list",
     ]);
   });
 
