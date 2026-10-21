@@ -136,15 +136,28 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
           <button ref={moreMeasureRef} style={{ ...buttonStyle, width: "max-content", minWidth: 72, minHeight: 62, padding: "6px 10px", display: "inline-flex", flexDirection: "column", justifyContent: "center", alignItems: "center", gap: 3, fontSize: 13 }}><SquaresFour size={24} />{t("toolbar.other")}</button>
         </div>
       </div>
-      <div className="stage-toolbar-tools" style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto", marginLeft: "auto", whiteSpace: "nowrap" }}>
-        <button className="stage-action-button" style={{ ...buttonStyle, minHeight: 60, padding: "7px 12px", borderRadius: 6, flexShrink: 0, fontSize: 12, fontWeight: 700, color: "#fca5a5", borderColor: "#991b1b" }} onClick={() => {
+      <button
+        className="stage-action-button"
+        type="button"
+        aria-label={t("toolbar.panicButtonHint")}
+        style={{
+          ...buttonStyle, minWidth: 190, height: 62, marginLeft: 8, padding: "3px 10px", borderRadius: 6,
+          flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1,
+          color: "#fff", background: "#c62828", borderColor: "#ef4444", fontSize: 12.5, fontWeight: 700, lineHeight: 1.05,
+        }}
+        onClick={() => {
           const now = Date.now();
           const hard = now - lastPanicClick.current < 500;
           lastPanicClick.current = now;
           onPanic(hard);
-        }} title={t("toolbar.panicButtonHint")}>
-          {t("toolbar.panicButtonLabel")}
-        </button>
+        }}
+        title={t("toolbar.panicButtonHint")}
+      >
+        <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", lineHeight: 1 }}>{t("toolbar.panicButtonLabel")}</span>
+        <span style={{ whiteSpace: "nowrap", fontSize: 10.5, fontWeight: 500, letterSpacing: 0, lineHeight: 1 }}>{t("toolbar.panicEscLine")}</span>
+        <span style={{ whiteSpace: "nowrap", fontSize: 10.5, fontWeight: 500, letterSpacing: 0, lineHeight: 1 }}>{t("toolbar.panicEscDoubleLine")}</span>
+      </button>
+      <div className="stage-toolbar-tools" style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto", marginLeft: 16, whiteSpace: "nowrap" }}>
         <button className="stage-action-button" style={{ ...buttonStyle, minHeight: 60, padding: "7px 12px", borderRadius: 6, flexShrink: 0, fontSize: 12, fontWeight: 600 }} onClick={() => onToggleRightPanel("active-cues")} title={t("toolbar.activeCuesToggle")} aria-pressed={activeCuesOpen ?? rightPanel === "active-cues"}>
           <Activity size={17} weight="bold" style={{ verticalAlign: "-3px", marginRight: 7 }} />{t("menus.activeCues")}
           {activeCueCount > 0 && <span style={{ marginLeft: 6, padding: "1px 5px", borderRadius: 8, background: "var(--wc-bg-hover)", color: "var(--wc-text-secondary)", fontSize: 10 }}>{activeCueCount}</span>}
