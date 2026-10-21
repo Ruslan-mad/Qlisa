@@ -410,8 +410,7 @@ pub fn seek_cue_media(
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
     let context = make_context(&state, stop_fade_ms);
-    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-    if let Some(cue) = cue_list.get_mut_recursive(&id) {
+    if let Some(cue) = ws.cue_lists.iter_mut().find_map(|list| list.get_mut_recursive(&id)) {
         cue.seek_file_position(file_position_ms, &context);
         let action_ms = cue.action_elapsed().as_millis() as u64;
         emit_seek_timing(&app_handle, cue, action_ms);
@@ -987,22 +986,78 @@ mod stop_tree_notification_tests {
 
 #[cfg(test)]
 mod seek_recursive_tests {
-    use crate::cue::group_cue::GroupCue;
+    use crate::cue::{
+        audio_cue::{AudioCue, AudioCueFactory},
+        context::{CueContext, CueEvent},
+        group_cue::GroupCue,
+        traits::{Cue, CueFactory, RuntimeState},
+        types::CueState,
+    };
+    use crate::engine::{audio_engine::AudioEngine, dmx_engine::DmxEngine, output_engine::ContentRequest, engine_traits::OutputEngineApi, ring_command::VoiceId};
     use crate::cue::memo_cue::MemoCue;
-    use crate::cue::traits::Cue;
+    use crate::preferences::MachineAudioConfig;
     use crate::show::cue_list::CueList;
+    use anyhow::Result;
+    use crossbeam_channel::unbounded;
+    use std::{sync::Arc, time::Duration};
+
+    struct NullOutput;
+
+    impl OutputEngineApi for NullOutput {
+        fn show_content(&self, _req: ContentRequest<'_>) -> Result<VoiceId> { anyhow::bail!("unused") }
+        fn stop_content(&self, _voice_id: VoiceId, _visual_fade_ms: u32, _audio_fade_ms: u32) {}
+        fn hard_stop_current(&self) {}
+        fn panic_stop(&self) {}
+        fn video_audio_voice(&self, _voice_id: VoiceId) -> Option<VoiceId> { None }
+        fn resync_audio_to_video(&self, _voice_id: VoiceId) {}
+        fn get_voice_opacity(&self, _voice_id: VoiceId) -> f32 { 1.0 }
+        fn set_voice_opacity(&self, _voice_id: VoiceId, _opacity: f32) {}
+        fn stop_voice(&self, _voice_id: VoiceId, _fade_ms: u32) -> Result<()> { Ok(()) }
+        fn pause_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
+        fn resume_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
+        fn seek_voice_ms(&self, _voice_id: VoiceId, _position_ms: u64) {}
+        fn show_text_overlay(&self, _ass_text: &str, _screen_index: Option<u32>) {}
+        fn clear_text_overlay(&self) {}
+        fn begin_eof_fade_out(&self, _voice_id: VoiceId, _fade_ms: u32) -> bool { false }
+        fn devamp_voice(&self, _voice_id: VoiceId, _stop_at_end: bool) {}
+        fn start_preloaded(&self, _voice_id: VoiceId) -> bool { false }
+    }
+
+    fn context() -> CueContext {
+        let (events, _receiver) = unbounded::<CueEvent>();
+        CueContext::new(
+            AudioEngine::new_silent(&MachineAudioConfig::default()),
+            Arc::new(NullOutput), events, 0, Vec::new(), None, None, Vec::new(),
+            Arc::new(DmxEngine::new()), Vec::new(), Vec::new(), Vec::new(), 256,
+        )
+    }
 
     #[test]
-    fn media_seek_target_lookup_reaches_group_child() {
-        let mut list = CueList::new("Nested seek");
-        let mut group = GroupCue::new();
-        let child = MemoCue::new();
-        let child_id = child.id();
-        group.children.push(Box::new(child));
-        list.push(Box::new(group));
+    fn media_seek_reaches_a_nested_cue_in_a_non_active_list() {
+        let mut audio = AudioCue::new();
+        let mut audio_json = audio.serialize();
+        audio_json["cached_duration_ms"] = serde_json::json!(10_000);
+        let mut audio = AudioCueFactory.from_json(audio_json).unwrap();
+        let child_id = audio.id();
 
-        // seek_cue_media uses this exact recursive mutable lookup rather than
-        // the top-level-only get_mut used by the action-relative seek command.
-        assert!(list.get_mut_recursive(&child_id).is_some());
+        let mut group = GroupCue::new();
+        group.children.push(audio);
+        let mut active_list = CueList::new("Active");
+        active_list.push(Box::new(MemoCue::new()));
+        let mut remote_list = CueList::new("Remote");
+        remote_list.push(Box::new(group));
+        let mut cue_lists = vec![active_list, remote_list];
+
+        let cue = cue_lists.iter_mut().find_map(|list| list.get_mut_recursive(&child_id)).unwrap();
+        cue.restore_runtime_state(RuntimeState {
+            state: CueState::Paused,
+            voice_id: None,
+            started_at: None,
+            action_started_at: None,
+        });
+        cue.seek_file_position(3_000, &context());
+
+        assert!(cue_lists[0].get_recursive(&child_id).is_none());
+        assert_eq!(cue_lists[1].get_recursive(&child_id).unwrap().action_elapsed(), Duration::from_millis(3_000));
     }
 }

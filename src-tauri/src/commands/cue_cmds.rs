@@ -21,6 +21,7 @@ use crate::{
     },
     engine::voice::Voice,
     preferences::GeneralPreferences,
+    show::Workspace,
     state::{AppState, PreviewSession, PreviewTransport},
 };
 
@@ -229,6 +230,13 @@ pub struct WorkspaceCueCatalogEntry {
     pub state: CueState,
     pub color: CueColor,
     pub duration_ms: Option<u64>,
+    pub file_path: Option<String>,
+    pub file_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_source_revision: Option<String>,
+    pub is_loading: bool,
+    /// True when this cue has the Number-only background screensaver flag.
+    pub background_screensaver: bool,
     pub is_disabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_patch_name: Option<String>,
@@ -236,26 +244,65 @@ pub struct WorkspaceCueCatalogEntry {
     pub children: Vec<WorkspaceCueCatalogEntry>,
 }
 
-fn catalog_cues(cues: &[Box<dyn Cue>], patches: &PatchTable) -> Vec<WorkspaceCueCatalogEntry> {
+fn catalog_cues(
+    cues: &[Box<dyn Cue>],
+    patches: &PatchTable,
+    loading: &HashSet<Uuid>,
+) -> Vec<WorkspaceCueCatalogEntry> {
     cues.iter()
-        .map(|cue| WorkspaceCueCatalogEntry {
-            id: cue.id().to_string(),
-            cue_type: cue.cue_type(),
-            name: cue.name().to_string(),
-            number: cue.number().map(str::to_string),
-            state: cue.state(),
-            color: cue.color(),
-            duration_ms: cue.duration().map(|duration| {
-                duration.as_millis().min(u64::MAX as u128) as u64
-            }),
-            is_disabled: cue.is_disabled(),
-            output_patch_name: patches.name_for(cue.as_ref()),
-            children: cue
-                .child_cues()
-                .map(|children| catalog_cues(children, patches))
-                .unwrap_or_default(),
+        .map(|cue| {
+            let file_path = cue
+                .media_file_path()
+                .map(|path| path.to_string_lossy().into_owned());
+            WorkspaceCueCatalogEntry {
+                id: cue.id().to_string(),
+                cue_type: cue.cue_type(),
+                name: cue.name().to_string(),
+                number: cue.number().map(str::to_string),
+                state: cue.state(),
+                color: cue.color(),
+                duration_ms: cue.duration().map(|duration| {
+                    duration.as_millis().min(u64::MAX as u128) as u64
+                }),
+                file_path,
+                file_duration_ms: matches!(
+                    cue.cue_type(),
+                    CueType::Audio | CueType::Video | CueType::Image
+                )
+                .then(|| {
+                    cue.file_duration()
+                        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+                })
+                .flatten(),
+                media_source_revision: None,
+                is_loading: loading.contains(&cue.id()),
+                background_screensaver: cue.background_screensaver(),
+                is_disabled: cue.is_disabled(),
+                output_patch_name: patches.name_for(cue.as_ref()),
+                children: cue
+                    .child_cues()
+                    .map(|children| catalog_cues(children, patches, loading))
+                    .unwrap_or_default(),
+            }
         })
         .collect()
+}
+
+fn populate_catalog_source_revisions(
+    entries: &mut [WorkspaceCueCatalogEntry],
+    workspace_dir: Option<&std::path::Path>,
+) {
+    for entry in entries {
+        if matches!(entry.cue_type, CueType::Audio | CueType::Video | CueType::Image) {
+            entry.media_source_revision = entry.file_path.as_deref().and_then(|path| {
+                crate::engine::media_cache::media_source_revision(
+                    std::path::Path::new(path),
+                    workspace_dir,
+                )
+            });
+        }
+        populate_catalog_source_revisions(&mut entry.children, workspace_dir);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1055,19 +1102,31 @@ pub fn get_workspace_cue_catalog(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkspaceCueCatalogList>, String> {
     let ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let loading = state.loading_cues.lock().map_err(|e| e.to_string())?;
     let patch_table = PatchTable {
         patches: &ws.output_patches,
         default_id: ws.default_output_patch_id,
     };
-    Ok(ws
+    let workspace_dir = ws
+        .file_path
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf);
+    let mut catalog: Vec<_> = ws
         .cue_lists
         .iter()
         .map(|list| WorkspaceCueCatalogList {
             id: list.id.to_string(),
             name: list.name.clone(),
-            cues: catalog_cues(&list.cues, &patch_table),
+            cues: catalog_cues(&list.cues, &patch_table, &loading),
         })
-        .collect())
+        .collect();
+    drop(loading);
+    drop(ws);
+    for list in &mut catalog {
+        populate_catalog_source_revisions(&mut list.cues, workspace_dir.as_deref());
+    }
+    Ok(catalog)
 }
 
 /// Return the full serialised JSON for a single cue.
@@ -1075,14 +1134,20 @@ pub fn get_workspace_cue_catalog(
 pub fn get_cue(cue_id: String, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let id: Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
     let ws = state.workspace.lock().map_err(|e| e.to_string())?;
-    let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
-    let cue = cue_list.get_recursive(&id).ok_or("Cue not found")?;
+    let cue = find_workspace_cue(&ws, &id).ok_or("Cue not found")?;
     let mut data = cue.serialize();
     let project_dir = ws.file_path.as_deref().and_then(std::path::Path::parent);
     let project_dir = project_dir.map(std::path::Path::to_path_buf);
     drop(ws);
     add_media_source_revisions(&mut data, project_dir.as_deref());
     Ok(data)
+}
+
+fn find_workspace_cue<'a>(workspace: &'a Workspace, id: &Uuid) -> Option<&'a dyn Cue> {
+    workspace
+        .cue_lists
+        .iter()
+        .find_map(|cue_list| cue_list.get_recursive(id))
 }
 
 fn add_media_source_revisions(value: &mut serde_json::Value, project_dir: Option<&std::path::Path>) {
@@ -4174,8 +4239,7 @@ pub async fn get_waveform_peaks(
     // peaks always match the source fingerprint used by the cache key.
     let (file_path, cache_scope) = {
         let ws = state.workspace.lock().map_err(|e| e.to_string())?;
-        let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
-        let cue = cue_list.get_recursive(&id).ok_or("Cue not found")?;
+        let cue = find_workspace_cue(&ws, &id).ok_or("Cue not found")?;
         let scope = ws.media_cache_scope();
         (cue.media_file_path().map(std::path::Path::to_path_buf), scope)
         // workspace lock dropped here
@@ -6296,7 +6360,8 @@ mod tests {
         targeted_cue_accepts_target, targeted_cue_label,
         targeted_cue_name, target_display_for_cue, update_auto_media_name,
         validate_video_preview_path, NumberPreviewSource, PreviewSession, PreviewSource,
-        PreviewStartResult,
+        PreviewStartResult, catalog_cues, find_workspace_cue,
+        populate_catalog_source_revisions, PatchTable,
     };
     use crate::cue::{
         audio_cue::AudioCue,
@@ -6317,6 +6382,7 @@ mod tests {
         MediaMetadata, MediaMetadataFailure, MediaMetadataKey, MediaMetadataReservation,
     };
     use crate::show::cue_list::CueList;
+    use crate::show::Workspace;
     use crate::preferences::{DisplayPreferences, GeneralPreferences, OutputSinkKind};
     use uuid::Uuid;
 
@@ -6329,6 +6395,69 @@ mod tests {
             registry.register(action.cue_type(), Box::new(ControlCueFactory(action)));
         }
         registry
+    }
+
+    #[test]
+    fn catalog_includes_media_loading_fields_and_own_screensaver_flag() {
+        use std::path::PathBuf;
+
+        let mut number = GroupCue::new_number();
+        number.set_background_screensaver(true);
+        let mut audio = AudioCue::new();
+        audio.file_path = Some(PathBuf::from("media/background.wav"));
+        let audio_id = audio.id();
+        number.children.push(Box::new(audio));
+        let mut loading = std::collections::HashSet::new();
+        loading.insert(audio_id);
+        let cues: Vec<Box<dyn Cue>> = vec![Box::new(number)];
+        let entries = catalog_cues(
+            &cues,
+            &PatchTable { patches: &[], default_id: None },
+            &loading,
+        );
+
+        assert!(entries[0].background_screensaver);
+        let child = &entries[0].children[0];
+        assert!(!child.background_screensaver, "catalog reports the cue's own flag");
+        assert_eq!(child.file_path.as_deref(), Some("media/background.wav"));
+        assert!(child.is_loading);
+
+        let media_path = std::env::temp_dir().join(format!("qlisa-catalog-{}.wav", Uuid::new_v4()));
+        std::fs::write(&media_path, b"media").unwrap();
+        let mut media_cue = AudioCue::new();
+        media_cue.file_path = Some(media_path.clone());
+        let media_cues: Vec<Box<dyn Cue>> = vec![Box::new(media_cue)];
+        let mut media_entries = catalog_cues(
+            &media_cues,
+            &PatchTable { patches: &[], default_id: None },
+            &loading,
+        );
+        assert!(media_entries[0].media_source_revision.is_none());
+        populate_catalog_source_revisions(&mut media_entries, None);
+        assert!(media_entries[0].media_source_revision.is_some());
+        std::fs::remove_file(media_path).unwrap();
+    }
+
+    #[test]
+    fn workspace_read_lookup_finds_non_active_list_cue_details_and_media_source() {
+        use std::path::PathBuf;
+
+        let mut workspace = Workspace::new("read lookup");
+        let mut other_list = CueList::new("Other");
+        let mut cue = AudioCue::new();
+        cue.set_name("Other-list audio".into());
+        cue.file_path = Some(PathBuf::from("assets/non-active.wav"));
+        let cue_id = cue.id();
+        other_list.push(Box::new(cue));
+        workspace.cue_lists.push(other_list);
+
+        let found = find_workspace_cue(&workspace, &cue_id).expect("cue in non-active list");
+        assert_eq!(found.name(), "Other-list audio");
+        assert_eq!(
+            found.media_file_path(),
+            Some(std::path::Path::new("assets/non-active.wav"))
+        );
+        assert_eq!(found.serialize()["file_path"], "assets/non-active.wav");
     }
 
     #[test]
@@ -6712,8 +6841,10 @@ mod tests {
             patches: &workspace.output_patches,
             default_id: workspace.default_output_patch_id,
         };
+        let loading = std::collections::HashSet::new();
         let catalog: Vec<_> = workspace.cue_lists.iter().map(|list| super::WorkspaceCueCatalogList {
-            id: list.id.to_string(), name: list.name.clone(), cues: super::catalog_cues(&list.cues, &patch_table),
+            id: list.id.to_string(), name: list.name.clone(),
+            cues: super::catalog_cues(&list.cues, &patch_table, &loading),
         }).collect();
         assert_eq!(catalog.len(), 3);
         assert_eq!(catalog[2].cues.len(), 0);

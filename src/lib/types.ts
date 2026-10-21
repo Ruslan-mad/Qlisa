@@ -830,6 +830,12 @@ export interface WorkspaceCueCatalogEntry {
   state: CueState;
   color: CueColor;
   duration_ms: number | null;
+  file_path?: string | null;
+  file_duration_ms?: number | null;
+  media_source_revision?: string;
+  is_loading?: boolean;
+  /** True only on a screensaver cue; consumers inherit it through the tree. */
+  background_screensaver?: boolean;
   is_disabled: boolean;
   output_patch_name?: string | null;
   children?: WorkspaceCueCatalogEntry[];
