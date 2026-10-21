@@ -1959,14 +1959,9 @@ fn run_stream_job(job: StreamJob) {
                         publish_stream_ready(&source, generation);
                         source.loop_rebuffer.store(false, Ordering::Release);
                     }
-                    // A decoded packet is already removed from the demuxer.
-                    // Keep its tail when a trimmed refill reaches the target,
-                    // or the next job starts at the following packet and drops
-                    // those frames permanently. Other modes retain the
-                    // existing target-boundary behavior.
-                    if source.buffered_samples() >= target && !source.is_trimmed_looping() {
-                        break;
-                    }
+                    // Finish this decoded packet before yielding at the target.
+                    // The demuxer has already advanced; discarding its tail
+                    // would skip PCM at every ordinary refill boundary.
                 }
                 if packet_produced_pcm {
                     source.last_refill_at_ms.store(now_millis(), Ordering::Release);
@@ -2424,6 +2419,41 @@ mod tests {
 pub(crate) mod streaming_tests {
     use super::*;
 
+    struct TempWav(PathBuf);
+
+    impl Drop for TempWav {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn nonperiodic_wav(sample_rate: u32, channels: u16, frames: usize) -> TempWav {
+        let path = std::env::temp_dir().join(format!("qlisa-stream-{}.wav", Uuid::new_v4()));
+        let data_bytes = frames as u32 * channels as u32 * 2;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * channels as u32 * 2).to_le_bytes());
+        wav.extend_from_slice(&(channels * 2).to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for frame in 0..frames as u64 {
+            for channel in 0..channels as u64 {
+                let value = ((frame * 73 + frame * frame * 17 + channel * 931) % 65_535) as i32
+                    - 32_767;
+                wav.extend_from_slice(&(value as i16).to_le_bytes());
+            }
+        }
+        std::fs::write(&path, wav).unwrap();
+        TempWav(path)
+    }
+
     pub(crate) fn test_source(
         state: StreamPlaybackState,
         ready: bool,
@@ -2548,6 +2578,84 @@ pub(crate) mod streaming_tests {
         assert_eq!(STREAM_TARGET_SECONDS, 4);
         assert_eq!(STREAM_READY_MILLIS, 750);
         assert!(STREAM_MAX_SECONDS >= STREAM_TARGET_SECONDS);
+    }
+
+    #[test]
+    fn ordinary_refills_preserve_all_decoded_frames_across_packets() {
+        for (sample_rate, channels) in [(8_003_u32, 1_u16), (11_027, 2)] {
+            let file = nonperiodic_wav(sample_rate, channels, sample_rate as usize * 13 + 19);
+            let (expected, decoded_channels, decoded_rate) =
+                decode_audio_track(&file.0).unwrap().unwrap();
+            assert_eq!((decoded_channels, decoded_rate), (channels, sample_rate));
+
+            let mut source = test_source(StreamPlaybackState::Playing, false, 0);
+            let source_mut = Arc::get_mut(&mut source).unwrap();
+            source_mut.path = file.0.clone();
+            source_mut.channels = channels;
+            source_mut.sample_rate = sample_rate;
+            source_mut.ring = PcmRing::new(
+                sample_rate as usize * channels as usize * STREAM_MAX_SECONDS,
+                channels as usize,
+            );
+            let generation = source_mut.seek_generation.load(Ordering::Acquire);
+            source_mut.ring.reset(generation);
+
+            let mut next_frame = 0;
+            let mut jobs = 0;
+            loop {
+                assert_eq!(
+                    source.ring.generation.load(Ordering::Acquire),
+                    source.seek_generation.load(Ordering::Acquire),
+                    "test ring and source generations must match"
+                );
+                let job = StreamJob {
+                    source: Arc::clone(&source),
+                    ring: Arc::clone(&source.ring),
+                };
+                let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+                let worker = std::thread::spawn(move || {
+                    run_stream_job(job);
+                    let _ = done_tx.send(());
+                });
+                done_rx
+                    .recv_timeout(Duration::from_secs(15))
+                    .expect("refill job stalled or panicked");
+                worker.join().expect("refill job panicked");
+                jobs += 1;
+                let buffered_frames = source.buffered_samples() / channels as usize;
+                if jobs == 1 {
+                    assert!(
+                        buffered_frames > sample_rate as usize * STREAM_TARGET_SECONDS,
+                        "target watermark must fall inside a decoded packet"
+                    );
+                }
+                let low_frames = source.low_watermark() / channels as usize;
+                let drain = if source.is_eof() {
+                    buffered_frames
+                } else {
+                    buffered_frames - low_frames + 1
+                };
+                for _ in 0..drain {
+                    let mut actual = [0.0; 2];
+                    assert!(source.pop_frame(&mut actual), "job {jobs}, frame {next_frame}");
+                    for channel in 0..channels as usize {
+                        assert_eq!(
+                            actual[channel],
+                            expected[next_frame * channels as usize + channel],
+                            "job {jobs}, frame {next_frame}, channel {channel}"
+                        );
+                    }
+                    next_frame += 1;
+                }
+                if source.is_eof() {
+                    break;
+                }
+                assert!(jobs < 12, "refill must reach EOF");
+            }
+            assert!(jobs >= 4, "test must cross several independent refills");
+            assert_eq!(next_frame * channels as usize, expected.len());
+            assert_eq!(source.underruns(), 0);
+        }
     }
 
     #[test]
