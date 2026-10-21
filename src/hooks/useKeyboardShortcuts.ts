@@ -112,7 +112,6 @@ export function isSaveShortcut(
   return getKeyboardShortcutKey(e) === "s" && !e.shiftKey && !e.altKey && (isMac ? e.metaKey : e.ctrlKey);
 }
 import {
-  go,
   hardStopAll,
   stopAll,
   stopCue,
@@ -120,6 +119,7 @@ import {
   resumeCue,
   setPlayhead,
 } from "../lib/commands";
+import { goAndFollowSelection } from "../lib/goWithSelection";
 // Edit operations are shared with the Edit / Action menus so a shortcut and
 // its menu entry can never behave differently.
 import {
@@ -171,7 +171,7 @@ export function useKeyboardShortcuts(
         const protection = generalPrefs.double_go_protection_ms;
         if (protection > 0 && now - lastGoRef.current < protection) return;
         lastGoRef.current = now;
-        await go().then(() => {
+        await goAndFollowSelection().then(() => {
           window.dispatchEvent(new CustomEvent("inkue:transport-error", { detail: null }));
         }).catch((error) => {
           console.error(error);

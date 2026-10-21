@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Pause, Play, SpeakerHigh, Stop } from "@phosphor-icons/react";
-import { go, stopCue, pauseCue, resumeCue, setMasterVolume, getPreferences, openMixerWindow } from "../../lib/commands";
+import { stopCue, pauseCue, resumeCue, setMasterVolume, getPreferences, openMixerWindow } from "../../lib/commands";
+import { goAndFollowSelection } from "../../lib/goWithSelection";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTransportStore } from "../../stores/transportStore";
 import { OscMonitor } from "../Osc/OscMonitor";
@@ -349,7 +350,10 @@ export function TransportBar({ onRefresh }: Props) {
       <button
         onClick={async () => {
           setGoError(null);
-          try { await go(); window.dispatchEvent(new CustomEvent("inkue:transport-error", { detail: null })); }
+          try {
+            await goAndFollowSelection();
+            window.dispatchEvent(new CustomEvent("inkue:transport-error", { detail: null }));
+          }
           catch (error) {
             const message = String(error);
             setGoError(message);

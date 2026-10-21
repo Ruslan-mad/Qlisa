@@ -42,6 +42,8 @@ interface WorkspaceState {
   selectedCueId: CueId | null;
   /** All cues currently highlighted (multi-selection). Always includes selectedCueId when non-null. */
   selectedCueIds: CueId[];
+  /** Advances on each selection action so delayed GO results cannot overwrite newer operator input. */
+  cueSelectionRevision: number;
   playheadCueId: CueId | null;
   workspaceInfo: WorkspaceInfo | null;
   generalPrefs: GeneralPreferences;
@@ -54,6 +56,10 @@ interface WorkspaceState {
   brokenCueIds: Set<CueId>;
   /** Cues fired during this app session; deliberately not persisted. */
   playedCueIds: Set<CueId>;
+  /** Order of the most recent cue-fired event for each cue in this workspace. */
+  cueStartOrder: Record<CueId, number>;
+  /** Monotonic sequence for runtime cue starts; reset on workspace replacement. */
+  cueStartOrderCounter: number;
   /** Active runtime health alerts (device/network faults) shown in the banner. */
   healthAlerts: HealthAlert[];
 
@@ -69,6 +75,8 @@ interface WorkspaceState {
   setSelectedCueIds: (ids: CueId[]) => void;
   /** Atomically updates primary and multi-selection with invariant normalization. */
   setCueSelection: (primary: CueId | null, ids: CueId[]) => void;
+  /** Applies a completed GO result only if no newer selection or list change occurred. */
+  applyGoSelection: (cueListId: string, cueId: CueId | null, expectedRevision: number) => boolean;
   setPlayheadCueId: (id: CueId | null) => void;
   updateCueState: (cueId: CueId, state: CueSummary["state"]) => void;
   markCuePlayed: (cueId: CueId) => void;
@@ -123,11 +131,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, _get) => ({
   activeCueListId: null,
   selectedCueId: null,
   selectedCueIds: [],
+  cueSelectionRevision: 0,
   playheadCueId: null,
   workspaceInfo: null,
   validation: [],
   brokenCueIds: new Set<CueId>(),
   playedCueIds: new Set<CueId>(),
+  cueStartOrder: {},
+  cueStartOrderCounter: 0,
   healthAlerts: [],
   generalPrefs: DEFAULT_GENERAL_PREFS,
   displayPrefsLoaded: false,
@@ -219,17 +230,40 @@ export const useWorkspaceStore = create<WorkspaceState>((set, _get) => ({
     }
   },
 
-  setSelectedCueId: (id) => set(normalizeCueSelection(id, id == null ? [] : [id])),
+  setSelectedCueId: (id) => set((state) => ({
+    ...normalizeCueSelection(id, id == null ? [] : [id]),
+    cueSelectionRevision: state.cueSelectionRevision + 1,
+  })),
 
   setSelectedCueIds: (ids) => set((state) => {
     const uniqueIds = [...new Set(ids)];
     const primary = state.selectedCueId != null && uniqueIds.includes(state.selectedCueId)
       ? state.selectedCueId
       : uniqueIds[uniqueIds.length - 1] ?? null;
-    return normalizeCueSelection(primary, uniqueIds);
+    return {
+      ...normalizeCueSelection(primary, uniqueIds),
+      cueSelectionRevision: state.cueSelectionRevision + 1,
+    };
   }),
 
-  setCueSelection: (primary, ids) => set(normalizeCueSelection(primary, ids)),
+  setCueSelection: (primary, ids) => set((state) => ({
+    ...normalizeCueSelection(primary, ids),
+    cueSelectionRevision: state.cueSelectionRevision + 1,
+  })),
+
+  applyGoSelection: (cueListId, cueId, expectedRevision) => {
+    let applied = false;
+    set((state) => {
+      if (state.activeCueListId !== cueListId || state.cueSelectionRevision !== expectedRevision) return state;
+      applied = true;
+      return {
+        ...normalizeCueSelection(cueId, cueId == null ? [] : [cueId]),
+        playheadCueId: cueId,
+        cueSelectionRevision: state.cueSelectionRevision + 1,
+      };
+    });
+    return applied;
+  },
 
   setPlayheadCueId: (id) => set({ playheadCueId: id }),
 
@@ -246,11 +280,22 @@ export const useWorkspaceStore = create<WorkspaceState>((set, _get) => ({
   },
 
   markCuePlayed: (cueId) => set((prev) => {
-    if (prev.playedCueIds.has(cueId)) return prev;
-    return { playedCueIds: new Set([...prev.playedCueIds, cueId]) };
+    const cueStartOrderCounter = prev.cueStartOrderCounter + 1;
+    return {
+      playedCueIds: prev.playedCueIds.has(cueId) ? prev.playedCueIds : new Set([...prev.playedCueIds, cueId]),
+      cueStartOrder: { ...prev.cueStartOrder, [cueId]: cueStartOrderCounter },
+      cueStartOrderCounter,
+    };
   }),
 
-  clearPlayedCueHistory: () => set({ playedCueIds: new Set<CueId>() }),
+  clearPlayedCueHistory: () => set((state) => ({
+    playedCueIds: new Set<CueId>(),
+    cueStartOrder: {},
+    cueStartOrderCounter: 0,
+    // Workspace replacement invalidates any GO response still in flight,
+    // even when the replacement reuses the same cue-list ID.
+    cueSelectionRevision: state.cueSelectionRevision + 1,
+  })),
 
   loadGeneralPrefs: async () => {
     try {

@@ -93,21 +93,52 @@ describe("workspace selection invariant", () => {
     expect(useWorkspaceStore.getState().selectedCueId).toBeNull();
     expect(useWorkspaceStore.getState().selectedCueIds).toEqual([]);
   });
+
+  it("applies a GO selection only while the captured selection and cue list remain current", () => {
+    useWorkspaceStore.setState({ activeCueListId: "list-a", playheadCueId: "old" });
+    const revision = useWorkspaceStore.getState().cueSelectionRevision;
+
+    expect(useWorkspaceStore.getState().applyGoSelection("list-a", "next", revision)).toBe(true);
+    expect(useWorkspaceStore.getState().selectedCueId).toBe("next");
+    expect(useWorkspaceStore.getState().playheadCueId).toBe("next");
+
+    const staleRevision = useWorkspaceStore.getState().cueSelectionRevision;
+    useWorkspaceStore.getState().setCueSelection("manual", ["manual", "other"]);
+    expect(useWorkspaceStore.getState().applyGoSelection("list-a", "stale", staleRevision)).toBe(false);
+    expect(useWorkspaceStore.getState().selectedCueIds).toEqual(["manual", "other"]);
+    expect(useWorkspaceStore.getState().playheadCueId).toBe("next");
+
+    const currentRevision = useWorkspaceStore.getState().cueSelectionRevision;
+    expect(useWorkspaceStore.getState().applyGoSelection("list-b", "foreign", currentRevision)).toBe(false);
+    expect(useWorkspaceStore.getState().playheadCueId).toBe("next");
+    expect(useWorkspaceStore.getState().applyGoSelection("list-a", null, currentRevision)).toBe(true);
+    expect(useWorkspaceStore.getState().selectedCueId).toBeNull();
+    expect(useWorkspaceStore.getState().selectedCueIds).toEqual([]);
+    expect(useWorkspaceStore.getState().playheadCueId).toBeNull();
+  });
 });
 
 describe("session-only fired cue history", () => {
   beforeEach(() => {
-    useWorkspaceStore.setState({ playedCueIds: new Set() });
+    useWorkspaceStore.setState({ playedCueIds: new Set(), cueStartOrder: {}, cueStartOrderCounter: 0 });
   });
 
-  it("records fired cue IDs once and clears the history without persistence", () => {
+  it("keeps unique fired history, updates repeat start order, and clears on workspace replacement", () => {
     const { markCuePlayed, clearPlayedCueHistory } = useWorkspaceStore.getState();
     markCuePlayed("cue-a");
+    const firstOrder = useWorkspaceStore.getState().cueStartOrder["cue-a"];
     markCuePlayed("cue-a");
     markCuePlayed("cue-b");
     expect([...useWorkspaceStore.getState().playedCueIds]).toEqual(["cue-a", "cue-b"]);
+    expect(useWorkspaceStore.getState().cueStartOrder["cue-a"]).toBeGreaterThan(firstOrder);
+    expect(useWorkspaceStore.getState().cueStartOrder).toEqual({ "cue-a": 2, "cue-b": 3 });
+    expect(useWorkspaceStore.getState().cueStartOrderCounter).toBe(3);
 
+    const revisionBeforeWorkspaceReplacement = useWorkspaceStore.getState().cueSelectionRevision;
     clearPlayedCueHistory();
     expect(useWorkspaceStore.getState().playedCueIds.size).toBe(0);
+    expect(useWorkspaceStore.getState().cueStartOrder).toEqual({});
+    expect(useWorkspaceStore.getState().cueStartOrderCounter).toBe(0);
+    expect(useWorkspaceStore.getState().cueSelectionRevision).toBeGreaterThan(revisionBeforeWorkspaceReplacement);
   });
 });

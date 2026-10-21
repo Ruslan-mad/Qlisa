@@ -6,7 +6,9 @@ import { listen } from "@tauri-apps/api/event";
 import { useWorkspaceStore } from "../stores/workspaceStore";
 import { useTransportStore } from "../stores/transportStore";
 import { useTimingStore } from "../stores/timingStore";
-import { go, stopAll, hardStopAll, setPlayhead, pauseCue, resumeCue } from "../lib/commands";
+import { queueCueListPlayheadUpdate } from "../lib/cueListGoQueue";
+import { stopAll, hardStopAll, setPlayhead, pauseCue, resumeCue } from "../lib/commands";
+import { goAndFollowSelection } from "../lib/goWithSelection";
 import { shouldApplyPlayheadMovedEvent } from "../lib/playheadEvents";
 import { flattenCatalogActiveCues } from "../components/ActiveCues/activeCueModel";
 import type {
@@ -105,13 +107,13 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
 
       unlisteners.push(
         await listen("workspace-replaced", async () => {
+          clearPlayedCueHistory();
           // Workspace replacement overlays the global preferences mirror. Keep
           // the main-window selectors in sync; ordinary global updates use the
           // dedicated preferences-updated event below.
           await loadDisplayPrefs();
           await loadGeneralPrefs();
           await refreshCues();
-          clearPlayedCueHistory();
         })
       );
 
@@ -197,7 +199,7 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
           try {
             switch (command) {
               case "go":
-                await go();
+                await goAndFollowSelection();
                 break;
               case "stop_all":
                 await stopAll();
@@ -224,8 +226,8 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
               case "cue_go": {
                 const target = useWorkspaceStore.getState().cues.find(c => c.number === cue_number);
                 if (target) {
-                  await setPlayhead(target.id);
-                  await go();
+                  await queueCueListPlayheadUpdate(() => setPlayhead(target.id));
+                  await goAndFollowSelection();
                 }
                 break;
               }

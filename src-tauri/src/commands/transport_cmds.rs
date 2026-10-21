@@ -2,6 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
+use serde::Serialize;
 use tauri::{Emitter, State};
 
 use crate::{
@@ -19,6 +20,13 @@ use crate::engine::output_engine::BrowserSurfaceState;
 // ---------------------------------------------------------------------------
 // Shared helper
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GoResult {
+    pub cue_list_id: String,
+    pub cue_id: Option<String>,
+    pub advanced: bool,
+}
 
 /// Build a [`CueContext`] wired to both engines, with a snapshot of the
 /// workspace's Output Patch table and current audio device so cues can
@@ -85,7 +93,7 @@ pub fn get_browser_surface_state(
 /// loading it is silently skipped so the command always returns instantly.
 /// Video Cues stream directly from disk and are never skipped.
 #[tauri::command]
-pub fn go(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<(), String> {
+pub fn go(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<GoResult, String> {
     // Double-GO protection: silently ignore a second GO that arrives within
     // `double_go_protection_ms` of the previous one (default 500 ms).
     // This catches duplicate UDP packets from OSC controllers and accidental
@@ -100,7 +108,9 @@ pub fn go(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<()
     if protection_ms > 0 {
         let last = state.last_go_at.load(Ordering::Relaxed);
         if now_ms.saturating_sub(last) < protection_ms {
-            return Ok(());
+            let list_id = ws.active_cue_list_id;
+            let cue_id = ws.active_cue_list().and_then(|list| list.playhead_cue_id).map(|id| id.to_string());
+            return Ok(GoResult { cue_list_id: list_id.to_string(), cue_id, advanced: false });
         }
     }
     state.last_go_at.store(now_ms, Ordering::Relaxed);
@@ -153,7 +163,11 @@ pub fn go(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<()
                 .map(|s| !s.is_empty())
                 .unwrap_or(false)
         {
-            return Ok(());
+            return Ok(GoResult {
+                cue_list_id: active_list_id.to_string(),
+                cue_id: cue_list.playhead_cue_id.map(|id| id.to_string()),
+                advanced: false,
+            });
         }
     }
 
@@ -175,7 +189,11 @@ pub fn go(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<()
     }));
     // Refresh the cue list so the frontend sees updated group inner-playhead state.
     let _ = app_handle.emit("cue-list-refresh", serde_json::json!({}));
-    Ok(())
+    Ok(GoResult {
+        cue_list_id: active_list_id.to_string(),
+        cue_id: ws.cue_lists[active_index].playhead_cue_id.map(|id| id.to_string()),
+        advanced: true,
+    })
 }
 
 /// Trigger a specific cue by ID (used in Cart Mode).
@@ -565,7 +583,7 @@ fn emit_stop_notifications(
 
 #[cfg(test)]
 mod timing_tests {
-    use super::cue_time_update_payload;
+    use super::{cue_time_update_payload, GoResult};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -577,6 +595,20 @@ mod timing_tests {
         assert_eq!(payload["action_elapsed_ms"], 250);
         assert_eq!(payload["remaining_ms"], 750);
         assert_eq!(payload["media_position_ms"], 2_250);
+    }
+
+    #[test]
+    fn go_result_serializes_the_new_playhead_and_execution_status() {
+        let result = GoResult {
+            cue_list_id: "list-a".to_owned(),
+            cue_id: None,
+            advanced: true,
+        };
+        let payload = serde_json::to_value(result).unwrap();
+
+        assert_eq!(payload["cue_list_id"], json!("list-a"));
+        assert_eq!(payload["cue_id"], serde_json::Value::Null);
+        assert_eq!(payload["advanced"], json!(true));
     }
 }
 

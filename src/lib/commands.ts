@@ -78,7 +78,14 @@ export const scheduleMediaRuntimeReinstall = () => invoke<void>("schedule_media_
 // Transport
 // ---------------------------------------------------------------------------
 
-export const go = () => queueCueListGo(() => invoke<void>("go"));
+export interface GoResult {
+  cue_list_id: string;
+  cue_id: CueId | null;
+  /** False when GO was ignored by the double-GO guard or an Audio Cue is still loading. */
+  advanced: boolean;
+}
+
+export const go = () => queueCueListGo(() => invoke<GoResult>("go"));
 export const getBrowserSurfaceState = () => invoke<BrowserSurfaceState>("get_browser_surface_state");
 export const goCue = (cueId: CueId) => invoke<void>("go_cue", { cueId });
 export const setMasterVolume = (db: number) => invoke<void>("set_master_volume", { db });
