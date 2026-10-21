@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { cancelPendingCueListGo, queueCueListGo, runCueListContextTransition } from "../../lib/cueListGoQueue";
 import {
   isCueListShortcutBlocked,
   consumeCueListStopShortcut,
@@ -48,7 +49,50 @@ describe("cue-list keyboard navigation", () => {
     await expect(waitForCueListPlayheadUpdate()).rejects.toBe(failure);
     // Manual row clicks use the normal setPlayhead path and must not inherit a
     // stale rejection from the previous arrow navigation.
+    await expect(queueCueListPlayheadUpdate(async () => {})).resolves.toBeUndefined();
     await expect(waitForCueListPlayheadUpdate()).resolves.toBeUndefined();
+  });
+
+  it("keeps GO blocked after a failed Playhead write until a later write succeeds", async () => {
+    await queueCueListPlayheadUpdate(async () => {});
+    const failure = new Error("mouse Playhead update failed");
+    await expect(queueCueListPlayheadUpdate(async () => { throw failure; })).rejects.toBe(failure);
+    await expect(queueCueListGo(async () => {})).rejects.toBe(failure);
+    // The queue's completed rejection is consumed, but GO still cannot use the
+    // old Playhead until a new positioning succeeds.
+    await expect(queueCueListGo(async () => {})).rejects.toBe(failure);
+    await queueCueListPlayheadUpdate(async () => {});
+    await expect(queueCueListGo(async () => "go")).resolves.toBe("go");
+  });
+
+  it("cancels a waiting GO without cancelling its Playhead update", async () => {
+    await queueCueListPlayheadUpdate(async () => {});
+    let finish!: () => void;
+    const update = queueCueListPlayheadUpdate(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const pendingGo = queueCueListGo(async () => "go");
+    cancelPendingCueListGo();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    finish();
+    await update;
+    await expect(pendingGo).resolves.toBeUndefined();
+    await expect(queueCueListGo(async () => "go")).resolves.toBe("go");
+  });
+
+  it("drops unsent old Playhead writes and propagates workspace transition failure", async () => {
+    const order: string[] = [];
+    const oldWrite = queueCueListPlayheadUpdate(async () => { order.push("old-playhead"); });
+    const failure = new Error("workspace load failed");
+    const transition = runCueListContextTransition(async () => {
+      order.push("load");
+      throw failure;
+    });
+    await expect(oldWrite).resolves.toBeUndefined();
+    await expect(transition).rejects.toBe(failure);
+    expect(order).toEqual(["load"]);
+    await expect(queueCueListGo(async () => {})).rejects.toBe(failure);
+    await queueCueListPlayheadUpdate(async () => { order.push("new-playhead"); });
+    await expect(queueCueListGo(async () => "go")).resolves.toBe("go");
+    expect(order).toEqual(["load", "new-playhead"]);
   });
 
   it("moves plain Up/Down one row and collapses a multi-selection", () => {
