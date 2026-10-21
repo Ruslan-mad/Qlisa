@@ -280,12 +280,27 @@ cue's runtime semantics. Disabled cues are skipped. Sequential/looping Playlist
 groups can retain and absorb the outer GO until their child sequence releases
 the Playhead.
 
+Cue List row clicks and Up/Down navigation queue Playhead writes in the same
+frontend command lane as GO. This preserves operator order: click A, GO, click
+B positions A, starts A, then positions B. Rapid clicks leave the latest
+requested cue as the next Playhead. GO waits for pending positioning and does
+not start the old cue if positioning fails. Stop, selected Stop, and Panic
+cancel a queued GO. A workspace/list transition cancels queued GO and Playhead
+updates from the old context. Stop does not cancel a queued Playhead update.
+This frontend ordering does not cover commands that bypass
+`src/lib/commands.ts`, such as external OSC triggers.
+
 - **STOP** requests the cue's normal stop behavior. The default audio fade-out
   is `DEFAULT_FADE_OUT_MS = 500`; a cue may have its own stop semantics.
-- **Hard Stop** cuts the selected cue immediately. **Hard Stop All** is the
-  global panic path: it hard-stops active cues in every cue list, resets cue
-  bookkeeping across all lists, and clears engine voices/output. The UI maps double Escape to
-  this action.
+- **Hard Stop** cuts the selected cue immediately. Soft **Stop All** applies to
+  the current cue list. **Hard Stop All** is the global panic path: it
+  hard-stops active cues in every cue list, resets cue bookkeeping across all
+  lists, and clears engine voices/output, except protected background
+  screensavers. The UI maps double Escape to this action.
+- The upper toolbar's **Panic** button runs soft Stop All on one click and Hard
+  Stop All on a second click within 500 ms. The bottom **STOP** button and `S`
+  shortcut stop the current selection; a selected Group or Number covers its
+  descendants.
 - **Pause/resume** retains elapsed/action/media position. Seek is allowed for
   supported media cues while paused. Audio callback state is changed by queued
   engine commands, not by locking the callback from the UI.
@@ -300,9 +315,11 @@ the Playhead.
   within their source list. See [cross-list commands](cross-list-commands.md)
   for the contract and manual-check fixture.
 - Inspector edits commit on blur. When a background click clears cue selection,
-  blur the active editor before changing selection so the edit saves against
-  the cue that was selected when editing began. Memo text in Basics, the Memo
-  tab, and the cue-list Notes column all use the single `memo_text` field.
+  the list mousedown handler blurs the active editor before preventing the
+  default focus transition. The subsequent click clears selection, so the edit
+  saves against the cue that was selected when editing began. Memo text in
+  Basics, the Memo tab, and the cue-list Notes column all use the single
+  `memo_text` field.
 - Basics quick controls are available for single and multiple cue selections.
   Multi-cue actions appear only when every selected cue supports them; mixed
   values are shown explicitly. A loop edit requires every selected media cue to
@@ -799,6 +816,12 @@ other unsupported cue types are not Number actions. GO, Pause/Resume, Stop/Hard
 Stop, timeline seek, trim, and relink are supported. Device timing still needs
 rehearsal on the target system.
 
+The Number-only background screensaver flag protects that Number tree from
+ordinary Stop, Hard Stop, Panic, and Number stop-on-start targets. The per-cue
+Stop in Active Cues uses an explicit stop command and can stop a protected
+Number. Backend tests cover these command paths; they do not establish physical
+device behavior.
+
 For a directly trimmed Audio master, the Number clock uses the effective
 `[start_time_ms, end_time_ms)` range, and the master waveform maps through the
 same source bounds. Trim edits update the timeline duration and waveform range;
@@ -819,6 +842,10 @@ compatibility fallback when no valid `rightPanel` value exists.
 Active Cues flattens running and paused cues from the recursive summaries in
 `workspaceStore.cues`, including nested Group children. It reads per-cue time
 from event-driven `timingStore`; it does not own playback state or run a timer.
+An active Group or Number is shown as one container row instead of also showing
+its active descendants. Global Pause/Resume still targets active descendants.
+Each row's explicit Stop can stop its cue even when a Number background flag
+protects it from ordinary stop commands.
 The cue list retains its existing 30 Hz timing events. Finite-duration cues
 show progress and remaining time; indefinite cues show neither. Pause and
 Resume are enabled for Audio, Video, Image, Fade, Wait, Text, Group, Number,
