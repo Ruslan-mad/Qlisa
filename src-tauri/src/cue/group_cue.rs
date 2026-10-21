@@ -76,6 +76,8 @@ pub struct GroupCue {
     number_start_stop_mode: NumberStartStopMode,
     number_start_stop_ids: Vec<CueId>,
     number_finish_start_ids: Vec<CueId>,
+    /// Protected from operational bulk/targeted stops; persisted for Numbers only.
+    background_screensaver: bool,
     /// Targets queued when the Number reaches its final post-wait.
     number_completion_start_ids: Vec<CueId>,
 
@@ -218,6 +220,7 @@ impl GroupCue {
             number_start_stop_mode: NumberStartStopMode::None,
             number_start_stop_ids: Vec::new(),
             number_finish_start_ids: Vec::new(),
+            background_screensaver: false,
             number_completion_start_ids: Vec::new(),
             seq_current_id: None,
             seq_done: false,
@@ -301,6 +304,7 @@ impl GroupCue {
         }
 
         if is_number {
+            cue.background_screensaver = value.get("background_screensaver").and_then(Value::as_bool).unwrap_or(false);
             for child in &mut cue.children {
                 child.set_pre_wait(Duration::ZERO);
             }
@@ -1847,6 +1851,21 @@ impl Cue for GroupCue {
         if self.number_mode { self.number_finish_start_ids.clone() } else { Vec::new() }
     }
 
+    fn background_screensaver(&self) -> bool {
+        self.number_mode && self.background_screensaver
+    }
+
+    fn set_background_screensaver(&mut self, enabled: bool) {
+        if self.number_mode {
+            self.background_screensaver = enabled;
+        }
+    }
+
+    fn halt_automatic_flow_for_protected_children(&mut self) {
+        self.seq_done = true;
+        self.seq_post_wait_until = None;
+    }
+
     fn take_number_completion_start_ids(&mut self) -> Vec<CueId> {
         std::mem::take(&mut self.number_completion_start_ids)
     }
@@ -2044,6 +2063,7 @@ impl Cue for GroupCue {
             object.insert("number_start_stop_mode".into(), json!(self.number_start_stop_mode));
             object.insert("number_start_stop_ids".into(), json!(self.number_start_stop_ids.iter().map(ToString::to_string).collect::<Vec<_>>()));
             object.insert("number_finish_start_ids".into(), json!(self.number_finish_start_ids.iter().map(ToString::to_string).collect::<Vec<_>>()));
+            object.insert("background_screensaver".into(), json!(self.background_screensaver));
         }
         value
     }

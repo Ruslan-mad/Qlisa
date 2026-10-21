@@ -304,6 +304,8 @@ export interface CueSummary {
   number_start_stop_mode?: NumberStartStopMode;
   number_start_stop_ids?: string[];
   number_finish_start_ids?: string[];
+  /** True when a Number resists ordinary transport stops. */
+  background_screensaver?: boolean;
 }
 
 export type MediaConversionMode = "optimize" | "size";

@@ -87,7 +87,7 @@ use commands::{
     },
     transport_cmds::{
         get_browser_surface_state, go, go_cue, hard_stop_all, pause_cue, resume_cue, seek_cue,
-        seek_cue_media, set_master_volume, stop_all, stop_cue,
+        seek_cue_media, set_master_volume, stop_all, stop_cue, stop_cue_explicit,
     },
     undo_cmds::{can_redo, can_undo, copy_cue, copy_cues, paste_cue, redo, undo},
     workspace_cmds::{
@@ -643,6 +643,7 @@ pub fn run() {
             stop_all,
             hard_stop_all,
             stop_cue,
+            stop_cue_explicit,
             pause_cue,
             resume_cue,
             seek_cue,

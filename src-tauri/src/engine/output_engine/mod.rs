@@ -689,6 +689,47 @@ impl NativeOutputPipeline {
         fade::set_overlay_alpha(&self.pipeline, 255);
     }
 
+    fn hard_stop_except(&self, keep: &HashSet<VoiceId>) {
+        if self.mpv_destroyed.load(Ordering::Acquire) { return; }
+        let Some(_permit) = self.enter_mpv_call() else { return; };
+        let kept_slot_exists = self.slot_registry.all_slots().iter().any(|slot| {
+            slot.state.lock().ok().and_then(|state| state.voice_id).is_some_and(|voice| keep.contains(&voice))
+        });
+        let kept_external_exists = keep.iter().any(|voice| self.render_runtime.has_external_source(*voice));
+        let has_kept_visual = kept_slot_exists || kept_external_exists;
+        let current_voice_is_kept = self.current_voice.lock().ok().is_some_and(|voice| voice.is_some_and(|id| keep.contains(&id)));
+        if !current_voice_is_kept {
+            *self.current_voice.lock().unwrap() = None;
+            *self.pipeline.current_voice.lock().unwrap() = None;
+            *self.go_sent_at.lock().unwrap() = None;
+            *self.pipeline.current_fade_out_ms.lock().unwrap() = 0;
+            *self.pipeline.pending_video_start.lock().unwrap() = None;
+            *self.pipeline.pending_crop.lock().unwrap() = None;
+            *self.pipeline.current_audio_voice.lock().unwrap() = None;
+        }
+        for slot in self.slot_registry.all_slots() {
+            let kept = slot.state.lock().ok().and_then(|state| state.voice_id).is_some_and(|voice| keep.contains(&voice));
+            if !kept { slot::hard_unload(&self.slot_registry, &slot, false); }
+        }
+        if !has_kept_visual {
+            unsafe {
+                let stop = cs("stop");
+                let args: [*const c_char; 2] = [stop.as_ptr(), std::ptr::null()];
+                (self.mpv.lib.mpv_command)(self.mpv.ctx.0, args.as_ptr());
+            }
+        }
+        self.pipeline.timer_osd_active.store(false, Ordering::Relaxed);
+        self.pipeline.text_overlay_active.store(false, Ordering::Relaxed);
+        self.pipeline.test_pattern_active.store(false, Ordering::Relaxed);
+        self.pipeline.overlay_has_dummy.store(false, Ordering::Relaxed);
+        self.render_runtime.set_text_overlay_active(false);
+        self.render_runtime.clear_external_sources_except(keep);
+        self.render_runtime.mark_overlay_dirty();
+        if !has_kept_visual {
+            fade::set_overlay_alpha(&self.pipeline, 255);
+        }
+    }
+
     /// Ask the GL owner to leave and wait until every Render API context has
     /// been freed on that thread.  The runtime wake makes its idle wait at most
     /// one short bounded iteration rather than leaving shutdown to frame flow.
@@ -2287,6 +2328,38 @@ impl OutputEngine {
         let _ = self.audio_engine.panic_stop_all();
     }
 
+    pub fn panic_stop_except(&self, keep_audio: &[VoiceId], keep_visual: &[VoiceId]) {
+        let mut keep_audio: HashSet<_> = keep_audio.iter().copied().collect();
+        let mut keep_visual: HashSet<_> = keep_visual.iter().copied().collect();
+
+        // A grouped visual cue (for example, a video sent to several outputs)
+        // is represented by its primary voice in the cue tree. Preserve every
+        // output member before filtering the engine's group bookkeeping.
+        let voice_groups = self.voice_groups.lock().unwrap().clone();
+        expand_voice_group_members(&mut keep_visual, &voice_groups);
+
+        // Video audio and cue-attached audio can be owned by any grouped
+        // output member. Keep those audio voices with their protected visuals.
+        for visual in keep_visual.iter().copied() {
+            if let Some(audio) = self.video_audio_voice(visual) {
+                keep_audio.insert(audio);
+            }
+            if let Some(audio) = self.attached_cue_audio_voice(visual) {
+                keep_audio.insert(audio);
+            }
+        }
+        let mut keep_all = keep_audio.clone();
+        keep_all.extend(keep_visual.iter().copied());
+        self.voices.lock().unwrap().retain(|voice, _| keep_all.contains(voice));
+        self.voice_outputs.lock().unwrap().retain(|voice, _| keep_all.contains(voice));
+        self.voice_groups.lock().unwrap().retain(|primary, members| keep_all.contains(primary) && members.iter().all(|voice| keep_all.contains(voice)));
+        self.voice_group_completed.lock().unwrap().retain(|primary, _| keep_all.contains(primary));
+        self.voice_group_completion_emitted.lock().unwrap().retain(|primary| keep_all.contains(primary));
+        self.cue_audio_voices.lock().unwrap().retain(|visual, audio| keep_visual.contains(visual) && keep_audio.contains(audio));
+        if let Ok(mut registry) = self.output_registry.lock() { registry.retain_voices(&keep_all); }
+        for output in self.all_pipelines() { output.hard_stop_except(&keep_visual); }
+    }
+
     pub fn is_current_voice(&self, voice_id: VoiceId) -> bool {
         self.pipeline_for_voice(voice_id).is_some_and(|pipeline| {
             slot::slot_for_voice(&pipeline.slot_registry, voice_id).is_some()
@@ -2457,6 +2530,10 @@ impl OutputEngine {
         let slot = slot::slot_for_voice(&output.slot_registry, voice_id)?;
         let audio = slot.state.lock().ok().and_then(|st| st.audio_voice_id);
         audio
+    }
+
+    pub fn attached_cue_audio_voice(&self, visual_voice_id: VoiceId) -> Option<VoiceId> {
+        self.cue_audio_voices.lock().ok().and_then(|voices| voices.get(&visual_voice_id).copied())
     }
 
     /// Current playback position of a voice's video (mpv `time-pos`), in ms.
@@ -3341,6 +3418,23 @@ fn group_completion_ready(done: &mut HashSet<VoiceId>, members: &[VoiceId], voic
     done.len() == members.len()
 }
 
+fn expand_voice_group_members(
+    keep_visual: &mut HashSet<VoiceId>,
+    groups: &HashMap<VoiceId, Vec<VoiceId>>,
+) {
+    loop {
+        let previous_len = keep_visual.len();
+        for (primary, members) in groups {
+            if keep_visual.contains(primary) {
+                keep_visual.extend(members.iter().copied());
+            }
+        }
+        if keep_visual.len() == previous_len {
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod grouped_output_tests {
     use super::*;
@@ -3364,6 +3458,23 @@ mod grouped_output_tests {
         assert!(!group_completion_ready(&mut done, &[a], unknown));
         assert!(done.is_empty());
     }
+
+    #[test]
+    fn keeping_group_primary_preserves_every_visual_output_member() {
+        let primary = Uuid::new_v4();
+        let secondary = Uuid::new_v4();
+        let nested_member = Uuid::new_v4();
+        let groups = HashMap::from([
+            (primary, vec![primary, secondary]),
+            (secondary, vec![secondary, nested_member]),
+        ]);
+        let mut keep = HashSet::from([primary]);
+
+        expand_voice_group_members(&mut keep, &groups);
+
+        assert_eq!(keep, HashSet::from([primary, secondary, nested_member]));
+    }
+
 }
 
 fn validate_output_destinations(

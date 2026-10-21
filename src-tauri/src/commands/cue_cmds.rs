@@ -207,6 +207,9 @@ pub struct CueSummary {
     pub number_start_stop_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub number_finish_start_ids: Option<Vec<String>>,
+    /// Number-only flag that protects this cue tree from ordinary transport stops.
+    #[serde(default)]
+    pub background_screensaver: bool,
 }
 
 /// Lightweight cue tree for selecting UUID targets across the workspace.
@@ -301,6 +304,7 @@ struct PreparedBulkUpdate {
 #[derive(Default)]
 struct SingleCueDirectPatch {
     common: CommonCuePatch,
+    background_screensaver: Option<bool>,
 }
 
 #[derive(Default)]
@@ -773,6 +777,7 @@ fn summarise(
             let ids = cue.number_finish_start_ids();
             (!ids.is_empty()).then(|| ids.into_iter().map(|id| id.to_string()).collect())
         },
+        background_screensaver: cue.background_screensaver(),
     }
 }
 
@@ -1319,6 +1324,7 @@ fn validate_rebuild_bulk_value(key: &str, value: &serde_json::Value) -> Result<(
             .as_bool()
             .map(|_| ())
             .ok_or_else(|| "hold_last_frame must be a boolean".to_string()),
+        "background_screensaver" => value.as_bool().map(|_| ()).ok_or_else(|| "background_screensaver must be a boolean".to_string()),
         "output_patch_id" => {
             if value.is_null() {
                 return Ok(());
@@ -1432,6 +1438,16 @@ fn apply_common_bulk_patch(cue: &mut dyn Cue, patch: CommonCuePatch) {
 
 fn apply_single_direct_patch(cue: &mut dyn Cue, patch: SingleCueDirectPatch) {
     apply_common_bulk_patch(cue, patch.common);
+    if let Some(enabled) = patch.background_screensaver {
+        cue.set_background_screensaver(enabled);
+    }
+}
+
+fn validate_direct_patch_target(cue: &dyn Cue, patch: &SingleCueDirectPatch) -> Result<(), String> {
+    if patch.background_screensaver.is_some() && cue.cue_type() != CueType::Number {
+        return Err("background_screensaver can only be updated on a Number cue".to_string());
+    }
+    Ok(())
 }
 
 fn apply_single_in_place_patch(cue: &mut dyn Cue, patch: SingleCueInPlacePatch) {
@@ -1466,6 +1482,11 @@ fn classify_single_cue_update(
         match key.as_str() {
             key if is_common_bulk_key(key) => {
                 validate_common_bulk_value(key, value, &mut direct.common)?;
+            }
+            "background_screensaver" => {
+                direct.background_screensaver = Some(
+                    value.as_bool().ok_or("background_screensaver must be a boolean")?,
+                );
             }
             _ => all_direct = false,
         }
@@ -2698,6 +2719,92 @@ mod bulk_update_tests {
     }
 
     #[test]
+    fn running_number_screensaver_flag_updates_without_replacing_runtime_tree() {
+        let mut child = AudioCue::new();
+        let child_id = child.id();
+        child.restore_runtime_state(RuntimeState {
+            state: CueState::Running,
+            voice_id: Some(Uuid::new_v4()),
+            started_at: None,
+            action_started_at: None,
+        });
+        let mut number = GroupCue::new_number();
+        let number_id = number.id();
+        number.children.push(Box::new(child));
+        number.set_pre_wait(Duration::from_secs(30));
+        let (event_sender, _event_receiver) = crossbeam_channel::unbounded();
+        struct NullOutput;
+        impl crate::engine::engine_traits::OutputEngineApi for NullOutput {
+            fn show_content(&self, _req: crate::engine::output_engine::ContentRequest<'_>) -> anyhow::Result<Uuid> { anyhow::bail!("unused") }
+            fn stop_content(&self, _voice_id: Uuid, _visual_fade_ms: u32, _audio_fade_ms: u32) {}
+            fn hard_stop_current(&self) {}
+            fn panic_stop(&self) {}
+            fn video_audio_voice(&self, _voice_id: Uuid) -> Option<Uuid> { None }
+            fn resync_audio_to_video(&self, _voice_id: Uuid) {}
+            fn get_voice_opacity(&self, _voice_id: Uuid) -> f32 { 1.0 }
+            fn set_voice_opacity(&self, _voice_id: Uuid, _opacity: f32) {}
+            fn stop_voice(&self, _voice_id: Uuid, _fade_ms: u32) -> anyhow::Result<()> { Ok(()) }
+            fn pause_voice(&self, _voice_id: Uuid) -> anyhow::Result<()> { Ok(()) }
+            fn resume_voice(&self, _voice_id: Uuid) -> anyhow::Result<()> { Ok(()) }
+            fn seek_voice_ms(&self, _voice_id: Uuid, _position_ms: u64) {}
+            fn show_text_overlay(&self, _ass_text: &str, _screen_index: Option<u32>) {}
+            fn clear_text_overlay(&self) {}
+            fn begin_eof_fade_out(&self, _voice_id: Uuid, _fade_ms: u32) -> bool { false }
+            fn devamp_voice(&self, _voice_id: Uuid, _stop_at_end: bool) {}
+            fn start_preloaded(&self, _voice_id: Uuid) -> bool { false }
+        }
+        let context = crate::cue::context::CueContext::new(
+            crate::engine::audio_engine::AudioEngine::new_silent(
+                &crate::preferences::MachineAudioConfig::default(),
+            ),
+            Arc::new(NullOutput),
+            event_sender,
+            0,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Arc::new(crate::engine::dmx_engine::DmxEngine::new()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            256,
+        );
+        number.go(&context).unwrap();
+        assert_eq!(number.state(), CueState::Running);
+        let mut list = CueList::new("test");
+        list.cues.push(Box::new(number));
+        let number_ptr = list.get_recursive(&number_id).unwrap() as *const dyn Cue as *const ();
+        let child_ptr = list.get_recursive(&child_id).unwrap() as *const dyn Cue as *const ();
+
+        let patch = classify_single_cue_update(&serde_json::json!({ "background_screensaver": true }))
+            .expect("the boolean flag must use the direct update path");
+        let SingleCueUpdateKind::Direct(patch) = patch else {
+            panic!("the screensaver flag must not rebuild a running Number");
+        };
+        validate_direct_patch_target(list.get_recursive(&number_id).unwrap(), &patch).unwrap();
+        apply_single_direct_patch(list.get_mut_recursive(&number_id).unwrap(), patch);
+
+        let number_after = list.get_recursive(&number_id).unwrap();
+        assert_eq!(number_ptr, number_after as *const dyn Cue as *const ());
+        assert_eq!(child_ptr, list.get_recursive(&child_id).unwrap() as *const dyn Cue as *const ());
+        assert!(number_after.background_screensaver());
+        assert_eq!(number_after.state(), CueState::Running);
+        assert_eq!(list.get_recursive(&child_id).unwrap().state(), CueState::Running);
+        assert!(list.get_recursive(&child_id).unwrap().runtime_state().voice_id.is_some());
+    }
+
+    #[test]
+    fn screensaver_flag_direct_update_requires_a_number_and_boolean_value() {
+        let camera = CameraCue::new();
+        let update = classify_single_cue_update(&serde_json::json!({ "background_screensaver": true }))
+            .expect("flag shape must parse before cue type validation");
+        let SingleCueUpdateKind::Direct(patch) = update else { panic!("expected direct update"); };
+        assert!(validate_direct_patch_target(&camera, &patch).is_err());
+        assert!(classify_single_cue_update(&serde_json::json!({ "background_screensaver": "yes" })).is_err());
+    }
+
+    #[test]
     fn single_cue_rebuild_guard_rejects_unsafe_properties_and_invalid_patches() {
         let audio_volume = serde_json::json!({ "volume_db": -12.0 });
         let video_geometry = serde_json::json!({ "geometry": { "scale": 1.2 } });
@@ -3704,7 +3811,8 @@ pub fn update_cue(
             let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
             {
                 let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
-                cue_list.get_recursive(&id).ok_or("Cue not found")?;
+                let cue = cue_list.get_recursive(&id).ok_or("Cue not found")?;
+                validate_direct_patch_target(cue, &patch)?;
                 let snapshot = super::undo_cmds::take_snapshot(cue_list);
                 state
                     .undo_stack

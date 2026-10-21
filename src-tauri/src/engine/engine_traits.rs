@@ -113,6 +113,7 @@ pub trait AudioEngineApi: Send + Sync {
         Ok(voice_id)
     }
     fn panic_stop_all(&self) -> Result<()>;
+    fn panic_stop_all_except(&self, keep: &[VoiceId]) -> Result<()> { let _ = keep; self.panic_stop_all() }
 }
 
 impl AudioEngineApi for AudioEngine {
@@ -236,6 +237,9 @@ impl AudioEngineApi for AudioEngine {
     }
     fn panic_stop_all(&self) -> Result<()> {
         AudioEngine::panic_stop_all(self)
+    }
+    fn panic_stop_all_except(&self, keep: &[VoiceId]) -> Result<()> {
+        AudioEngine::panic_stop_all_except(self, keep)
     }
 }
 
@@ -398,8 +402,11 @@ pub trait OutputEngineApi: Send + Sync {
     fn stop_content(&self, voice_id: VoiceId, visual_fade_ms: u32, audio_fade_ms: u32);
     fn hard_stop_current(&self);
     fn panic_stop(&self);
+    fn panic_stop_except(&self, keep_audio: &[VoiceId], keep_visual: &[VoiceId]) { let _ = (keep_audio, keep_visual); self.panic_stop(); }
     /// The AudioEngine voice carrying a video voice's audio track, if any.
     fn video_audio_voice(&self, voice_id: VoiceId) -> Option<VoiceId>;
+    fn attached_cue_audio_voice(&self, visual_voice_id: VoiceId) -> Option<VoiceId> { let _ = visual_voice_id; None }
+    fn browser_surface_owner_id(&self) -> Option<VoiceId> { None }
     /// Whether mpv still reports this voice as actively playing.
     fn is_voice_playing(&self, voice_id: VoiceId) -> bool { let _ = voice_id; false }
     /// Whether a keep-open video voice has reached EOF while retaining its
@@ -575,8 +582,17 @@ impl OutputEngineApi for OutputEngine {
     fn panic_stop(&self) {
         OutputEngine::panic_stop(self)
     }
+    fn panic_stop_except(&self, keep_audio: &[VoiceId], keep_visual: &[VoiceId]) {
+        OutputEngine::panic_stop_except(self, keep_audio, keep_visual)
+    }
     fn video_audio_voice(&self, voice_id: VoiceId) -> Option<VoiceId> {
         OutputEngine::video_audio_voice(self, voice_id)
+    }
+    fn attached_cue_audio_voice(&self, visual_voice_id: VoiceId) -> Option<VoiceId> {
+        OutputEngine::attached_cue_audio_voice(self, visual_voice_id)
+    }
+    fn browser_surface_owner_id(&self) -> Option<VoiceId> {
+        OutputEngine::browser_surface_state(self).cue_id
     }
     fn is_voice_playing(&self, voice_id: VoiceId) -> bool {
         OutputEngine::is_voice_playing(self, voice_id)

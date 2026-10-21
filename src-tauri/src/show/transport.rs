@@ -73,6 +73,100 @@ fn collect_subtree_ids(cue: &dyn crate::cue::traits::Cue, out: &mut HashSet<CueI
     }
 }
 
+fn collect_unprotected_subtree_ids(cue: &dyn crate::cue::traits::Cue, inherited: bool, out: &mut HashSet<CueId>) {
+    let protected = inherited || cue.background_screensaver();
+    if protected { return; }
+    out.insert(cue.id());
+    if let Some(children) = cue.child_cues() { for child in children { collect_unprotected_subtree_ids(child.as_ref(), false, out); } }
+}
+
+fn cue_tree_contains_background(cue: &dyn crate::cue::traits::Cue, inherited: bool) -> bool {
+    let protected = inherited || cue.background_screensaver();
+    protected || cue.child_cues().is_some_and(|children| children.iter().any(|child| cue_tree_contains_background(child.as_ref(), protected)))
+}
+
+fn id_is_background_protected(cues: &[Box<dyn crate::cue::traits::Cue>], target: CueId, inherited: bool) -> bool {
+    cues.iter().any(|cue| {
+        let protected = inherited || cue.background_screensaver();
+        (cue.id() == target && protected) || cue.child_cues().is_some_and(|children| id_is_background_protected(children, target, protected))
+    })
+}
+
+fn clear_unprotected_continuation_plans(cue_list: &mut CueList) {
+    for id in cue_list.all_cue_ids() {
+        if !id_is_background_protected(&cue_list.cues, id, false) { cue_list.remove_continuation_plan(id); }
+    }
+}
+
+fn collect_protected_voices(cue: &dyn crate::cue::traits::Cue, inherited: bool, context: &CueContext, audio: &mut Vec<VoiceId>, visual: &mut Vec<VoiceId>) {
+    let protected = inherited || cue.background_screensaver();
+    if let Some(children) = cue.child_cues() {
+        for child in children { collect_protected_voices(child.as_ref(), protected, context, audio, visual); }
+        return;
+    }
+    if !protected { return; }
+    let ids = cue.all_voice_ids();
+    if matches!(cue.cue_type(), CueType::Video | CueType::Image | CueType::Camera | CueType::Text | CueType::Browser) {
+        for id in &ids {
+            visual.push(*id);
+            if let Some(audio_id) = context.output_engine.video_audio_voice(*id).or_else(|| context.output_engine.attached_cue_audio_voice(*id)) { audio.push(audio_id); }
+        }
+    } else { audio.extend(ids); }
+}
+
+fn stop_preserving_background_inner(
+    cue: &mut dyn crate::cue::traits::Cue,
+    context: &CueContext,
+    hard: bool,
+    propagate_errors: bool,
+) -> Result<Vec<CueId>> {
+    if cue.background_screensaver() { return Ok(Vec::new()); }
+    if cue.child_cues().is_some_and(|children| children.iter().any(|child| cue_tree_contains_background(child.as_ref(), false))) {
+        let mut stopped = Vec::new();
+        cue.halt_automatic_flow_for_protected_children();
+        if let Some(children) = cue.child_cues_mut() {
+            for child in children {
+                stopped.extend(stop_preserving_background_inner(child.as_mut(), context, hard, propagate_errors)?);
+            }
+        }
+        Ok(stopped)
+    } else {
+        let mut stopped = Vec::new();
+        collect_running_ids(cue, &mut stopped);
+        let result = if hard { cue.hard_stop(context) } else { cue.stop(context) };
+        if propagate_errors { result?; } else { let _ = result; }
+        Ok(stopped)
+    }
+}
+
+fn stop_preserving_background(cue: &mut dyn crate::cue::traits::Cue, context: &CueContext, hard: bool) -> Vec<CueId> {
+    stop_preserving_background_inner(cue, context, hard, false).unwrap_or_default()
+}
+
+fn stop_preserving_background_result(
+    cue: &mut dyn crate::cue::traits::Cue,
+    context: &CueContext,
+    hard: bool,
+) -> Result<Vec<CueId>> {
+    stop_preserving_background_inner(cue, context, hard, true)
+}
+
+fn reset_preserving_background(cue: &mut dyn crate::cue::traits::Cue, context: &CueContext) -> Vec<CueId> {
+    if cue.background_screensaver() { return Vec::new(); }
+    if cue.child_cues().is_some_and(|children| children.iter().any(|child| cue_tree_contains_background(child.as_ref(), false))) {
+        let mut stopped = Vec::new();
+        cue.halt_automatic_flow_for_protected_children();
+        if let Some(children) = cue.child_cues_mut() { for child in children { stopped.extend(reset_preserving_background(child.as_mut(), context)); } }
+        stopped
+    } else {
+        let mut stopped = Vec::new();
+        collect_running_ids(cue, &mut stopped);
+        let _ = cue.hard_stop(context);
+        let _ = cue.reset();
+        stopped
+    }
+}
+
 fn collect_active_browser_ids(cues: &[Box<dyn crate::cue::traits::Cue>], out: &mut Vec<CueId>) {
     for cue in cues {
         if cue.cue_type() == CueType::Browser && (cue.is_running() || cue.is_paused()) {
@@ -595,25 +689,20 @@ impl Transport {
             };
             for target_id in ids_to_stop {
                 if let Some(target_index) = cue_lists.iter().position(|list| list.get_recursive(&target_id).is_some()) {
+                  if id_is_background_protected(&cue_lists[target_index].cues, target_id, false) { continue; }
                   if let Some(target) = cue_lists[target_index].get_mut_recursive(&target_id) {
-                    collect_subtree_ids(target, &mut result.cancelled_actions);
-                    collect_running_ids(target, &mut result.stopped);
-                    result.stopped.push(target_id);
-                    if hard {
-                        let _ = target.hard_stop(&self.context);
-                    } else {
-                        let _ = target.stop(&self.context);
-                    }
+                    collect_unprotected_subtree_ids(target, false, &mut result.cancelled_actions);
+                    result.stopped.extend(stop_preserving_background(target, &self.context, hard));
                   }
                   let cancelled: Vec<CueId> = result.cancelled_actions.iter().copied().collect();
                   for cancelled_id in cancelled { for list in cue_lists.iter_mut() { list.remove_continuation_plan(cancelled_id); } }
-                  cue_lists[target_index].remove_continuation_plan(target_id);
+                  if !id_is_background_protected(&cue_lists[target_index].cues, target_id, false) { cue_lists[target_index].remove_continuation_plan(target_id); }
                 }
             }
             if stop_all {
                 // A source may already be reset to Standby while its delayed
                 // Auto-Follow is pending. Stop All still cancels that chain.
-                cue_lists[list_index].clear_continuation_plans();
+                clear_unprotected_continuation_plans(&mut cue_lists[list_index]);
             }
             dedup_ids(&mut result.stopped);
         }
@@ -634,7 +723,7 @@ impl Transport {
                         // Explicit Goto is a flow change and cancels existing
                         // delayed chains. Transport::go may bind a fresh plan
                         // for this Goto cue after action dispatch completes.
-                        cue_lists[target_index].clear_continuation_plans();
+                        clear_unprotected_continuation_plans(&mut cue_lists[target_index]);
                     }
                     continue;
                 }
@@ -647,6 +736,7 @@ impl Transport {
                 let mut nested_fired = Vec::new();
                 let mut target_started = false;
                 let mut target_generation_before = None;
+                let target_protected = id_is_background_protected(&cue_lists[target_index].cues, target_id, false);
                 if let Some(target) = cue_lists[target_index].get_mut_recursive(&target_id) {
                     match action {
                         ControlAction::Start
@@ -673,10 +763,9 @@ impl Transport {
                             let _ = target.preload(&self.context);
                         }
                         ControlAction::Reset => {
-                            collect_subtree_ids(target, &mut result.cancelled_actions);
-                            collect_running_ids(target, &mut result.stopped);
-                            let _ = target.hard_stop(&self.context);
-                            let _ = target.reset();
+                            if target_protected { continue; }
+                            collect_unprotected_subtree_ids(target, false, &mut result.cancelled_actions);
+                            result.stopped.extend(reset_preserving_background(target, &self.context));
                         }
                         ControlAction::Arm => target.set_disabled(false),
                         ControlAction::Disarm => target.set_disabled(true),
@@ -716,8 +805,8 @@ impl Transport {
                         result.stopped.extend(chained.stopped);
                     }
                 }
-                if action == ControlAction::Reset {
-                    cue_lists[target_index].remove_continuation_plan(target_id);
+                if action == ControlAction::Reset && !target_protected {
+                    if !target_protected { cue_lists[target_index].remove_continuation_plan(target_id); }
                     let cancelled: Vec<CueId> = result.cancelled_actions.iter().copied().collect();
                     for cancelled_id in cancelled {
                         for list in cue_lists.iter_mut() { list.remove_continuation_plan(cancelled_id); }
@@ -853,9 +942,11 @@ impl Transport {
             })
             .map(|c| c.id())
             .collect();
+        let mut top_level_stopped = Vec::new();
         for id in &top_level_stop_ids {
+            if id_is_background_protected(&cue_lists[list_index].cues, *id, false) { continue; }
             if let Some(cue) = cue_lists[list_index].get_mut(id) {
-                let _ = cue.stop(&self.context);
+                top_level_stopped.extend(stop_preserving_background(cue, &self.context, false));
             }
             cue_lists[list_index].remove_continuation_plan(*id);
         }
@@ -868,10 +959,12 @@ impl Transport {
             .and_then(|cue| cue.number_start_stop_specification())
             .map(|(mode, selected)| number_start_stop_targets_in_workspace(cue_lists, list_index, cue_id, mode, &selected))
             .unwrap_or_default();
+        let mut number_stopped_ids = Vec::new();
         for id in &number_start_stop_ids {
             if let Some(target_index) = cue_lists.iter().position(|list| list.get_recursive(id).is_some()) {
+              if id_is_background_protected(&cue_lists[target_index].cues, *id, false) { continue; }
               if let Some(cue) = cue_lists[target_index].get_mut_recursive(id) {
-                let _ = cue.stop(&self.context);
+                number_stopped_ids.extend(stop_preserving_background(cue, &self.context, false));
               }
               cue_lists[target_index].remove_continuation_plan(*id);
             }
@@ -892,8 +985,8 @@ impl Transport {
         // All action cue side effects use the shared recursive dispatcher.
         let action_result = self.dispatch_fired_cues_with_guards(cue_lists, list_index, &fired, dispatched, continuation_guard);
         fired.extend(action_result.fired);
-        let mut stopped = top_level_stop_ids;
-        stopped.extend(number_start_stop_ids);
+        let mut stopped = top_level_stopped;
+        stopped.extend(number_stopped_ids);
         stopped.extend(action_result.stopped);
         let commanded = action_result.triggered;
 
@@ -1041,6 +1134,7 @@ impl Transport {
         for target_id in target_ids.iter().copied() {
             if !seen.insert(target_id) { continue; }
             let Some(list_index) = cue_lists.iter().position(|list| list.get_recursive(&target_id).is_some()) else { continue; };
+            if id_is_background_protected(&cue_lists[list_index].cues, target_id, false) { continue; }
             let mut subtree_ids = HashSet::new();
             let mut active_ids = Vec::new();
             if let Some(target) = cue_lists[list_index].get_recursive(&target_id) {
@@ -1048,13 +1142,12 @@ impl Transport {
                 collect_running_ids(target, &mut active_ids);
             }
             if !active_ids.is_empty() {
-                stopped.extend(active_ids);
                 if let Some(target) = cue_lists[list_index].get_mut_recursive(&target_id) {
-                    let _ = target.hard_stop(&self.context);
+                    stopped.extend(stop_preserving_background(target, &self.context, true));
                 }
             }
             for id in subtree_ids {
-                cue_lists[list_index].remove_continuation_plan(id);
+                if !id_is_background_protected(&cue_lists[list_index].cues, id, false) { cue_lists[list_index].remove_continuation_plan(id); }
             }
         }
         dedup_ids(&mut stopped);
@@ -1064,16 +1157,32 @@ impl Transport {
     pub fn stop_cue_in_workspace(&mut self, cue_lists: &mut [CueList], cue_id: &CueId) -> Result<()> {
         let index = cue_lists.iter().position(|list| list.get_recursive(cue_id).is_some())
             .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
+        if id_is_background_protected(&cue_lists[index].cues, *cue_id, false) { return Ok(()); }
+        let mut affected = HashSet::new();
+        if let Some(cue) = cue_lists[index].get_recursive(cue_id) { collect_unprotected_subtree_ids(cue, false, &mut affected); }
+        let _ = stop_preserving_background_result(cue_lists[index].get_mut_recursive(cue_id).unwrap(), &self.context, false)?;
+        for id in affected { cue_lists[index].remove_continuation_plan(id); }
+        Ok(())
+    }
+
+    pub fn stop_cue_explicit_in_workspace(&mut self, cue_lists: &mut [CueList], cue_id: &CueId) -> Result<()> {
+        let index = cue_lists.iter().position(|list| list.get_recursive(cue_id).is_some())
+            .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
+        let mut affected = HashSet::new();
+        if let Some(cue) = cue_lists[index].get_recursive(cue_id) { collect_subtree_ids(cue, &mut affected); }
         cue_lists[index].get_mut_recursive(cue_id).unwrap().stop(&self.context)?;
-        cue_lists[index].remove_continuation_plan(*cue_id);
+        for id in affected { cue_lists[index].remove_continuation_plan(id); }
         Ok(())
     }
 
     pub fn hard_stop_cue_in_workspace(&mut self, cue_lists: &mut [CueList], cue_id: &CueId) -> Result<()> {
         let index = cue_lists.iter().position(|list| list.get_recursive(cue_id).is_some())
             .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
-        cue_lists[index].get_mut_recursive(cue_id).unwrap().hard_stop(&self.context)?;
-        cue_lists[index].remove_continuation_plan(*cue_id);
+        if id_is_background_protected(&cue_lists[index].cues, *cue_id, false) { return Ok(()); }
+        let mut affected = HashSet::new();
+        if let Some(cue) = cue_lists[index].get_recursive(cue_id) { collect_unprotected_subtree_ids(cue, false, &mut affected); }
+        let _ = stop_preserving_background_result(cue_lists[index].get_mut_recursive(cue_id).unwrap(), &self.context, true)?;
+        for id in affected { cue_lists[index].remove_continuation_plan(id); }
         Ok(())
     }
 
@@ -1232,21 +1341,27 @@ impl Transport {
 
     /// Stop a specific cue (with soft fade-out).
     pub fn stop_cue(&mut self, cue_list: &mut CueList, cue_id: &CueId) -> Result<()> {
+        if id_is_background_protected(&cue_list.cues, *cue_id, false) { return Ok(()); }
         let cue = cue_list
             .get_mut_recursive(cue_id)
             .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
-        cue.stop(&self.context)?;
-        cue_list.remove_continuation_plan(*cue_id);
+        let mut affected = HashSet::new();
+        collect_unprotected_subtree_ids(cue, false, &mut affected);
+        let _ = stop_preserving_background_result(cue, &self.context, false)?;
+        for id in affected { cue_list.remove_continuation_plan(id); }
         Ok(())
     }
 
     /// Hard-stop a specific cue (immediate cut, no fade).
     pub fn hard_stop_cue(&mut self, cue_list: &mut CueList, cue_id: &CueId) -> Result<()> {
+        if id_is_background_protected(&cue_list.cues, *cue_id, false) { return Ok(()); }
         let cue = cue_list
             .get_mut_recursive(cue_id)
             .ok_or_else(|| anyhow!("Cue not found: {:?}", cue_id))?;
-        cue.hard_stop(&self.context)?;
-        cue_list.remove_continuation_plan(*cue_id);
+        let mut affected = HashSet::new();
+        collect_unprotected_subtree_ids(cue, false, &mut affected);
+        let _ = stop_preserving_background_result(cue, &self.context, true)?;
+        for id in affected { cue_list.remove_continuation_plan(id); }
         Ok(())
     }
 
@@ -1259,8 +1374,9 @@ impl Transport {
             collect_retained_output_ids(cue.as_ref(), &mut retained_ids);
         }
         for id in retained_ids {
+            if id_is_background_protected(&cue_list.cues, id, false) { continue; }
             if let Some(cue) = cue_list.get_mut_recursive(&id) {
-                let _ = cue.stop(&self.context);
+                let _ = stop_preserving_background(cue, &self.context, false);
             }
             cue_list.remove_continuation_plan(id);
         }
@@ -1274,11 +1390,11 @@ impl Transport {
 
         for id in running_ids {
             if let Some(cue) = cue_list.get_mut(&id) {
-                let _ = cue.stop(&self.context);
+                let _ = stop_preserving_background(cue, &self.context, false);
             }
-            cue_list.remove_continuation_plan(id);
+            if !id_is_background_protected(&cue_list.cues, id, false) { cue_list.remove_continuation_plan(id); }
         }
-        cue_list.clear_continuation_plans();
+        clear_unprotected_continuation_plans(cue_list);
         Ok(())
     }
 
@@ -1291,32 +1407,41 @@ impl Transport {
     /// through its own `hard_stop()`. The engine-level backstop silences those
     /// too, and the reset pass clears stale bookkeeping in every list.
     pub fn hard_stop_all(&mut self, cue_lists: &mut [CueList]) -> Result<()> {
-        for cue_list in cue_lists {
+        for cue_list in cue_lists.iter_mut() {
             let cue_ids = cue_list.all_cue_ids();
             for id in cue_ids {
+                if id_is_background_protected(&cue_list.cues, id, false) { continue; }
                 let cue_is_active = cue_list
                     .get_recursive(&id)
                     .is_some_and(|cue| cue.is_running() || cue.is_paused());
                 if cue_is_active {
                     if let Some(cue) = cue_list.get_mut_recursive(&id) {
-                        let _ = cue.hard_stop(&self.context);
+                        let _ = stop_preserving_background(cue, &self.context, true);
                     }
                 }
                 cue_list.remove_continuation_plan(id);
             }
-            cue_list.clear_continuation_plans();
-
             for cue in cue_list.cues.iter_mut() {
-                let _ = cue.reset();
+                let _ = reset_preserving_background(cue.as_mut(), &self.context);
             }
             for id in cue_list.all_cue_ids() {
-                cue_list.remove_continuation_plan(id);
+                if !id_is_background_protected(&cue_list.cues, id, false) { cue_list.remove_continuation_plan(id); }
             }
         }
 
-        let _ = self.context.audio_engine.panic_stop_all();
-        self.context.output_engine.panic_stop();
-        let _ = self.context.output_engine.clear_browser_surface(true);
+        let mut keep_audio = Vec::new();
+        let mut keep_visual = Vec::new();
+        for cue_list in cue_lists.iter() {
+            for cue in &cue_list.cues { collect_protected_voices(cue.as_ref(), false, &self.context, &mut keep_audio, &mut keep_visual); }
+        }
+        dedup_ids(&mut keep_audio);
+        dedup_ids(&mut keep_visual);
+        let _ = self.context.audio_engine.panic_stop_all_except(&keep_audio);
+        self.context.output_engine.panic_stop_except(&keep_audio, &keep_visual);
+        let protected_browser_owner = self.context.output_engine.browser_surface_owner_id().is_some_and(|owner_id| {
+            cue_lists.iter().any(|list| id_is_background_protected(&list.cues, owner_id, false))
+        });
+        if !protected_browser_owner { let _ = self.context.output_engine.clear_browser_surface(true); }
         Ok(())
     }
 

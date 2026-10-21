@@ -325,6 +325,11 @@ impl RenderRuntime {
         self.external_dirty.store(true, Ordering::Release);
         self.wake();
     }
+    pub(super) fn clear_external_sources_except(&self, keep: &std::collections::HashSet<VoiceId>) {
+        if let Ok(mut sources) = self.external_sources.lock() { sources.retain(|voice, _| keep.contains(voice)); }
+        self.external_dirty.store(true, Ordering::Release);
+        self.wake();
+    }
     fn tick_external_sources(&self) -> (Vec<ExternalDraw>, bool, bool) {
         let mut draws = Vec::new(); let mut animating = false; let mut removed = false;
         if let Ok(mut sources) = self.external_sources.lock() { sources.retain(|voice, source| {

@@ -292,6 +292,29 @@ pub fn stop_cue(
     Ok(())
 }
 
+/// Stop a cue from the Active Cues operator list, including a protected Number.
+#[tauri::command]
+pub fn stop_cue_explicit(
+    cue_id: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let id: uuid::Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+    let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
+    let context = make_context(&state, stop_fade_ms);
+    let mut transport = Transport::new(context);
+    let before = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id))
+        .map(cue_subtree_states)
+        .ok_or_else(|| format!("Cue not found: {id:?}"))?;
+    transport.stop_cue_explicit_in_workspace(&mut ws.cue_lists, &id).map_err(|e| e.to_string())?;
+    let after = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id))
+        .map(cue_subtree_states)
+        .unwrap_or_default();
+    emit_stop_notifications(&app_handle, &before, &after);
+    Ok(())
+}
+
 /// Pause a specific cue.
 #[tauri::command]
 pub fn pause_cue(

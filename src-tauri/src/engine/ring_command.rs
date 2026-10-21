@@ -146,6 +146,8 @@ pub enum AudioCommand {
     /// Panic: immediately silence every voice in the pool, whatever its state.
     /// Backstop for desynced cue bookkeeping — must never depend on voice IDs.
     StopAll,
+    /// Stop voices marked by the control thread for this operation.
+    StopMarked { epoch: u64 },
 }
 
 /// Status updates sent *from* the audio thread to the application layer.

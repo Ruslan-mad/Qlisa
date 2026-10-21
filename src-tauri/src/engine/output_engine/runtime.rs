@@ -232,6 +232,10 @@ impl OutputRegistry {
             p.voices.clear();
         }
     }
+    pub fn retain_voices(&mut self, keep: &HashSet<VoiceId>) {
+        let removed: Vec<_> = self.voice_owner.keys().filter(|voice| !keep.contains(voice)).copied().collect();
+        for voice in removed { self.release_voice(voice); }
+    }
 
     /// Release only voices owned by retired/disabled outputs.
     pub fn release_outputs(&mut self, ids: &HashSet<String>) {

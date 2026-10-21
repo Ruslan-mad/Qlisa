@@ -329,19 +329,21 @@ pub enum EngineCall {
     AudioEnsureInputFeed,
     AudioPlayMicVoice,
     AudioPanicStopAll,
+    AudioPanicStopExcept { keep: Vec<VoiceId> },
     OutputShowContent {
         path: String,
         is_image: bool,
         preload: bool,
         geometry: inkue_lib::engine::output_engine::VideoGeometry,
     },
-    OutputStopContent,
+    OutputStopContent { visual_fade_ms: u32, audio_fade_ms: u32 },
     OutputStopVoice { fade_ms: u32 },
     OutputTextOverlay {
         ass: String,
     },
     OutputClearText,
     OutputPanicStop,
+    OutputPanicStopExcept { keep_audio: Vec<VoiceId>, keep_visual: Vec<VoiceId> },
     OutputEofFade {
         fade_ms: u32,
     },
@@ -369,11 +371,26 @@ pub type CallLog = Arc<Mutex<Vec<EngineCall>>>;
 
 /// Test control for simulating a voice's natural engine-side completion.
 #[derive(Clone)]
-pub struct VoiceLiveness(Arc<Mutex<HashSet<VoiceId>>>);
+pub struct VoiceLiveness(
+    Arc<Mutex<HashSet<VoiceId>>>,
+    Arc<Mutex<HashSet<VoiceId>>>,
+);
 
 impl VoiceLiveness {
+    pub fn start(&self, voice_id: VoiceId) {
+        self.0.lock().unwrap().insert(voice_id);
+    }
+
     pub fn complete(&self, voice_id: VoiceId) {
         self.0.lock().unwrap().remove(&voice_id);
+    }
+
+    pub fn is_alive(&self, voice_id: VoiceId) -> bool {
+        self.0.lock().unwrap().contains(&voice_id)
+    }
+
+    pub fn fail_stop(&self, voice_id: VoiceId) {
+        self.1.lock().unwrap().insert(voice_id);
     }
 }
 
@@ -381,7 +398,11 @@ fn record(log: &CallLog, call: EngineCall) {
     log.lock().unwrap().push(call);
 }
 
-struct RecAudio(CallLog, Arc<Mutex<HashSet<VoiceId>>>);
+struct RecAudio(
+    CallLog,
+    Arc<Mutex<HashSet<VoiceId>>>,
+    Arc<Mutex<HashSet<VoiceId>>>,
+);
 impl AudioEngineApi for RecAudio {
     fn play_voice_routed(&self, _v: Voice, device_id: Option<&str>) -> Result<VoiceId> {
         record(
@@ -407,6 +428,9 @@ impl AudioEngineApi for RecAudio {
     }
     fn stop_voice(&self, voice_id: VoiceId, fade_ms: u32, _c: FadeCurve) -> Result<()> {
         record(&self.0, EngineCall::AudioStopVoice { fade_ms });
+        if self.2.lock().unwrap().contains(&voice_id) {
+            anyhow::bail!("injected audio stop failure");
+        }
         self.1.lock().unwrap().remove(&voice_id);
         Ok(())
     }
@@ -491,6 +515,11 @@ impl AudioEngineApi for RecAudio {
         self.1.lock().unwrap().clear();
         Ok(())
     }
+    fn panic_stop_all_except(&self, keep: &[VoiceId]) -> Result<()> {
+        record(&self.0, EngineCall::AudioPanicStopExcept { keep: keep.to_vec() });
+        self.1.lock().unwrap().retain(|voice| keep.contains(voice));
+        Ok(())
+    }
     fn voice_is_alive(&self, voice_id: VoiceId) -> bool {
         self.1.lock().unwrap().contains(&voice_id)
     }
@@ -538,12 +567,18 @@ impl OutputEngineApi for RecOutput {
         }
         Ok(Uuid::new_v4())
     }
-    fn stop_content(&self, _v: VoiceId, _vf: u32, _af: u32) {
-        record(&self.log, EngineCall::OutputStopContent);
+    fn stop_content(&self, _v: VoiceId, visual_fade_ms: u32, audio_fade_ms: u32) {
+        record(&self.log, EngineCall::OutputStopContent { visual_fade_ms, audio_fade_ms });
     }
     fn hard_stop_current(&self) {}
     fn panic_stop(&self) {
         record(&self.log, EngineCall::OutputPanicStop);
+    }
+    fn panic_stop_except(&self, keep_audio: &[VoiceId], keep_visual: &[VoiceId]) {
+        record(&self.log, EngineCall::OutputPanicStopExcept {
+            keep_audio: keep_audio.to_vec(),
+            keep_visual: keep_visual.to_vec(),
+        });
     }
     fn video_audio_voice(&self, _v: VoiceId) -> Option<VoiceId> {
         self.video_audio
@@ -587,6 +622,26 @@ impl OutputEngineApi for RecOutput {
     fn start_preloaded(&self, _v: VoiceId) -> bool {
         record(&self.log, EngineCall::OutputStartPreloaded);
         true
+    }
+}
+
+#[cfg(test)]
+mod selective_audio_test {
+    use super::*;
+
+    #[test]
+    fn recording_audio_panic_keeps_only_requested_voices() {
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let protected = Uuid::new_v4();
+        let ordinary = Uuid::new_v4();
+        let voices = Arc::new(Mutex::new(HashSet::from([protected, ordinary])));
+        let audio = RecAudio(log.clone(), voices.clone(), Arc::new(Mutex::new(HashSet::new())));
+
+        audio.panic_stop_all_except(&[protected]).unwrap();
+
+        assert!(audio.voice_is_alive(protected));
+        assert!(!voices.lock().unwrap().contains(&ordinary));
+        assert!(log.lock().unwrap().contains(&EngineCall::AudioPanicStopExcept { keep: vec![protected] }));
     }
 }
 
@@ -669,9 +724,10 @@ fn build_recording_context_with_voice_liveness(
 ) -> (CueContext, Receiver<CueEvent>, CallLog, VoiceLiveness) {
     let log: CallLog = Arc::new(Mutex::new(Vec::new()));
     let live_voice_ids = Arc::new(Mutex::new(HashSet::new()));
+    let stop_failures = Arc::new(Mutex::new(HashSet::new()));
     let (tx, rx) = unbounded();
     let ctx = CueContext::new(
-        Arc::new(RecAudio(log.clone(), live_voice_ids.clone())),
+        Arc::new(RecAudio(log.clone(), live_voice_ids.clone(), stop_failures.clone())),
         Arc::new(RecOutput {
             log: log.clone(),
             video_audio,
@@ -689,7 +745,7 @@ fn build_recording_context_with_voice_liveness(
         input_patches,
         256,
     );
-    (ctx, rx, log, VoiceLiveness(live_voice_ids))
+    (ctx, rx, log, VoiceLiveness(live_voice_ids, stop_failures))
 }
 
 /// [`recording_context_with`] with empty workspace tables.

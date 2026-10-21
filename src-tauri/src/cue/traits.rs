@@ -952,6 +952,11 @@ pub trait Cue: Send {
     }
     fn number_finish_start_ids(&self) -> Vec<CueId> { Vec::new() }
     fn take_number_completion_start_ids(&mut self) -> Vec<CueId> { Vec::new() }
+    /// Whether this Number and its entire cue tree resist transport stop actions.
+    fn background_screensaver(&self) -> bool { false }
+    fn set_background_screensaver(&mut self, _enabled: bool) {}
+    /// Stop a mixed Group from auto-launching ordinary successors while a protected descendant keeps it alive.
+    fn halt_automatic_flow_for_protected_children(&mut self) {}
 
     /// Runtime-only mode used when a Group is the master inside a Number.
     /// Ordinary Groups keep their authored continuation behaviour.

@@ -235,6 +235,10 @@ export function NumberTab({
 
     <Section title={`3 · ${t("numberUi.flowSettings")}`}>
       <div style={{ color: "var(--wc-text-muted)", fontSize: 11, marginBottom: 8 }}>{t("numberUi.flowSettingsHint")}</div>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginBottom: 10 }}>
+        <input type="checkbox" checked={localCue.background_screensaver ?? false} disabled={busy} onChange={(event) => saveFlow({ background_screensaver: event.target.checked })} />
+        <span>{t("numberUi.backgroundScreensaver")}</span>
+      </label>
       <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
         <span style={{ minWidth: 150 }}>{t("numberUi.stopOnStart")}</span>
         <select

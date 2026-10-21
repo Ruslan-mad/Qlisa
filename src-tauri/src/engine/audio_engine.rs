@@ -606,6 +606,8 @@ pub struct AudioEngine {
     cmd_prod: Mutex<ringbuf::HeapProd<AudioCommand>>,
     status_cons: Mutex<ringbuf::HeapCons<AudioStatus>>,
     voices: VoicePool,
+    /// Sequence for selective panic stops; zero means no operation.
+    stop_epoch: AtomicU64,
     /// Additional per-device streams for Output Patches targeting a device
     /// other than the main one.  Opened lazily at the first GO that needs the
     /// device, kept open afterwards so later GOs start with zero device-open
@@ -840,6 +842,7 @@ impl EngineCore {
             cmd_prod: Mutex::new(cmd_prod),
             status_cons: Mutex::new(status_cons),
             voices: self.voices,
+            stop_epoch: AtomicU64::new(0),
             aux_streams: Mutex::new(Vec::new()),
             input_feeds: self.input_feeds,
             input_feed_count: AtomicUsize::new(0),
@@ -1992,6 +1995,42 @@ impl AudioEngine {
     /// stream so patch-routed voices are silenced too.
     pub fn panic_stop_all(&self) -> Result<()> {
         self.broadcast_command(AudioCommand::StopAll)
+    }
+
+    /// Stop all current main and aux voices except the listed IDs. Marks are
+    /// set outside RT; each callback receives one fixed-size command.
+    pub fn panic_stop_all_except(&self, keep: &[VoiceId]) -> Result<()> {
+        let epoch = self.stop_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        if epoch == 0 {
+            return Err(anyhow!("selective stop sequence exhausted"));
+        }
+        self.voices
+            .with(|voices| {
+                for voice in voices.iter().filter(|voice| !keep.contains(&voice.id)) {
+                    voice.stop_epoch.store(epoch, Ordering::Release);
+                }
+            })
+            .ok_or_else(|| anyhow!("voice pool poisoned"))?;
+        {
+            let aux = self.aux_streams.lock().map_err(|_| anyhow!("aux streams poisoned"))?;
+            for stream in aux.iter() {
+                stream.voices
+                    .with(|voices| {
+                        for voice in voices.iter().filter(|voice| !keep.contains(&voice.id)) {
+                            voice.stop_epoch.store(epoch, Ordering::Release);
+                        }
+                    })
+                    .ok_or_else(|| anyhow!("aux voice pool poisoned"))?;
+            }
+        }
+        self.send_command(AudioCommand::StopMarked { epoch })?;
+        let mut aux = self.aux_streams.lock().map_err(|_| anyhow!("aux streams poisoned"))?;
+        for stream in aux.iter_mut() {
+            stream.cmd_prod
+                .try_push(AudioCommand::StopMarked { epoch })
+                .map_err(|_| anyhow!("aux audio command ring buffer full"))?;
+        }
+        Ok(())
     }
 
     pub fn pause_voice(&self, voice_id: VoiceId) -> Result<()> {
@@ -3746,6 +3785,14 @@ fn apply_command(
             for v in voices {
                 let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id: v.id, command: crate::engine::ring_command::TransportCommandKind::Stop, frame: v.current_frame() });
                 v.set_stopped();
+            }
+        }
+        AudioCommand::StopMarked { epoch } => {
+            for v in voices {
+                if v.stop_epoch.load(Ordering::Acquire) == epoch {
+                    let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id: v.id, command: crate::engine::ring_command::TransportCommandKind::Stop, frame: v.current_frame() });
+                    v.set_stopped();
+                }
             }
         }
         AudioCommand::Seek {
@@ -6111,6 +6158,27 @@ mod tests {
         let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
         assert_eq!(engine.sample_rate(), 48_000);
         assert_eq!(engine.output_channels(), 2);
+    }
+
+    #[test]
+    fn selective_panic_preserves_listed_voice_and_stops_unowned_voice() {
+        let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
+        let keep = make_tone_voice(1000, 48_000);
+        let orphan = make_tone_voice(1000, 48_000);
+        assert!(engine.voices.push(Arc::clone(&keep)).is_ok());
+        assert!(engine.voices.push(Arc::clone(&orphan)).is_ok());
+
+        engine.panic_stop_all_except(&[keep.id]).unwrap();
+        let epoch = engine.stop_epoch.load(Ordering::Acquire);
+        let (mut status_prod, _) = HeapRb::<AudioStatus>::new(4).split();
+        apply_command(
+            &engine.voices.rt.load(),
+            AudioCommand::StopMarked { epoch },
+            &mut status_prod,
+        );
+
+        assert_eq!(keep.voice_state(), VoiceState::Playing);
+        assert_eq!(orphan.voice_state(), VoiceState::Stopped);
     }
 
     #[test]

@@ -462,6 +462,8 @@ pub struct Voice {
 
     /// [`VoiceState`] encoded as u8.
     pub state: AtomicU8,
+    /// Control-thread mark consumed by a selective panic-stop command.
+    pub(crate) stop_epoch: AtomicU64,
 
     /// Interior-mutable fields modified from the RT callback.
     pub inner: Arc<VoiceInner>,
@@ -519,6 +521,7 @@ impl Voice {
             runtime_silent_frames: None,
             has_looped: AtomicBool::new(false),
             state: AtomicU8::new(VoiceState::Idle as u8),
+            stop_epoch: AtomicU64::new(0),
             inner: Arc::new(VoiceInner {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
                 muted: AtomicBool::new(false),
@@ -564,6 +567,7 @@ impl Voice {
             runtime_silent_frames: None,
             has_looped: AtomicBool::new(false),
             state: AtomicU8::new(VoiceState::Idle as u8),
+            stop_epoch: AtomicU64::new(0),
             inner: Arc::new(VoiceInner {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
                 muted: AtomicBool::new(false),
@@ -608,6 +612,7 @@ impl Voice {
             runtime_silent_frames: None,
             has_looped: AtomicBool::new(false),
             state: AtomicU8::new(VoiceState::Idle as u8),
+            stop_epoch: AtomicU64::new(0),
             inner: Arc::new(VoiceInner {
                 gain_bits: AtomicU32::new(f32::to_bits(gain)),
                 muted: AtomicBool::new(false),
