@@ -139,7 +139,7 @@ export function FullscreenControl() {
   const buttonLabel = t("stageUi.fullscreen");
 
   return (
-    <div ref={rootRef} className="stage-fullscreen-control" style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
+    <div ref={rootRef} className="stage-fullscreen-control" data-no-window-drag style={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
       <button
         type="button"
         className="stage-physical-output-toggle"

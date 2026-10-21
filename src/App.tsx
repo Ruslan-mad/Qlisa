@@ -110,6 +110,10 @@ function WindowControls() {
   );
 }
 
+function isTitleBarInteractiveTarget(target: EventTarget): boolean {
+  return target instanceof Element && Boolean(target.closest("button, a, input, select, textarea, [role='button'], [data-no-window-drag]"));
+}
+
 // ---------------------------------------------------------------------------
 // Unsaved-changes close confirmation dialog
 // ---------------------------------------------------------------------------
@@ -1628,15 +1632,26 @@ export default function App() {
         }}
       >
         {/* Main title row. Menus stay in their own compact row below. */}
-        <div className="stage-header-main" style={{ display: "flex", alignItems: "center", height: 64, padding: "0 12px", gap: 12, position: "relative", zIndex: 2 }}>
-          <div data-tauri-drag-region style={{ flex: "1 1 0", maxWidth: "max(0px, calc(50% - 125px))", minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: 10, overflow: "hidden" }}>
-            <div data-tauri-drag-region style={{ flexShrink: 0, pointerEvents: "none", display: "flex" }}>
+        <div
+          className="stage-header-main"
+          onMouseDown={(event) => {
+            if (event.button !== 0 || event.defaultPrevented || isTitleBarInteractiveTarget(event.target)) return;
+            if (event.detail === 2) {
+              void getCurrentWindow().toggleMaximize();
+              return;
+            }
+            void getCurrentWindow().startDragging();
+          }}
+          style={{ display: "flex", alignItems: "center", height: 64, padding: "0 12px", gap: 12, position: "relative", zIndex: 2 }}
+        >
+          <div style={{ flex: "1 1 0", maxWidth: "max(0px, calc(50% - 125px))", minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: 10, overflow: "hidden" }}>
+            <div style={{ flexShrink: 0, pointerEvents: "none", display: "flex" }}>
               <InkueMark size={30} />
             </div>
-            <div data-tauri-drag-region style={{ minWidth: 0, display: "flex", alignItems: "baseline", gap: 12, overflow: "hidden" }}>
-              <span data-tauri-drag-region style={{ fontWeight: 700, fontSize: 20, color: "var(--wc-text-bright)", flexShrink: 0, letterSpacing: "-0.02em" }}>Qlisa</span>
-              <span data-tauri-drag-region style={{ minWidth: 0, flexShrink: 1, fontSize: 14, color: "var(--wc-text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{titleBarName}</span>
-              <span data-tauri-drag-region style={{ color: workspaceInfo?.is_modified ? "#fbbf24" : "var(--wc-text-muted)", fontSize: 11, fontWeight: 600, flexShrink: 0 }}>{saveStatus}</span>
+            <div style={{ minWidth: 0, display: "flex", alignItems: "baseline", gap: 12, overflow: "hidden" }}>
+              <span style={{ fontWeight: 700, fontSize: 20, color: "var(--wc-text-bright)", flexShrink: 0, letterSpacing: "-0.02em" }}>Qlisa</span>
+              <span style={{ minWidth: 0, flexShrink: 1, fontSize: 14, color: "var(--wc-text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{titleBarName}</span>
+              <span style={{ color: workspaceInfo?.is_modified ? "#fbbf24" : "var(--wc-text-muted)", fontSize: 11, fontWeight: 600, flexShrink: 0 }}>{saveStatus}</span>
             </div>
             {brokenCueIds.size > 0 && (
               <button type="button" onClick={() => setPreflightOpen(true)} title={t("toolbar.problems")} style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 4, background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.5)", borderRadius: 5, color: "#ef4444", cursor: "pointer", fontSize: 11, padding: "2px 8px" }}>
