@@ -32,21 +32,19 @@ describe("cue-list column configuration", () => {
     expect(buildGridCols(visible, DEFAULT_COLUMN_CONFIG)).toBe(
       "28px 20px 28px 36px 97px 118px 64px 59px 49px 40px 82px 82px 100px 180px",
     );
-    expect(DEFAULT_COLUMN_CONFIG.hidden).toEqual({ file: true, output: true });
+    expect(DEFAULT_COLUMN_CONFIG.hidden).toEqual({ file: true });
   });
 
   it("uses a compact Stage default while keeping optional columns available", () => {
     const visible = getVisibleDefs(STAGE_DEFAULT_COLUMN_CONFIG);
     expect(visible.map((column) => column.id)).toEqual([
-      "playhead", "led", "type", "number", "name", "notes", "duration", "continue", "file_size", "resolution",
+      "playhead", "led", "type", "number", "name", "notes", "pre_wait", "duration", "post_wait", "continue", "outputs", "file_size", "resolution",
     ]);
     expect(buildGridCols(visible, STAGE_DEFAULT_COLUMN_CONFIG)).toBe(
-      "28px 20px 28px 44px 300px 130px 72px 40px 72px 94px",
+      "28px 20px 28px 44px 300px 130px 64px 72px 49px 40px 82px 72px 94px",
     );
     expect(STAGE_DEFAULT_COLUMN_CONFIG.order).toEqual(DEFAULT_COLUMN_CONFIG.order);
-    expect(STAGE_DEFAULT_COLUMN_CONFIG.hidden).toEqual({
-      file: true, target: true, output: true, outputs: true, pre_wait: true, post_wait: true,
-    });
+    expect(STAGE_DEFAULT_COLUMN_CONFIG.hidden).toEqual({ file: true, target: true });
   });
 
   it("stores Stage layout separately and preserves the legacy theme layout", () => {
@@ -87,7 +85,8 @@ describe("cue-list column configuration", () => {
     expect(migrated.order).toEqual(DEFAULT_COLUMN_CONFIG.order);
     expect(migrated.widths).toMatchObject({ file: 126, type: 28, number: 36, name: 97, notes: 118 });
     expect(migrated.widths.target).toBeUndefined();
-    expect(migrated.hidden).toMatchObject({ file: true, output: true });
+    expect(migrated.hidden).toMatchObject({ file: true });
+    expect(migrated.hidden.output).toBeUndefined();
     expect(getVisibleDefs(migrated).map((column) => column.id)).toEqual(
       getVisibleDefs(DEFAULT_COLUMN_CONFIG).map((column) => column.id),
     );
@@ -114,7 +113,7 @@ describe("cue-list column configuration", () => {
     );
     expect(nonNewColumns).toEqual([
       "playhead", "led", "name", "file", "target", "number", "notes",
-      "output", "outputs", "type", "pre_wait", "duration", "post_wait", "continue",
+      "outputs", "type", "pre_wait", "duration", "post_wait", "continue",
     ]);
     expect(config.widths.file).toBe(333);
     expect(config.widths.target).toBeUndefined();
@@ -150,5 +149,33 @@ describe("cue-list column configuration", () => {
     const mediaDefs = getVisibleDefs(config)
       .filter((column) => column.id === "file_size" || column.id === "resolution");
     expect(buildGridCols(mediaDefs, config)).toBe("123px 145px");
+  });
+
+  it("migrates saved Stage defaults once and keeps later visibility choices", () => {
+    const values = new Map<string, string>([["qlisa_stage_column_config_v1", JSON.stringify({
+      widths: { name: 280, output: 102, outputs: 90, notes: 140 },
+      hidden: { file: true, target: true, output: true, outputs: true, pre_wait: true, post_wait: true, notes: true },
+      order: ["playhead", "led", "name", "output", "notes", "pre_wait", "duration", "post_wait"],
+    })]]);
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+    });
+
+    const migrated = loadColumnConfig("stage");
+    expect(migrated.order.indexOf("outputs")).toBe(migrated.order.indexOf("name") + 1);
+    expect(migrated.widths).toMatchObject({ name: 280, outputs: 90, notes: 140 });
+    expect(migrated.widths.output).toBeUndefined();
+    expect(migrated.hidden).toMatchObject({ notes: true });
+    expect(migrated.hidden.output).toBeUndefined();
+    expect(migrated.hidden.outputs).toBeUndefined();
+    expect(migrated.hidden.pre_wait).toBeUndefined();
+    expect(migrated.hidden.post_wait).toBeUndefined();
+
+    saveColumnConfig(migrated, "stage");
+    const userChoice = { ...migrated, hidden: { ...migrated.hidden, outputs: true } };
+    saveColumnConfig(userChoice, "stage");
+    expect(loadColumnConfig("stage").hidden.outputs).toBe(true);
+    expect(JSON.parse(values.get("qlisa_stage_column_config_v1")!).version).toBe(2);
   });
 });

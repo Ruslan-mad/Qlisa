@@ -312,7 +312,7 @@ function ColumnMenu({
               onChange={(e) => onToggle(d.id, e.target.checked)}
               style={{ accentColor: "var(--wc-accent)" }}
             />
-            {d.id === "number" ? t("cueList.number") : d.id === "name" ? t("common.name") : d.id === "notes" ? t("cueList.notes") : d.id === "file" ? t("cueList.file") : d.id === "target" ? t("inspector.target") : d.id === "file_size" ? t("cueList.fileSize") : d.id === "resolution" ? t("cueList.resolution") : d.id === "output" ? t("output.output") : d.id === "outputs" ? t("output.outputs") : d.id === "type" ? t("cueList.type") : d.id === "pre_wait" ? t("transport.preWait") : d.id === "duration" ? t("cueList.duration") : d.id === "post_wait" ? t("transport.postWait") : d.id === "continue" ? t("inspector.continueMode") : (d.label || d.id.replace(/_/g, " "))}
+            {d.id === "number" ? t("cueList.number") : d.id === "name" ? t("common.name") : d.id === "notes" ? t("cueList.notes") : d.id === "file" ? t("cueList.file") : d.id === "target" ? t("inspector.target") : d.id === "file_size" ? t("cueList.fileSize") : d.id === "resolution" ? t("cueList.resolution") : d.id === "outputs" ? t("output.outputs") : d.id === "type" ? t("cueList.type") : d.id === "pre_wait" ? t("transport.preWait") : d.id === "duration" ? t("cueList.duration") : d.id === "post_wait" ? t("transport.postWait") : d.id === "continue" ? t("inspector.continueMode") : (d.label || d.id.replace(/_/g, " "))}
           </label>
         ))}
       </div>
@@ -1504,7 +1504,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
                   pointerEvents: "none",
                 }}
               >
-                {def.id === "name" ? t("common.name") : def.id === "notes" ? t("cueList.notes") : def.id === "file" ? t("cueList.file") : def.id === "target" ? t("inspector.target") : def.id === "file_size" ? t("cueList.fileSize") : def.id === "resolution" ? t("cueList.resolution") : def.id === "output" ? t("output.output") : def.id === "outputs" ? t("output.outputs") : def.id === "pre_wait" ? t("transport.preWait") : def.id === "post_wait" ? t("transport.postWait") : def.label}
+                {def.id === "name" ? t("common.name") : def.id === "notes" ? t("cueList.notes") : def.id === "file" ? t("cueList.file") : def.id === "target" ? t("inspector.target") : def.id === "file_size" ? t("cueList.fileSize") : def.id === "resolution" ? t("cueList.resolution") : def.id === "outputs" ? t("output.outputs") : def.id === "pre_wait" ? t("transport.preWait") : def.id === "post_wait" ? t("transport.postWait") : def.label}
               </span>
 
               {/* Resize handle — 8 px wide, centred on the right border.

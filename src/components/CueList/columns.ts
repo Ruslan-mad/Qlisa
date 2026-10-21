@@ -10,7 +10,6 @@ export type ColumnId =
   | "target"
   | "file_size"
   | "resolution"
-  | "output"
   | "outputs"
   | "type"
   | "pre_wait"
@@ -45,7 +44,6 @@ export const DEFAULT_COLUMNS: ColumnDef[] = [
   { id: "duration",  label: "Dur",     defaultWidth: 59,  minWidth: 48, fixed: false, resizable: true  },
   { id: "post_wait", label: "Post-W",  defaultWidth: 49,  minWidth: 48, fixed: false, resizable: true  },
   { id: "continue",  label: "C",       defaultWidth: 40,  minWidth: 28, fixed: false, resizable: true  },
-  { id: "output",    label: "Output",  defaultWidth: 102, minWidth: 50, fixed: false, resizable: true  },
   { id: "outputs",   label: "Outputs", defaultWidth: 82,  minWidth: 48, fixed: false, resizable: true  },
   { id: "file_size", label: "Size",    defaultWidth: 82,  minWidth: 64, fixed: false, resizable: true  },
   { id: "resolution",label: "Res",     defaultWidth: 100, minWidth: 78, fixed: false, resizable: true  },
@@ -69,25 +67,26 @@ export interface ColumnConfig {
 
 export const DEFAULT_COLUMN_CONFIG: ColumnConfig = {
   widths: {},
-  hidden: { file: true, output: true },
+  hidden: { file: true },
   order: DEFAULT_ORDER,
 };
 
 export const STAGE_DEFAULT_COLUMN_CONFIG: ColumnConfig = {
   widths: { name: 300, notes: 130, type: 28, number: 44, duration: 72, file_size: 72, resolution: 94 },
-  hidden: { file: true, target: true, output: true, outputs: true, pre_wait: true, post_wait: true },
+  hidden: { file: true, target: true },
   order: DEFAULT_ORDER,
 };
 
 const LS_KEY = "inkue_column_config_v2";
 const STAGE_LS_KEY = "qlisa_stage_column_config_v1";
+const CONFIG_VERSION = 2;
 
 export function loadColumnConfig(theme?: string): ColumnConfig {
   try {
     const isStage = theme === "stage";
     const raw = localStorage.getItem(isStage ? STAGE_LS_KEY : LS_KEY);
     if (!raw) return isStage ? STAGE_DEFAULT_COLUMN_CONFIG : DEFAULT_COLUMN_CONFIG;
-    const parsed = JSON.parse(raw) as Partial<ColumnConfig>;
+    const parsed = JSON.parse(raw) as Partial<ColumnConfig> & { version?: number };
     // Older layouts used `target` to show media filenames. Keep that saved
     // slot, width and visibility as `file`, then add the newly separated true
     // Target column after the media detail columns.
@@ -95,6 +94,8 @@ export function loadColumnConfig(theme?: string): ColumnConfig {
     const legacyTargetColumn = !rawOrder.includes("file");
     const migratedWidths = { ...(parsed.widths ?? {}) };
     const migratedHidden = { ...(parsed.hidden ?? {}) };
+    delete (migratedWidths as Record<string, number>).output;
+    delete (migratedHidden as Record<string, boolean>).output;
     if (legacyTargetColumn) {
       if (migratedWidths.file == null && migratedWidths.target != null) {
         migratedWidths.file = migratedWidths.target;
@@ -112,6 +113,15 @@ export function loadColumnConfig(theme?: string): ColumnConfig {
       .filter((id) =>
       DEFAULT_ORDER.includes(id as ColumnId),
       ) as ColumnId[];
+    // Remove the retired single-output column. If Outputs was not already
+    // present, keep the old column's position for the replacement.
+    if (!savedOrder.includes("outputs") && rawOrder.includes("output")) {
+      const outputIndex = rawOrder.indexOf("output");
+      const replacementIndex = rawOrder.slice(0, outputIndex)
+        .map((id) => legacyTargetColumn && id === "target" ? "file" : id)
+        .filter((id) => DEFAULT_ORDER.includes(id as ColumnId)).length;
+      savedOrder.splice(replacementIndex, 0, "outputs");
+    }
     const missing = DEFAULT_ORDER.filter((id) => !savedOrder.includes(id));
     const order: ColumnId[] = [...savedOrder, ...missing];
     const missingTargetColumn = !savedOrder.includes("target");
@@ -127,15 +137,6 @@ export function loadColumnConfig(theme?: string): ColumnConfig {
       }
       const filePos = order.indexOf("file");
       order.splice(filePos >= 0 ? filePos + 1 : order.length, 0, ...newMediaColumns);
-    }
-
-    // Keep the output-assignment lamps beside the existing Output column when
-    // upgrading a saved layout, instead of appending them to the far right.
-    if (!savedOrder.includes("outputs")) {
-      const outputsPos = order.indexOf("outputs");
-      if (outputsPos >= 0) order.splice(outputsPos, 1);
-      const outputPos = order.indexOf("output");
-      order.splice(outputPos >= 0 ? outputPos + 1 : order.length, 0, "outputs");
     }
 
     // `target` in old layouts was File. Once migrated, the new true Target
@@ -158,6 +159,14 @@ export function loadColumnConfig(theme?: string): ColumnConfig {
       order.splice(phPos + 1, 0, "led");
     }
 
+    // Stage layouts created before v2 hid these useful columns by default.
+    // Apply this once; saveColumnConfig writes v2 so later user choices persist.
+    if (isStage && (parsed.version ?? 1) < CONFIG_VERSION) {
+      delete migratedHidden.outputs;
+      delete migratedHidden.pre_wait;
+      delete migratedHidden.post_wait;
+    }
+
     return {
       widths: migratedWidths,
       hidden: migratedHidden,
@@ -170,7 +179,7 @@ export function loadColumnConfig(theme?: string): ColumnConfig {
 
 export function saveColumnConfig(c: ColumnConfig, theme?: string): void {
   try {
-    localStorage.setItem(theme === "stage" ? STAGE_LS_KEY : LS_KEY, JSON.stringify(c));
+    localStorage.setItem(theme === "stage" ? STAGE_LS_KEY : LS_KEY, JSON.stringify({ ...c, version: CONFIG_VERSION }));
   } catch {
     // ignore (private / storage-full)
   }

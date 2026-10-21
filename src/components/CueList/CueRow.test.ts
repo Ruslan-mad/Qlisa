@@ -56,7 +56,7 @@ function renderRow(state: CueSummary["state"] = "standby", options: RowOptions =
     isDragOver: options.isDragOver, isDragSource: options.isDragSource,
     isGroup: options.isGroup,
     cueColorStyle: options.cueColorStyle,
-    onCueDragStart: () => {}, onSelectionDragStart: () => {}, onClick: () => {},
+    onCueDragStart: () => {}, onClick: () => {},
     onDoubleClick: () => {}, onContextMenu: () => {}, onContinueContextMenu: () => {},
   }));
 }
@@ -68,6 +68,10 @@ afterEach(() => {
 });
 
 describe("CueRow transport wait display", () => {
+  it("does not expose a mouse-drag range-selection gutter", () => {
+    expect(renderRow()).not.toContain("data-selection-gutter");
+  });
+
   it("fills only the active phase column and localizes Auto-Follow in Russian", () => {
     setLocale("ru");
     timingState.current = {
