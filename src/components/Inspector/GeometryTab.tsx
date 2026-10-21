@@ -97,6 +97,7 @@ export function GeometryEditor({
           max={8}
           step={0.05}
           format={(value) => `${Math.round(value * 100)}%`}
+          centered={{ value: 1, snapTolerance: 0.06 }}
           onChange={(value) => onPatch({ scale: value })}
         />
         <SliderRow

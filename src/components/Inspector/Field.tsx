@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { DragNumber } from "../common/DragNumber";
 import { useLocale } from "../../i18n";
+import { sliderPositionToValue, sliderValueToPosition, stepSliderValue } from "./sliderScaleModel";
 
 /** Translate the shared Inspector vocabulary while keeping user data and protocol names intact. */
 const INSPECTOR_LABEL_KEYS: Record<string, string> = {
@@ -221,6 +222,7 @@ export function SliderRow({
   disabled = false,
   mixedLabel,
   commitOnRelease = false,
+  centered,
   onChange,
 }: {
   label: string;
@@ -234,11 +236,14 @@ export function SliderRow({
   mixedLabel?: string;
   /** Multi-edit can commit once at the end of a drag while keeping identical markup. */
   commitOnRelease?: boolean;
+  /** Optional actual-value neutral point for pointer use. Keyboard arrows use actual values. */
+  centered?: { value: number; snapTolerance: number };
   onChange: (v: number) => void;
 }) {
   const text = useInspectorText();
-  const displayValue = value ?? (min + max) / 2;
+  const displayValue = value ?? (centered ? centered.value : (min + max) / 2);
   const [draft, setDraft] = useState(displayValue);
+  const pointerActive = useRef(false);
   useEffect(() => { setDraft(displayValue); }, [displayValue]);
   const readout = commitOnRelease && draft !== displayValue
     ? format(draft)
@@ -250,17 +255,44 @@ export function SliderRow({
       </label>
       <input
         type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={draft}
+        min={centered ? 0 : min}
+        max={centered ? 1 : max}
+        step={centered ? 0.001 : step}
+        value={centered ? sliderValueToPosition(draft, min, max, centered.value) : draft}
+        aria-label={centered ? text(label) : undefined}
+        aria-valuemin={centered ? min : undefined}
+        aria-valuemax={centered ? max : undefined}
+        aria-valuenow={centered ? draft : undefined}
+        aria-valuetext={centered ? format(draft) : undefined}
         disabled={disabled}
         onChange={(e) => {
-          const next = parseFloat(e.target.value);
+          const raw = parseFloat(e.target.value);
+          const next = centered
+            ? sliderPositionToValue(raw, min, max, centered.value, pointerActive.current ? centered.snapTolerance : 0)
+            : raw;
           setDraft(next);
           if (!commitOnRelease) onChange(next);
         }}
-        onPointerUp={() => { if (commitOnRelease) onChange(draft); }}
+        onPointerDown={(e) => {
+          if (!centered) return;
+          pointerActive.current = true;
+          e.currentTarget.setPointerCapture(e.pointerId);
+        }}
+        onPointerUp={() => {
+          pointerActive.current = false;
+          if (commitOnRelease) onChange(draft);
+        }}
+        onPointerCancel={() => { pointerActive.current = false; }}
+        onLostPointerCapture={() => { pointerActive.current = false; }}
+        onKeyDown={(e) => {
+          pointerActive.current = false;
+          if (!centered || (e.key !== "ArrowLeft" && e.key !== "ArrowDown" && e.key !== "ArrowRight" && e.key !== "ArrowUp")) return;
+          e.preventDefault();
+          const direction = e.key === "ArrowLeft" || e.key === "ArrowDown" ? -1 : 1;
+          const next = stepSliderValue(draft, direction, min, max, step);
+          setDraft(next);
+          if (!commitOnRelease) onChange(next);
+        }}
         onKeyUp={() => { if (commitOnRelease) onChange(draft); }}
         style={{ flex: 1, cursor: disabled ? "default" : "pointer", minWidth: 0, opacity: disabled ? 0.45 : 1 }}
       />
