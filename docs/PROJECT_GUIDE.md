@@ -132,11 +132,16 @@ remain historical facts.
 
 The editor tab formerly named **Timeline** is now **Preview**. Preview keeps
 audition and editing controls. It does not show a runtime cursor or seek
-program playback. **Live** is a separate tab. It lists running and paused
-file-backed cues from every cue list, in latest cue-fired order, and excludes a
-background Number and its descendants. A manual Live dropdown choice stays
-selected. GO and cue selection do not switch the tab, and an empty Live view
-remains open. Live can seek the selected file's runtime voice.
+program playback. **Live** is a separate tab. It lists eligible file-backed
+media from every cue list. Running ordinary media follows the latest
+`cue-fired` order; paused media stays available for manual selection. A manual
+choice lasts until a newer ordinary track becomes eligible. Background
+screensaver media and descendants appear at the top of the dropdown with a
+label. Live follows ordinary running media ahead of background media, and can
+show a running background file when no ordinary file runs. Pre-wait, loading,
+and pathless cues do not appear. GO and cue selection do not switch the tab,
+and an empty Live view remains open. Live can seek the selected file's runtime
+voice.
 
 The tab choice is stored in `clip_editor_active_tab_v2` with `Preview`, `Live`,
 or `Slice`. For compatibility, legacy `show_live_panel` maps to Preview, and

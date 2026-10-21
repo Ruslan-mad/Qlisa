@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, normalizeClipEditorVisibility, previewPlayheadForCue, resolveClipEditorCueId, resolveClipEditorTargetCueId, resolveLiveMediaSelection, toggleClipEditorPanel } from "../clipEditorPrefs";
+import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, createManualLiveMediaSelection, normalizeClipEditorVisibility, previewPlayheadForCue, resolveClipEditorCueId, resolveClipEditorTargetCueId, resolveLiveMediaSelection, shouldFollowLatestLiveMedia, toggleClipEditorPanel } from "../clipEditorPrefs";
 
 describe("Clip Editor workspace visibility", () => {
   it("migrates old projects to both panels visible with Preview active", () => {
@@ -67,7 +67,7 @@ describe("Clip Editor workspace visibility", () => {
     expect(previewPlayheadForCue(null, "cue-a")).toBeNull();
   });
 
-  it("filters screensaver descendants and resolves newest or sticky manual Live media", () => {
+  it("keeps screensaver media at the top and selects the latest running ordinary track", () => {
     const candidates = activeLiveMediaCandidates([
       { id: "old", cue_type: "audio", state: "running", file_path: "old.wav" },
       { id: "screen", cue_type: "number", state: "running", background_screensaver: true, file_path: null, children: [
@@ -83,17 +83,118 @@ describe("Clip Editor workspace visibility", () => {
         { id: "waiting-child", cue_type: "video", state: "running", file_path: "waiting.mp4" },
       ] },
       { id: "new", cue_type: "video", state: "paused", file_path: "new.mp4" },
-    ], { old: 1, "screen-child": 2, "nested-child": 3, "pre-wait": 5, "waiting-child": 6, new: 4 }, {
+      { id: "later", cue_type: "video", state: "running", file_path: "later.mp4" },
+    ], { old: 1, "screen-child": 2, "nested-child": 3, "pre-wait": 5, "waiting-child": 6, new: 4, later: 7 }, {
       "pre-wait": { wait_phase: "pre_wait" },
       "waiting-number": { wait_phase: "pre_wait" },
     });
 
-    expect(candidates.map(({ id }) => id)).toEqual(["no-order", "old", "new"]);
-    expect(resolveLiveMediaSelection(candidates, null)?.id).toBe("new");
-    expect(resolveLiveMediaSelection(candidates, "old")?.id).toBe("old");
-    expect(resolveLiveMediaSelection(candidates, "old")).toBe(resolveLiveMediaSelection(candidates, "old"));
-    expect(resolveLiveMediaSelection(candidates, "ended")?.id).toBe("new");
-    expect(resolveLiveMediaSelection([], "old")).toBeNull();
+    expect(candidates.map(({ id }) => id)).toEqual(["screen-child", "nested-child", "no-order", "old", "new", "later"]);
+    expect(candidates[0].isBackgroundScreensaver).toBe(true);
+    expect(candidates[1].isBackgroundScreensaver).toBe(true);
+    expect(candidates[3].isBackgroundScreensaver).toBe(false);
+    expect(resolveLiveMediaSelection(candidates, null)?.id).toBe("later");
+    expect(resolveLiveMediaSelection([...candidates].reverse(), null)?.id).toBe("later");
+  });
+
+  it("keeps manual choice until a newer eligible ordinary start, including a restart", () => {
+    const candidates = activeLiveMediaCandidates([
+      { id: "screen", cue_type: "number", state: "running", background_screensaver: true, children: [
+        { id: "screen-file", cue_type: "video", state: "running", file_path: "screen.mp4" },
+      ] },
+      { id: "normal-a", cue_type: "audio", state: "running", file_path: "a.wav" },
+      { id: "paused", cue_type: "video", state: "paused", file_path: "paused.mp4" },
+    ], { "screen-file": 1, "normal-a": 2, paused: 3 });
+    const manualBackground = { cueId: "screen-file", afterOrder: 3 };
+    expect(resolveLiveMediaSelection(candidates, manualBackground)?.id).toBe("screen-file");
+    expect(shouldFollowLatestLiveMedia(candidates, manualBackground)).toBe(false);
+    expect(shouldFollowLatestLiveMedia(candidates, { cueId: "screen-file", afterOrder: 2 })).toBe(false);
+
+    const newer = activeLiveMediaCandidates([
+      { id: "screen", cue_type: "number", state: "running", background_screensaver: true, children: [
+        { id: "screen-file", cue_type: "video", state: "running", file_path: "screen.mp4" },
+      ] },
+      { id: "normal-a", cue_type: "audio", state: "running", file_path: "a.wav" },
+      { id: "normal-b", cue_type: "video", state: "running", file_path: "b.mp4" },
+      { id: "paused", cue_type: "video", state: "paused", file_path: "paused.mp4" },
+    ], { "screen-file": 1, "normal-a": 2, paused: 3, "normal-b": 4 });
+    expect(shouldFollowLatestLiveMedia(newer, manualBackground)).toBe(true);
+    expect(resolveLiveMediaSelection(newer, manualBackground)?.id).toBe("normal-b");
+
+    const restartedSameId = activeLiveMediaCandidates([
+      { id: "normal-a", cue_type: "audio", state: "running", file_path: "a.wav" },
+    ], { "normal-a": 5 });
+    const selectedSameIdEarlier = { cueId: "normal-a", afterOrder: 4 };
+    expect(shouldFollowLatestLiveMedia(restartedSameId, selectedSameIdEarlier)).toBe(true);
+    expect(resolveLiveMediaSelection(restartedSameId, selectedSameIdEarlier)?.id).toBe("normal-a");
+  });
+
+  it("waits for delayed candidates, then falls back to remaining running media or a background", () => {
+    const manual = { cueId: "a", afterOrder: 2 };
+    const beforeCatalogUpdate = activeLiveMediaCandidates([
+      { id: "a", cue_type: "audio", state: "running", file_path: "a.wav" },
+    ], { a: 2, b: 3 });
+    expect(resolveLiveMediaSelection(beforeCatalogUpdate, manual)?.id).toBe("a");
+    const afterCatalogUpdate = activeLiveMediaCandidates([
+      { id: "a", cue_type: "audio", state: "running", file_path: "a.wav" },
+      { id: "b", cue_type: "video", state: "running", file_path: "b.mp4" },
+    ], { a: 2, b: 3 });
+    expect(resolveLiveMediaSelection(afterCatalogUpdate, manual)?.id).toBe("b");
+
+    const remaining = afterCatalogUpdate.filter((candidate) => candidate.id === "a");
+    expect(resolveLiveMediaSelection(remaining, null)?.id).toBe("a");
+    const backgroundOnly = activeLiveMediaCandidates([
+      { id: "screen", cue_type: "number", state: "running", background_screensaver: true, children: [
+        { id: "screen-file", cue_type: "image", state: "running", file_path: "screen.png" },
+      ] },
+      { id: "paused", cue_type: "video", state: "paused", file_path: "paused.mp4" },
+    ], { "screen-file": 1, paused: 2 });
+    expect(resolveLiveMediaSelection(backgroundOnly, null)?.id).toBe("screen-file");
+    expect(resolveLiveMediaSelection([], null)).toBeNull();
+
+    const normalWins = activeLiveMediaCandidates([
+      { id: "normal", cue_type: "audio", state: "running", file_path: "normal.wav" },
+      { id: "screen", cue_type: "number", state: "running", background_screensaver: true, children: [
+        { id: "screen-file", cue_type: "image", state: "running", file_path: "screen.png" },
+      ] },
+    ], { normal: 1, "screen-file": 99 });
+    expect(resolveLiveMediaSelection(normalWins, null)?.id).toBe("normal");
+  });
+
+  it("does not let newer background or paused order block a delayed ordinary start", () => {
+    const tree = [
+      { id: "a", cue_type: "audio", state: "running", file_path: "a.wav" },
+      { id: "screen", cue_type: "number", state: "running", background_screensaver: true, children: [
+        { id: "screen-file", cue_type: "video", state: "running", file_path: "screen.mp4" },
+      ] },
+      { id: "paused", cue_type: "audio", state: "paused", file_path: "paused.wav" },
+      { id: "prewait", cue_type: "number", state: "running", children: [
+        { id: "b", cue_type: "video", state: "running", file_path: "b.mp4" },
+      ] },
+    ];
+    const orders = { a: 1, "screen-file": 99, paused: 100, b: 3 };
+    const beforeStart = activeLiveMediaCandidates(tree, orders, { prewait: { wait_phase: "pre_wait" } });
+    const manualBackground = createManualLiveMediaSelection(beforeStart, "screen-file");
+    expect(manualBackground.afterOrder).toBe(1);
+    expect(resolveLiveMediaSelection(beforeStart, manualBackground)?.id).toBe("screen-file");
+
+    const afterStart = activeLiveMediaCandidates(tree, orders);
+    expect(shouldFollowLatestLiveMedia(afterStart, manualBackground)).toBe(true);
+    expect(resolveLiveMediaSelection(afterStart, manualBackground)?.id).toBe("b");
+  });
+
+  it("keeps the latest paused media visible only when no running media remains", () => {
+    const pausedOnly = activeLiveMediaCandidates([
+      { id: "older", cue_type: "audio", state: "paused", file_path: "older.wav" },
+      { id: "newer", cue_type: "video", state: "paused", file_path: "newer.mp4" },
+    ], { older: 1, newer: 2 });
+    expect(resolveLiveMediaSelection(pausedOnly, null)?.id).toBe("newer");
+
+    const withRunning = activeLiveMediaCandidates([
+      { id: "paused", cue_type: "audio", state: "paused", file_path: "paused.wav" },
+      { id: "running", cue_type: "image", state: "running", file_path: "running.png" },
+    ], { paused: 10, running: 2 });
+    expect(resolveLiveMediaSelection(withRunning, null)?.id).toBe("running");
   });
 
   it("never sends Preview or Slice clicks to the program seek command", () => {

@@ -12,7 +12,7 @@ import type { TrimPainter, TrimView } from "../Inspector/TrimStrip";
 import { useLocale } from "../../i18n";
 import { useTimingStore } from "../../stores/timingStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, previewPlayheadForCue, resolveLiveMediaSelection, type ClipEditorTab } from "../../lib/clipEditorPrefs";
+import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, createManualLiveMediaSelection, previewPlayheadForCue, resolveLiveMediaSelection, shouldFollowLatestLiveMedia, type ClipEditorTab, type ManualLiveMediaSelection } from "../../lib/clipEditorPrefs";
 import { findCueIsLoading, isCurrentClipLoad, previewUiForCue, shouldRetainCueDataForTarget, shouldRetryWaveform, type CueBoundPreviewUi } from "../../lib/clipEditorLoadGuards";
 import { formatInspectorSaveError, isCurrentCueRequest, persistThenCommit } from "../Inspector/singleCueSave";
 import { normalizeNumberCueData } from "../Inspector/numberModel";
@@ -124,7 +124,7 @@ export function ClipEditorDock({
   const [rangeStrip, setRangeStrip] =
     useState<{ startMs: number; endMs: number; tiles: HTMLImageElement[] } | null>(null);
   const [localActiveTab, setLocalActiveTab] = useState<ClipEditorTab>("Preview");
-  const [manualLiveCueId, setManualLiveCueId] = useState<string | null>(null);
+  const [manualLiveSelection, setManualLiveSelection] = useState<ManualLiveMediaSelection | null>(null);
   const previewActiveRef = useRef(false);
   const previewPlayingIntentRef = useRef(false);
   const [previewSoundEnabled, setPreviewSoundEnabled] = useState(false);
@@ -162,12 +162,13 @@ export function ClipEditorDock({
     cueStartOrder,
     preWaitTimings,
   ), [liveCueCatalog, cueStartOrder, preWaitTimings]);
-  const selectedLiveCue = resolveLiveMediaSelection(liveCandidates, manualLiveCueId);
+  const selectedLiveCue = resolveLiveMediaSelection(liveCandidates, manualLiveSelection);
   useEffect(() => {
-    if (manualLiveCueId && !liveCandidates.some((candidate) => candidate.id === manualLiveCueId)) {
-      setManualLiveCueId(null);
+    const manualStillActive = manualLiveSelection && liveCandidates.some((candidate) => candidate.id === manualLiveSelection.cueId);
+    if (manualLiveSelection && (!manualStillActive || shouldFollowLatestLiveMedia(liveCandidates, manualLiveSelection))) {
+      setManualLiveSelection(null);
     }
-  }, [liveCandidates, manualLiveCueId]);
+  }, [liveCandidates, manualLiveSelection]);
   const isVideo = cue?.cue_type === "video";
   const isNumber = cue?.cue_type === "number";
   const numberPreviewPositionMs = useNumberPreviewStore((state) =>
@@ -1025,7 +1026,7 @@ export function ClipEditorDock({
       <LiveMediaDock
         candidates={liveCandidates}
         selectedCue={selectedLiveCue}
-        onSelectCue={setManualLiveCueId}
+        onSelectCue={(cueId) => setManualLiveSelection(createManualLiveMediaSelection(liveCandidates, cueId))}
         showPreviewPanel={showLivePanel}
         showSlicePanel={showSlicePanel && !isNumber}
         onTabChange={setActiveTab}
@@ -1366,6 +1367,7 @@ function LiveMediaDock({
           >
             {candidates.map((candidate) => (
               <option key={candidate.id} value={candidate.id}>
+                {candidate.isBackgroundScreensaver ? `${t("editorUi.backgroundScreensaver")} · ` : ""}
                 {candidate.number ? `#${candidate.number} ` : ""}{candidate.name ?? candidate.id}
                 {candidate.file_path ? ` · ${candidate.file_path.split(/[\\/]/).pop()}` : ""}
               </option>
