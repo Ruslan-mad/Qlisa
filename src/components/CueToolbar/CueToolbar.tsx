@@ -157,10 +157,21 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
         <span style={{ whiteSpace: "nowrap", fontSize: 10.5, fontWeight: 500, letterSpacing: 0, lineHeight: 1 }}>{t("toolbar.panicEscLine")}</span>
         <span style={{ whiteSpace: "nowrap", fontSize: 10.5, fontWeight: 500, letterSpacing: 0, lineHeight: 1 }}>{t("toolbar.panicEscDoubleLine")}</span>
       </button>
-      <div className="stage-toolbar-tools" style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto", marginLeft: 16, whiteSpace: "nowrap" }}>
+      <div className="stage-toolbar-tools" style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto", marginLeft: 40, whiteSpace: "nowrap" }}>
         <button className="stage-action-button" style={{ ...buttonStyle, minHeight: 60, padding: "7px 12px", borderRadius: 6, flexShrink: 0, fontSize: 12, fontWeight: 600 }} onClick={() => onToggleRightPanel("active-cues")} title={t("toolbar.activeCuesToggle")} aria-pressed={activeCuesOpen ?? rightPanel === "active-cues"}>
           <Activity size={17} weight="bold" style={{ verticalAlign: "-3px", marginRight: 7 }} />{t("menus.activeCues")}
-          {activeCueCount > 0 && <span style={{ marginLeft: 6, padding: "1px 5px", borderRadius: 8, background: "var(--wc-bg-hover)", color: "var(--wc-text-secondary)", fontSize: 10 }}>{activeCueCount}</span>}
+          <span
+            aria-hidden={activeCueCount === 0}
+            title={activeCueCount > 9999 ? String(activeCueCount) : undefined}
+            style={{
+              width: 44, height: 16, boxSizing: "border-box", marginLeft: 6, padding: "1px 4px",
+              display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+              borderRadius: 8, background: "var(--wc-bg-hover)", color: "var(--wc-text-secondary)",
+              fontSize: 10, fontVariantNumeric: "tabular-nums", visibility: activeCueCount > 0 ? "visible" : "hidden",
+            }}
+          >
+            {activeCueCount > 9999 ? "9999+" : activeCueCount}
+          </span>
         </button>
         <button className="stage-action-button" style={{ ...buttonStyle, minHeight: 60, padding: "7px 12px", borderRadius: 6, flexShrink: 0, fontSize: 12, fontWeight: 600 }} onClick={() => onToggleRightPanel("inspector")} title={t("toolbar.inspectorToggle")} aria-pressed={rightPanel === "inspector"}>{t("menus.inspector")}</button>
       </div>
