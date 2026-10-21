@@ -8,9 +8,9 @@ import { useState, useEffect } from "react";
  * UI surface every display refresh (~60 fps) for the whole lifetime of the
  * animation.  On a weak shared-memory iGPU that monopolises the compositor and
  * starves the UI's own paint while a Video Cue's output window is also presenting —
- * the Inkue UI froze to ~0 fps during video playback.  A discrete opacity toggle
- * repaints only a few times per second and leaves the UI surface idle in between,
- * so the compositor has room for both the UI and the video output.
+ * the Inkue UI froze to ~0 fps during video playback.  A discrete green/red color
+ * toggle repaints only a few times per second and leaves the UI surface idle in
+ * between, so the compositor has room for both the UI and the video output.
  */
 export function RunningLed({ size = 8 }: { size?: number }) {
   const [on, setOn] = useState(true);
@@ -25,10 +25,9 @@ export function RunningLed({ size = 8 }: { size?: number }) {
         width: size,
         height: size,
         borderRadius: "50%",
-        background: "#22c55e",
-        boxShadow: "0 0 4px #22c55e",
+        background: on ? "#22c55e" : "#ef4444",
+        boxShadow: on ? "0 0 4px #22c55e" : "0 0 4px #ef4444",
         flexShrink: 0,
-        opacity: on ? 1 : 0.3,
       }}
     />
   );
