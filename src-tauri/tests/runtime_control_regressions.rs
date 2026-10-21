@@ -167,7 +167,7 @@ fn outer_group_stop_releases_retained_nested_number_video() {
         .lock()
         .unwrap()
         .iter()
-        .any(|call| matches!(call, EngineCall::OutputStopContent)));
+        .any(|call| matches!(call, EngineCall::OutputStopContent { .. })));
     assert!(list.get(&outer_id).unwrap().all_voice_ids().is_empty());
 }
 
@@ -200,7 +200,7 @@ fn transport_stop_all_releases_retained_nested_number_video() {
         .lock()
         .unwrap()
         .iter()
-        .any(|call| matches!(call, EngineCall::OutputStopContent)));
+        .any(|call| matches!(call, EngineCall::OutputStopContent { .. })));
     assert!(list.get(&outer_id).unwrap().all_voice_ids().is_empty());
 }
 

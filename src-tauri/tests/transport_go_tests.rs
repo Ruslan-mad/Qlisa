@@ -19,16 +19,20 @@ use crossbeam_channel::Receiver;
 
 use common::{
     full_registry, preload_silent_video_audio, recording_context, recording_context_headless,
-    CallLog, EngineCall,
+    recording_context_with_voice_liveness, CallLog, EngineCall,
 };
+use inkue_lib::cue::audio_cue::AudioCue;
+use inkue_lib::cue::camera_cue::CameraCue;
 use inkue_lib::cue::context::{CueContext, CueEvent};
 use inkue_lib::cue::devamp_cue::DevampCue;
 use inkue_lib::cue::fade_cue::FadeCue;
 use inkue_lib::cue::group_cue::GroupCue;
+use inkue_lib::cue::image_cue::ImageCue;
 use inkue_lib::cue::registry::CueRegistry;
-use inkue_lib::cue::traits::Cue;
+use inkue_lib::cue::traits::{Cue, RuntimeState};
 use inkue_lib::cue::wait_cue::WaitCue;
-use inkue_lib::cue::types::{ContinueMode, CueType, GroupMode};
+use inkue_lib::cue::types::{ContinueMode, CueState, CueType, FadeCurve, FadeSpec, GroupMode};
+use inkue_lib::cue::video_cue::VideoCue;
 use inkue_lib::show::cue_list::CueList;
 use inkue_lib::show::transport::Transport;
 
@@ -57,6 +61,235 @@ fn browser(reg: &CueRegistry, name: &str) -> Box<dyn Cue> {
     let mut cue = reg.create(&CueType::Browser).unwrap();
     cue.set_name(name.to_string());
     cue
+}
+
+fn background_number(reg: &CueRegistry) -> (Box<dyn Cue>, inkue_lib::cue::types::CueId, inkue_lib::cue::types::CueId) {
+    let master = preloaded_audio(reg);
+    let master_id = master.id();
+    let mut number = GroupCue::new_number();
+    number.add_child(master, -1).unwrap();
+    number.set_number_master(master_id).unwrap();
+    number.set_background_screensaver(true);
+    (Box::new(number), master_id, master_id)
+}
+
+#[test]
+fn background_number_survives_parent_stop_and_workspace_panic_with_mixed_group() {
+    let reg = full_registry();
+    let (number, number_id, master_leaf_id) = background_number(&reg);
+    let ordinary = preloaded_audio(&reg);
+    let ordinary_id = ordinary.id();
+    let mut parent = GroupCue::new();
+    let parent_id = parent.id;
+    parent.children.push(number);
+    parent.children.push(ordinary);
+    let mut lists = vec![list_of(vec![Box::new(parent)])];
+    let (ctx, _rx, _log) = recording_context();
+    let mut transport = Transport::new(ctx);
+
+    lists[0].playhead_cue_id = Some(parent_id);
+    transport.go(&mut lists[0]).unwrap();
+    assert!(lists[0].get_recursive(&number_id).unwrap().is_running());
+    assert!(lists[0].get_recursive(&master_leaf_id).unwrap().is_running());
+    assert!(lists[0].get_recursive(&ordinary_id).unwrap().is_running());
+
+    transport.stop_cue_in_workspace(&mut lists, &parent_id).unwrap();
+    assert!(lists[0].get_recursive(&number_id).unwrap().is_running());
+    assert!(lists[0].get_recursive(&master_leaf_id).unwrap().is_running());
+    assert_eq!(lists[0].get_recursive(&ordinary_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+
+    lists[0].get_mut_recursive(&ordinary_id).unwrap().go(&transport.context).unwrap();
+    transport.hard_stop_all(&mut lists).unwrap();
+    assert!(lists[0].get_recursive(&number_id).unwrap().is_running());
+    assert!(lists[0].get_recursive(&master_leaf_id).unwrap().is_running());
+    assert_eq!(lists[0].get_recursive(&ordinary_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+
+    transport.stop_cue_explicit_in_workspace(&mut lists, &number_id).unwrap();
+    assert_eq!(lists[0].get_recursive(&number_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+    assert_eq!(lists[0].get_recursive(&master_leaf_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+}
+
+#[test]
+fn stopping_mixed_sequential_group_does_not_launch_ordinary_successors() {
+    let reg = full_registry();
+    let ordinary_current = preloaded_audio(&reg);
+    let current_id = ordinary_current.id();
+    let (number, number_id, master_leaf_id) = background_number(&reg);
+    let ordinary_next = preloaded_audio(&reg);
+    let next_id = ordinary_next.id();
+    let mut parent = GroupCue::new();
+    let parent_id = parent.id;
+    parent.mode = GroupMode::Sequential;
+    parent.children.extend([ordinary_current, number, ordinary_next]);
+    let mut list = list_of(vec![Box::new(parent)]);
+    let (ctx, _rx) = test_context();
+    let mut transport = Transport::new(ctx.clone());
+
+    list.playhead_cue_id = Some(parent_id);
+    transport.go(&mut list).unwrap();
+    list.get_mut_recursive(&number_id).unwrap().go(&ctx).unwrap();
+    transport.stop_cue(&mut list, &parent_id).unwrap();
+    list.get_mut_recursive(&parent_id).unwrap().tick(&ctx).unwrap();
+
+    assert_eq!(list.get_recursive(&current_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+    assert!(list.get_recursive(&number_id).unwrap().is_running());
+    assert!(list.get_recursive(&master_leaf_id).unwrap().is_running());
+    assert_eq!(list.get_recursive(&next_id).unwrap().state(), inkue_lib::cue::types::CueState::Standby);
+}
+
+#[test]
+fn background_screensaver_number_flag_roundtrips_and_old_projects_default_false() {
+    let registry = full_registry();
+    let mut number = GroupCue::new_number();
+    number.set_background_screensaver(true);
+    let mut json = number.serialize();
+    assert_eq!(json["background_screensaver"], true);
+    let loaded = registry.from_json(json.clone()).unwrap();
+    assert!(loaded.background_screensaver());
+
+    json.as_object_mut().unwrap().remove("background_screensaver");
+    let old_project_number = registry.from_json(json).unwrap();
+    assert!(!old_project_number.background_screensaver());
+}
+
+#[test]
+fn targeted_stop_apis_propagate_cue_errors_but_panic_continues_siblings() {
+    for (hard, workspace) in [(false, false), (true, false), (false, true), (true, true)] {
+        let (context, _rx, _log, liveness) = recording_context_with_voice_liveness();
+        let voice_id = uuid::Uuid::new_v4();
+        liveness.start(voice_id);
+        liveness.fail_stop(voice_id);
+        let mut cue = AudioCue::new();
+        let cue_id = cue.id();
+        cue.restore_runtime_state(RuntimeState {
+            state: CueState::Running,
+            voice_id: Some(voice_id),
+            started_at: None,
+            action_started_at: None,
+        });
+        let mut list = list_of(vec![Box::new(cue)]);
+        let mut transport = Transport::new(context);
+
+        let error = if workspace {
+            let mut lists = vec![list];
+            let result = if hard {
+                transport.hard_stop_cue_in_workspace(&mut lists, &cue_id)
+            } else {
+                transport.stop_cue_in_workspace(&mut lists, &cue_id)
+            };
+            assert_eq!(lists[0].get_recursive(&cue_id).unwrap().state(), CueState::Running);
+            result.unwrap_err()
+        } else {
+            let result = if hard {
+                transport.hard_stop_cue(&mut list, &cue_id)
+            } else {
+                transport.stop_cue(&mut list, &cue_id)
+            };
+            assert_eq!(list.get_recursive(&cue_id).unwrap().state(), CueState::Running);
+            result.unwrap_err()
+        };
+        assert!(error.to_string().contains("injected audio stop failure"));
+    }
+
+    let (context, _rx, log, liveness) = recording_context_with_voice_liveness();
+    let failed_voice = uuid::Uuid::new_v4();
+    let next_voice = uuid::Uuid::new_v4();
+    liveness.start(failed_voice);
+    liveness.start(next_voice);
+    liveness.fail_stop(failed_voice);
+    let mut failed_cue = AudioCue::new();
+    let failed_id = failed_cue.id();
+    failed_cue.restore_runtime_state(RuntimeState {
+        state: CueState::Running,
+        voice_id: Some(failed_voice),
+        started_at: None,
+        action_started_at: None,
+    });
+    let mut next_cue = AudioCue::new();
+    next_cue.restore_runtime_state(RuntimeState {
+        state: CueState::Running,
+        voice_id: Some(next_voice),
+        started_at: None,
+        action_started_at: None,
+    });
+    let mut lists = vec![list_of(vec![Box::new(failed_cue), Box::new(next_cue)])];
+    let mut transport = Transport::new(context);
+
+    transport.hard_stop_all(&mut lists).unwrap();
+
+    let attempted_stops = log.lock().unwrap().iter()
+        .filter(|call| matches!(call, EngineCall::AudioStopVoice { .. }))
+        .count();
+    assert_eq!(attempted_stops, 2, "panic must continue after the first cue stop error");
+    assert_eq!(lists[0].get_recursive(&failed_id).unwrap().state(), CueState::Standby);
+}
+
+#[test]
+fn soft_visual_stops_use_default_fade_but_authored_zero_and_hard_stop_cut() {
+    let make_runtime = |voice_id| RuntimeState {
+        state: CueState::Running,
+        voice_id: Some(voice_id),
+        started_at: None,
+        action_started_at: None,
+    };
+
+    let (context, _rx, log) = recording_context();
+    let mut video = VideoCue::new();
+    let video_id = video.id();
+    video.restore_runtime_state(make_runtime(uuid::Uuid::new_v4()));
+    let mut list = list_of(vec![Box::new(video)]);
+    Transport::new(context).stop_cue(&mut list, &video_id).unwrap();
+    assert!(log.lock().unwrap().iter().any(|call| matches!(call,
+        EngineCall::OutputStopContent { visual_fade_ms: 500, audio_fade_ms: 500 })));
+
+    let (context, _rx, log) = recording_context();
+    let mut image = ImageCue::new();
+    let image_id = image.id();
+    image.restore_runtime_state(make_runtime(uuid::Uuid::new_v4()));
+    let mut list = list_of(vec![Box::new(image)]);
+    Transport::new(context).stop_cue(&mut list, &image_id).unwrap();
+    assert!(log.lock().unwrap().iter().any(|call| matches!(call,
+        EngineCall::OutputStopContent { visual_fade_ms: 500, audio_fade_ms: 0 })));
+
+    let (context, _rx, log) = recording_context();
+    let mut camera = CameraCue::new();
+    let camera_id = camera.id();
+    camera.restore_runtime_state(make_runtime(uuid::Uuid::new_v4()));
+    let mut list = list_of(vec![Box::new(camera)]);
+    Transport::new(context).stop_cue(&mut list, &camera_id).unwrap();
+    assert!(log.lock().unwrap().iter().any(|call| matches!(call,
+        EngineCall::OutputStopContent { visual_fade_ms: 500, audio_fade_ms: 500 })));
+
+    let zero_fade = Some(FadeSpec { duration_ms: 0, curve: FadeCurve::Linear });
+    let (context, _rx, log) = recording_context();
+    let mut video = VideoCue::new();
+    video.fade_out = zero_fade.clone();
+    video.video_fade_out = zero_fade.clone();
+    let video_id = video.id();
+    video.restore_runtime_state(make_runtime(uuid::Uuid::new_v4()));
+    let mut list = list_of(vec![Box::new(video)]);
+    Transport::new(context).stop_cue(&mut list, &video_id).unwrap();
+    assert!(log.lock().unwrap().iter().any(|call| matches!(call,
+        EngineCall::OutputStopContent { visual_fade_ms: 0, audio_fade_ms: 0 })));
+
+    let (context, _rx, log) = recording_context();
+    let mut image = ImageCue::new();
+    image.fade_out = zero_fade;
+    let image_id = image.id();
+    image.restore_runtime_state(make_runtime(uuid::Uuid::new_v4()));
+    let mut list = list_of(vec![Box::new(image)]);
+    Transport::new(context).stop_cue(&mut list, &image_id).unwrap();
+    assert!(log.lock().unwrap().iter().any(|call| matches!(call,
+        EngineCall::OutputStopContent { visual_fade_ms: 0, .. })));
+
+    let (context, _rx, log) = recording_context();
+    let mut video = VideoCue::new();
+    let video_id = video.id();
+    video.restore_runtime_state(make_runtime(uuid::Uuid::new_v4()));
+    let mut list = list_of(vec![Box::new(video)]);
+    Transport::new(context).hard_stop_cue(&mut list, &video_id).unwrap();
+    assert!(log.lock().unwrap().iter().any(|call| matches!(call,
+        EngineCall::OutputStopVoice { fade_ms: 0 })));
 }
 
 #[test]

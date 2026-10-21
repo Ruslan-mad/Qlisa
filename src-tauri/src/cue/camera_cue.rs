@@ -681,20 +681,27 @@ impl Cue for CameraCue {
     fn stop(&mut self, context: &CueContext) -> Result<()> {
         self.in_pre_wait = false;
 
+        let mut stopped_attached_audio = false;
         if let Some(vid) = self.active_voice_id.take() {
             let fade_ms = self
                 .video_fade_out
                 .as_ref()
                 .map(|f| f.duration_ms as u32)
-                .unwrap_or(0);
-            context.output_engine.stop_content(vid, fade_ms, 0);
+                .unwrap_or(context.stop_fade_ms);
+            context.output_engine.stop_content(vid, fade_ms, context.stop_fade_ms);
+            stopped_attached_audio = self.active_audio_voice_id.is_some();
         }
         if let Some(audio) = self.active_audio_voice_id.take() {
-            let _ = context.audio_engine.stop_voice(
-                audio,
-                0,
-                crate::engine::ring_command::FadeCurve::Linear,
-            );
+            // The output engine owns the attached feed when a visual voice is
+            // present and already applies the requested fade. Avoid issuing a
+            // second Stop, which would restart that fade from its full length.
+            if !stopped_attached_audio {
+                let _ = context.audio_engine.stop_voice(
+                    audio,
+                    context.stop_fade_ms,
+                    crate::engine::ring_command::FadeCurve::SCurve,
+                );
+            }
         }
         // Stop joins the capture thread. Dropping it after detaching the
         // mailbox from the output guarantees no frame is uploaded after STOP.

@@ -332,7 +332,7 @@ impl Cue for ImageCue {
                 .fade_out
                 .as_ref()
                 .map(|f| f.duration_ms as u32)
-                .unwrap_or(0);
+                .unwrap_or(context.stop_fade_ms);
             context.output_engine.stop_content(vid, fade_ms, 0);
         }
 

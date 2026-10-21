@@ -841,12 +841,12 @@ impl Cue for VideoCue {
                 .video_fade_out
                 .as_ref()
                 .map(|f| f.duration_ms as u32)
-                .unwrap_or(0);
+                .unwrap_or(context.stop_fade_ms);
             let audio_fade_ms = self
                 .fade_out
                 .as_ref()
                 .map(|f| f.duration_ms as u32)
-                .unwrap_or(0);
+                .unwrap_or(context.stop_fade_ms);
             context
                 .output_engine
                 .stop_content(vid, visual_fade_ms, audio_fade_ms);

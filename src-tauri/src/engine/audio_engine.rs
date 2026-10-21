@@ -5046,6 +5046,70 @@ mod tests {
     }
 
     #[test]
+    fn soft_stop_keeps_mixing_voice_through_requested_fade_duration() {
+        const FADE_FRAMES: usize = 192; // 4 ms at 48 kHz
+        const BLOCK_FRAMES: usize = 64;
+
+        let voice = Arc::new(Voice::new(
+            Arc::new(vec![1.0_f32; 512 * 2]),
+            2,
+            48_000,
+            1.0,
+            0.0,
+        ));
+        voice.set_playing();
+        let voice_id = voice.id;
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        let feeds: Arc<Mutex<Vec<InputFeed>>> = Arc::new(Mutex::new(Vec::new()));
+        let (mut cmd_prod, mut cmd_cons) = HeapRb::<AudioCommand>::new(16).split();
+        let (mut status_prod, _) = HeapRb::<AudioStatus>::new(16).split();
+        let master = Arc::new(std::sync::atomic::AtomicU32::new(f32::to_bits(1.0)));
+        let period = Arc::new(std::sync::atomic::AtomicU32::new(BLOCK_FRAMES as u32));
+        let taps = empty_program_audio_taps();
+        cmd_prod.try_push(AudioCommand::Stop {
+            voice_id,
+            fade_ms: 4,
+            fade_curve: FadeCurve::Linear,
+        }).unwrap();
+
+        let mut block_levels = Vec::new();
+        for block in 0..3 {
+            let mut output = vec![0.0_f32; BLOCK_FRAMES * 2];
+            let mut program = vec![0.0_f32; BLOCK_FRAMES * 2];
+            fill_buffer(
+                &mut output,
+                &mut program,
+                2,
+                48_000,
+                &pool,
+                &feeds,
+                &taps,
+                &mut cmd_cons,
+                &mut status_prod,
+                &master,
+                &period,
+            );
+            block_levels.push(output[0]);
+            if block < 2 {
+                assert_eq!(voice.voice_state(), VoiceState::FadingOut);
+                assert!(output.iter().any(|sample| *sample > 0.0));
+            } else {
+                assert_eq!(voice.voice_state(), VoiceState::Stopped);
+                assert!(output[BLOCK_FRAMES * 2 - 4] > 0.0, "last rendered fade sample remains audible");
+                assert_eq!(output[BLOCK_FRAMES * 2 - 2], 0.0, "the voice is silent after fade completion");
+            }
+        }
+
+        let center_gain = std::f32::consts::FRAC_1_SQRT_2;
+        for (block, level) in block_levels.iter().enumerate() {
+            let elapsed = (block * BLOCK_FRAMES) as f32;
+            let expected = center_gain * (1.0 - elapsed / FADE_FRAMES as f32);
+            assert!((level - expected).abs() < 1e-6, "block {block}: expected {expected}, got {level}");
+        }
+        assert!(block_levels[0] > block_levels[1] && block_levels[1] > block_levels[2]);
+    }
+
+    #[test]
     fn sr_ratio_44100_on_48000() {
         // 1 s of 48 kHz output = 48 000 frames → should consume 44 100 source frames.
         let voice = make_voice(220_500, 2, 44_100, 1.0);
