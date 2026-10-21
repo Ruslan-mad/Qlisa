@@ -67,7 +67,7 @@ function ActiveCueRow({ cue }: { cue: CatalogActiveCue }) {
         background: "var(--wc-bg-app)", opacity: paused ? 0.88 : 1,
       }}
     >
-      {progress !== null && <div aria-hidden="true" style={{ position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 0, pointerEvents: "none", height: 3, background: "var(--wc-bg-deepest)" }}><div style={{ height: "100%", width: `${progress}%`, background: stateColor, boxShadow: `0 0 9px ${stateColor}88`, transition: "width 120ms linear" }} /></div>}
+      {progress !== null && <div aria-hidden="true" style={{ position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 0, pointerEvents: "none", height: 10, background: "var(--wc-bg-deepest)" }}><div style={{ height: "100%", width: `${progress}%`, background: stateColor, boxShadow: `0 0 9px ${stateColor}88`, transition: "width 120ms linear" }} /></div>}
       {cueColor !== "transparent" && <div aria-hidden="true" style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 3, zIndex: 1, background: cueColor }} />}
       <div style={{ position: "relative", zIndex: 1, height: 53, minWidth: 0, display: "flex", alignItems: "center", gap: 9, padding: "0 9px 0 11px" }}>
         {canPauseCue(cue) ? <button type="button" onClick={() => run(() => paused ? resumeCue(cue.id) : pauseCue(cue.id))} title={t(paused ? "activeCues.resume" : "activeCues.pause")} aria-label={t(paused ? "activeCues.resume" : "activeCues.pause")} style={iconButtonStyle}>
