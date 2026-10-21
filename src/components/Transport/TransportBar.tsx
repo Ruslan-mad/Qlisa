@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Pause, Play, SpeakerHigh, Stop } from "@phosphor-icons/react";
-import { go, stopAll, pauseCue, resumeCue, setMasterVolume, getPreferences, openMixerWindow } from "../../lib/commands";
+import { go, stopCue, pauseCue, resumeCue, setMasterVolume, getPreferences, openMixerWindow } from "../../lib/commands";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useTransportStore } from "../../stores/transportStore";
 import { OscMonitor } from "../Osc/OscMonitor";
@@ -13,6 +13,7 @@ import { useLocale } from "../../i18n";
 import { transportErrorFromEvent } from "./transportErrorModel";
 import { MediaConversionStatus } from "./MediaConversionStatus";
 import { flattenCatalogActiveCues, getCatalogPauseTargets } from "../ActiveCues/activeCueModel";
+import { stopSelectedCueSet } from "../CueList/cueListKeyboard";
 
 interface Props {
   onRefresh: () => void;
@@ -205,8 +206,10 @@ function VolumeRow({
 const OSC_ACTIVITY_MS = 300;
 
 export function TransportBar({ onRefresh }: Props) {
-  const { t, locale } = useLocale();
+  const { t } = useLocale();
   const cueCatalog = useWorkspaceStore((state) => state.cueCatalog);
+  const selectedCueIds = useWorkspaceStore((state) => state.selectedCueIds);
+  const cues = useWorkspaceStore((state) => state.cues);
   const { masterPeakL, masterPeakR, oscActivityAt } = useTransportStore();
 
   const [volumeDb, setVolumeDb] = useState(0);
@@ -375,34 +378,27 @@ export function TransportBar({ onRefresh }: Props) {
         <span>GO</span><small style={{ fontSize: 10, fontWeight: 500, letterSpacing: 0 }}>Space</small>
       </button>
 
-      {/* STOP */}
+      {/* Stop the currently selected cue set; matches the Cue List S shortcut. */}
       <button
-        onMouseDown={(e) => {
-          if (e.button !== 0) return;
-          document.dispatchEvent(
-            new CustomEvent("inkue:cue-drag-start", {
-              detail: { cueType: "stop", startX: e.clientX, startY: e.clientY },
-            }),
-          );
-        }}
-        onClick={async () => { await stopAll().catch(console.error); onRefresh(); }}
-        title={t("inspector.stop") + " — " + t("editUi.stopSelected") + " · " + (locale === "ru" ? "Остановить всё (Escape) · Перетащите в список cue для вставки cue остановки" : t("components.stopAll"))}
+        disabled={selectedCueIds.length === 0}
+        onClick={async () => { await stopSelectedCueSet(selectedCueIds, cues, (cueId) => stopCue(cueId).catch(console.error)); onRefresh(); }}
+        title={t("toolbar.stopSelectedButtonHint")}
         className="stage-transport-button stage-transport-stop"
         style={{
           width: 118, height: 72, padding: "7px 12px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
           fontSize: 15,
           fontWeight: 600,
-          background: "#991b1b",
-          color: "white",
+          background: selectedCueIds.length === 0 ? "var(--wc-bg-surface)" : "#991b1b",
+          color: selectedCueIds.length === 0 ? "var(--wc-text-faint)" : "white",
           border: "none",
           borderRadius: 8,
-          cursor: "grab",
+          cursor: selectedCueIds.length === 0 ? "default" : "pointer",
           flexShrink: 0,
           userSelect: "none",
         }}
       >
         <Stop size={22} weight="fill" aria-hidden="true" />
-        <span>STOP</span><small style={{ fontSize: 10, fontWeight: 500, letterSpacing: 0 }}>Esc</small>
+        <span>STOP</span><small style={{ fontSize: 10, fontWeight: 500, letterSpacing: 0 }}>{t("toolbar.stopSelectedButtonLabel")}</small>
       </button>
 
       {/* PAUSE / RESUME (toggle) */}

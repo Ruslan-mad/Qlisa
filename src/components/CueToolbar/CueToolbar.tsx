@@ -10,6 +10,7 @@ type Props = {
   rightPanel: string;
   activeCuesOpen?: boolean;
   onToggleRightPanel: (panel: "active-cues" | "inspector") => void;
+  onPanic: (hard: boolean) => void;
   onSettings: () => void;
   onAdd: (type: CueType) => void;
   onDragStart: (type: CueType, event: React.MouseEvent) => void;
@@ -20,7 +21,7 @@ const buttonStyle: React.CSSProperties = {
   borderRadius: 4, color: "var(--wc-text)", cursor: "pointer", fontSize: 12,
 };
 
-export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggleRightPanel, onAdd, onDragStart }: Props) {
+export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggleRightPanel, onPanic, onAdd, onDragStart }: Props) {
   const { t, locale } = useLocale();
   const leftRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
@@ -32,6 +33,7 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
   const [hoveredMain, setHoveredMain] = useState<CueType | null>(null);
   const [hoveredMore, setHoveredMore] = useState(false);
+  const lastPanicClick = useRef(0);
   const descriptors = CUE_TOOLBAR_DESCRIPTORS;
   const layout = useMemo(() => resolveCueToolbarLayout(availableWidth, dimensions.widths, dimensions.more), [availableWidth, dimensions]);
 
@@ -135,6 +137,14 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
         </div>
       </div>
       <div className="stage-toolbar-tools" style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto", marginLeft: "auto", whiteSpace: "nowrap" }}>
+        <button className="stage-action-button" style={{ ...buttonStyle, minHeight: 60, padding: "7px 12px", borderRadius: 6, flexShrink: 0, fontSize: 12, fontWeight: 700, color: "#fca5a5", borderColor: "#991b1b" }} onClick={() => {
+          const now = Date.now();
+          const hard = now - lastPanicClick.current < 500;
+          lastPanicClick.current = now;
+          onPanic(hard);
+        }} title={t("toolbar.panicButtonHint")}>
+          {t("toolbar.panicButtonLabel")}
+        </button>
         <button className="stage-action-button" style={{ ...buttonStyle, minHeight: 60, padding: "7px 12px", borderRadius: 6, flexShrink: 0, fontSize: 12, fontWeight: 600 }} onClick={() => onToggleRightPanel("active-cues")} title={t("toolbar.activeCuesToggle")} aria-pressed={activeCuesOpen ?? rightPanel === "active-cues"}>
           <Activity size={17} weight="bold" style={{ verticalAlign: "-3px", marginRight: 7 }} />{t("menus.activeCues")}
           {activeCueCount > 0 && <span style={{ marginLeft: 6, padding: "1px 5px", borderRadius: 8, background: "var(--wc-bg-hover)", color: "var(--wc-text-secondary)", fontSize: 10 }}>{activeCueCount}</span>}

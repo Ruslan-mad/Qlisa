@@ -22,7 +22,7 @@ import { FullscreenControl } from "./components/Transport/FullscreenControl";
 import { useTauriEvents } from "./hooks/useTauriEvents";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useWorkspaceStore } from "./stores/workspaceStore";
-import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, getWorkspaceInfo, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, getCueLists, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences } from "./lib/commands";
+import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, getWorkspaceInfo, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, getCueLists, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences, stopAll, hardStopAll } from "./lib/commands";
 import { AboutDialog } from "./components/About/AboutDialog";
 import { UpdateDialog } from "./components/Update/UpdateDialog";
 import { useUpdateStore } from "./stores/updateStore";
@@ -1295,6 +1295,11 @@ export default function App() {
     await refreshCues();
   }, [refreshCues]);
 
+  const handlePanic = useCallback(async (hard: boolean) => {
+    await (hard ? hardStopAll() : stopAll()).catch(console.error);
+    await handleRefresh();
+  }, [handleRefresh]);
+
   useKeyboardShortcuts(
     handleRefresh,
     () => void openPreferencesWindow(),
@@ -1689,6 +1694,7 @@ export default function App() {
           activeCueCount={activeCueCount}
           rightPanel={rightPanel}
           activeCuesOpen={activeCuesOpen}
+          onPanic={(hard) => void handlePanic(hard)}
           onToggleRightPanel={(panel) => panel === "active-cues"
             ? setActiveCuesOpen((value) => !value)
             : setRightPanel((value) => value === "inspector" ? "closed" : "inspector")}
