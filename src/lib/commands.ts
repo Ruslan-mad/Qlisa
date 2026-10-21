@@ -3,6 +3,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { cancelPendingCueListGo, queueCueListGo, runCueListContextTransition } from "./cueListGoQueue";
 import type {
   AppPreferences,
   AudioCueData,
@@ -77,13 +78,26 @@ export const scheduleMediaRuntimeReinstall = () => invoke<void>("schedule_media_
 // Transport
 // ---------------------------------------------------------------------------
 
-export const go = () => invoke<void>("go");
+export const go = () => queueCueListGo(() => invoke<void>("go"));
 export const getBrowserSurfaceState = () => invoke<BrowserSurfaceState>("get_browser_surface_state");
 export const goCue = (cueId: CueId) => invoke<void>("go_cue", { cueId });
 export const setMasterVolume = (db: number) => invoke<void>("set_master_volume", { db });
-export const stopAll = () => invoke<void>("stop_all");
-export const hardStopAll = () => invoke<void>("hard_stop_all");
-export const stopCue = (cueId: CueId) => invoke<void>("stop_cue", { cueId });
+export const stopAll = () => {
+  cancelPendingCueListGo();
+  return invoke<void>("stop_all");
+};
+export const hardStopAll = () => {
+  cancelPendingCueListGo();
+  return invoke<void>("hard_stop_all");
+};
+export const stopCue = (cueId: CueId) => {
+  cancelPendingCueListGo();
+  return invoke<void>("stop_cue", { cueId });
+};
+export const stopCueExplicit = (cueId: CueId) => {
+  cancelPendingCueListGo();
+  return invoke<void>("stop_cue_explicit", { cueId });
+};
 export const pauseCue = (cueId: CueId) => invoke<void>("pause_cue", { cueId });
 export const seekCue = (cueId: CueId, positionMs: number) =>
   invoke<void>("seek_cue", { cueId, positionMs: Math.max(0, Math.round(positionMs)) });
@@ -364,15 +378,15 @@ export const getPlayhead = () => invoke<CueId | null>("get_playhead");
 // Workspace
 // ---------------------------------------------------------------------------
 
-export const newWorkspace = () => invoke<void>("new_workspace");
+export const newWorkspace = () => runCueListContextTransition(() => invoke<void>("new_workspace"));
 export const saveWorkspace = (path: string) =>
   invoke<void>("save_workspace", { path });
 export const loadWorkspace = (path: string) =>
-  invoke<void>("load_workspace", { path });
+  runCueListContextTransition(() => invoke<void>("load_workspace", { path }));
 export const drainPendingProjectOpens = () =>
   invoke<string[]>("drain_pending_project_opens");
 export const importQlabWorkspace = (path: string) =>
-  invoke<ImportReport>("import_qlab_workspace", { path });
+  runCueListContextTransition(() => invoke<ImportReport>("import_qlab_workspace", { path }));
 export const getWorkspaceInfo = () => invoke<WorkspaceInfo>("get_workspace_info");
 export const collectAndSave = (targetDir: string) =>
   invoke<CollectReport>("collect_and_save_workspace", { targetDir });
@@ -428,7 +442,7 @@ export const removeCueList = (id: string) =>
 export const renameCueList = (id: string, name: string) =>
   invoke<void>("rename_cue_list", { id, name });
 export const setActiveCueList = (id: string) =>
-  invoke<void>("set_active_cue_list", { id });
+  runCueListContextTransition(() => invoke<void>("set_active_cue_list", { id }));
 export const setCueListMode = (id: string, mode: CueListMode) =>
   invoke<void>("set_cue_list_mode", { id, mode });
 

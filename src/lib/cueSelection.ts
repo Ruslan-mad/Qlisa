@@ -57,26 +57,6 @@ export function cueRangeFromVisibleOrder(
   return visibleOrder.slice(lo, hi + 1);
 }
 
-/**
- * Selection produced by sweeping the mouse from one row to another.
- *
- * A plain sweep replaces the current selection with the inclusive range.  An
- * additive sweep (started with Ctrl/Cmd) keeps the existing selection and
- * adds the range, which makes the gesture useful for building discontiguous
- * selections without making row reordering ambiguous.
- */
-export function cueSelectionFromSweep(
-  anchorId: CueId,
-  endId: CueId,
-  visibleOrder: readonly CueId[],
-  existingIds: readonly CueId[] = [],
-  additive = false,
-): CueSelection {
-  const range = cueRangeFromVisibleOrder(anchorId, endId, visibleOrder);
-  const ids = additive ? [...existingIds, ...range] : range;
-  return normalizeCueSelection(endId, ids);
-}
-
 export interface VisibleCueNode<T extends VisibleCueNode<T>> {
   id: CueId;
   cue_type: string;

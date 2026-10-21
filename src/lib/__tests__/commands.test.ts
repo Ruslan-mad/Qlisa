@@ -6,6 +6,7 @@
 // that could silently drift and send a malformed payload.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { queueCueListPlayheadUpdate } from "../cueListGoQueue";
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
@@ -19,6 +20,122 @@ beforeEach(() => {
 });
 
 describe("command wrappers forward the correct name + args", () => {
+  it("makes immediate GO wait for the latest row click", async () => {
+    await queueCueListPlayheadUpdate(async () => {});
+    const finish: Array<() => void> = [];
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "set_playhead") {
+        return new Promise<void>((resolve) => { finish.push(resolve); });
+      }
+      return Promise.resolve();
+    });
+
+    const first = queueCueListPlayheadUpdate(() => cmd.setPlayhead("cue-1"));
+    const second = queueCueListPlayheadUpdate(() => cmd.setPlayhead("cue-2"));
+    const starting = cmd.go();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(invokeMock.mock.calls).toEqual([["set_playhead", { cueId: "cue-1" }]]);
+
+    finish[0]();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    expect(invokeMock.mock.calls[1]).toEqual(["set_playhead", { cueId: "cue-2" }]);
+    finish[1]();
+    await Promise.all([first, second, starting]);
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["set_playhead", "set_playhead", "go"]);
+  });
+
+  it("keeps GO between the click before it and the click after it", async () => {
+    await queueCueListPlayheadUpdate(async () => {});
+    let finishA!: () => void;
+    let finishGo!: () => void;
+    let finishB!: () => void;
+    invokeMock.mockImplementation((command: string, args?: { cueId?: string }) => {
+      if (command === "set_playhead" && args?.cueId === "cue-a") {
+        return new Promise<void>((resolve) => { finishA = resolve; });
+      }
+      if (command === "go") return new Promise<void>((resolve) => { finishGo = resolve; });
+      if (command === "set_playhead" && args?.cueId === "cue-b") {
+        return new Promise<void>((resolve) => { finishB = resolve; });
+      }
+      return Promise.resolve();
+    });
+
+    const clickA = queueCueListPlayheadUpdate(() => cmd.setPlayhead("cue-a"));
+    const starting = cmd.go();
+    const clickB = queueCueListPlayheadUpdate(() => cmd.setPlayhead("cue-b"));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(invokeMock.mock.calls).toEqual([["set_playhead", { cueId: "cue-a" }]]);
+
+    finishA();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["set_playhead", "go"]);
+    finishGo();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
+    expect(invokeMock.mock.calls[2]).toEqual(["set_playhead", { cueId: "cue-b" }]);
+    finishB();
+    await Promise.all([clickA, starting, clickB]);
+  });
+
+  it("serializes rapid GO commands in their request order", async () => {
+    await queueCueListPlayheadUpdate(async () => {});
+    let finishFirst!: () => void;
+    invokeMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishFirst = resolve; }));
+    const first = cmd.go();
+    const second = cmd.go();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(invokeMock).toHaveBeenCalledWith("go");
+    finishFirst();
+    await Promise.all([first, second]);
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["go", "go"]);
+  });
+
+  it("does not GO after a failed row positioning until a later click succeeds", async () => {
+    await queueCueListPlayheadUpdate(async () => {});
+    const failure = new Error("position failed");
+    invokeMock.mockRejectedValueOnce(failure);
+    const positioning = queueCueListPlayheadUpdate(() => cmd.setPlayhead("cue-new"));
+    const starting = cmd.go();
+    await expect(positioning).rejects.toBe(failure);
+    await expect(starting).rejects.toBe(failure);
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["set_playhead"]);
+
+    invokeMock.mockResolvedValue(undefined);
+    await queueCueListPlayheadUpdate(() => cmd.setPlayhead("cue-retried"));
+    await cmd.go();
+    expect(invokeMock.mock.calls.slice(-2).map(([command]) => command)).toEqual(["set_playhead", "go"]);
+  });
+
+  it.each([
+    ["Stop All", () => cmd.stopAll(), "stop_all"],
+    ["Hard Stop", () => cmd.hardStopAll(), "hard_stop_all"],
+    ["Stop selected", () => cmd.stopCue("cue-selected"), "stop_cue"],
+    ["Stop selected explicit", () => cmd.stopCueExplicit("cue-selected"), "stop_cue_explicit"],
+  ])("cancels waiting GO when %s arrives, while preserving Playhead positioning", async (_label, stop, stopCommand) => {
+    await queueCueListPlayheadUpdate(async () => {});
+    let finish!: () => void;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "set_playhead") return new Promise<void>((resolve) => { finish = resolve; });
+      return Promise.resolve();
+    });
+    const positioning = queueCueListPlayheadUpdate(() => cmd.setPlayhead("cue-selected"));
+    const starting = cmd.go();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    const stopping = stop();
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["set_playhead", stopCommand]);
+    finish();
+    await Promise.all([positioning, starting, stopping]);
+    expect(invokeMock.mock.calls.map(([command]) => command)).not.toContain("go");
+  });
+
+  it("blocks GO after a failed workspace transition instead of using the old show", async () => {
+    await queueCueListPlayheadUpdate(async () => {});
+    const failure = new Error("load failed");
+    invokeMock.mockRejectedValueOnce(failure);
+    await expect(cmd.loadWorkspace("new-show.inkue")).rejects.toBe(failure);
+    await expect(cmd.go()).rejects.toBe(failure);
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["load_workspace"]);
+  });
+
   it("Output Monitor sends monotonic selection tokens and uses binary frame responses", async () => {
     const first = cmd.setOutputMonitorSource("display-1", 100);
     const second = cmd.setOutputMonitorSource(null, 101);

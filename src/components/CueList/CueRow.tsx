@@ -158,8 +158,6 @@ interface Props {
   parentGroupId?: string | null;
   /** Called on mousedown to start a cue drag operation. */
   onCueDragStart: (id: string, index: number, e: React.MouseEvent) => void;
-  /** Called from the narrow left gutter to sweep-select rows without starting a reorder. */
-  onSelectionDragStart: (id: string, index: number, e: React.MouseEvent) => void;
   onClick: (id: string, index: number, parentGroupId: string | null, e: React.MouseEvent) => void;
   onDoubleClick: (cue: CueSummary) => void;
   onContextMenu: (id: string, parentGroupId: string | null, e: React.MouseEvent) => void;
@@ -200,7 +198,6 @@ function CueRowImpl({
   isGroupDropTarget = false,
   parentGroupId = null,
   onCueDragStart,
-  onSelectionDragStart,
   onClick,
   onDoubleClick,
   onContextMenu,
@@ -658,23 +655,6 @@ function CueRowImpl({
       case "resolution":
         return mediaInfoCell("resolution");
 
-      case "output":
-        return (
-          <span
-            style={{
-              display: "block",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              color: "var(--wc-text)",
-              fontSize: 12,
-              paddingLeft: 5,
-            }}
-          >
-            {cue.output_patch_name ?? ""}
-          </span>
-        );
-
       case "outputs":
         return (
           <div
@@ -896,45 +876,6 @@ function CueRowImpl({
       }}
       onContextMenu={(e) => onContextMenu(cue.id, parentGroupId ?? null, e)}
     >
-      {/* The left gutter is an unambiguous mouse-selection affordance.  Row
-          dragging remains available from the rest of the row, so a sweep can
-          never accidentally reorder cues. */}
-      <div
-        aria-label={locale === "ru" ? "Потяните для выделения диапазона cue" : "Drag to select a cue range"}
-        title={locale === "ru" ? "Потяните для выделения диапазона" : "Drag to select a range"}
-        data-selection-gutter="true"
-        onMouseDown={(e) => {
-          e.stopPropagation();
-          onSelectionDragStart(cue.id, cueIndex, e);
-        }}
-        style={{
-          position: "absolute",
-          left: 0,
-          top: 0,
-          bottom: 0,
-          width: 8,
-          cursor: "crosshair",
-          zIndex: 5,
-        }}
-      >
-        {/* A quiet three-dot handle keeps the gesture discoverable without
-            covering the playhead cell or the cue-colour stripe. */}
-        <span
-          aria-hidden="true"
-          style={{
-            position: "absolute",
-            left: 5,
-            top: "50%",
-            width: 2,
-            height: 2,
-            borderRadius: "50%",
-            background: "var(--wc-text-faint)",
-            boxShadow: "0 -4px 0 var(--wc-text-faint), 0 4px 0 var(--wc-text-faint)",
-            opacity: 0.8,
-            transform: "translateY(-50%)",
-          }}
-        />
-      </div>
       {/* Color indicator strip — shifts right with nesting depth (4 px per level).
           z-index 0 keeps it below column content (playhead indicator, etc.).
           Always drawn — "full row" adds a background tint on top of this, it

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cueRangeFromVisibleOrder, cueSelectionFromSweep, flattenVisibleCueTree, isMultiSelectModifier, toggleCueSelection } from "../cueSelection";
+import { cueRangeFromVisibleOrder, flattenVisibleCueTree, isMultiSelectModifier, toggleCueSelection } from "../cueSelection";
 
 describe("cue selection helpers", () => {
   it("moves primary focus to the nearest remaining cue when toggled off", () => {
@@ -50,11 +50,4 @@ describe("cue selection helpers", () => {
     expect(cueRangeFromVisibleOrder("b", "d", order)).toEqual(["b", "c", "d"]);
   });
 
-  it("selects an inclusive range while sweeping the mouse from an anchor row", () => {
-    const order = ["a", "b", "c", "d", "e"];
-    expect(cueSelectionFromSweep("b", "d", order))
-      .toEqual({ selectedCueId: "d", selectedCueIds: ["b", "c", "d"] });
-    expect(cueSelectionFromSweep("d", "b", order, ["a"], true))
-      .toEqual({ selectedCueId: "b", selectedCueIds: ["a", "b", "c", "d"] });
-  });
 });

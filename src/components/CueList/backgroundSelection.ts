@@ -5,7 +5,7 @@ export function prepareBackgroundSelection(
 ): boolean {
   if (
     target.closest("[data-cue-id]") ||
-    target.closest("button, input, textarea, select, [contenteditable], [data-resize], [data-selection-gutter]")
+    target.closest("button, input, textarea, select, [contenteditable], [data-resize]")
   ) return false;
 
   // Commit the current Inspector edit before selection changes and unmounts it.

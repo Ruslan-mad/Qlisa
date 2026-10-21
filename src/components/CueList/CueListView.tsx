@@ -31,7 +31,7 @@ import { useLocale } from "../../i18n";
 import { getOutputControlStatuses, listOutputDestinations } from "../../lib/commands";
 import type { OutputControlStatus } from "../../lib/types";
 import { orderOutputStatuses } from "../Transport/outputFtbModel";
-import { cueRangeFromVisibleOrder, cueSelectionFromSweep, flattenVisibleCueTree, isMultiSelectModifier, toggleCueSelection } from "../../lib/cueSelection";
+import { cueRangeFromVisibleOrder, flattenVisibleCueTree, isMultiSelectModifier, toggleCueSelection } from "../../lib/cueSelection";
 import { AUDIO_EXTS, VIDEO_EXTS, IMAGE_EXTS, MIDI_EXTS, extensionOf } from "../../lib/mediaTypes";
 import { buildContinueModeUpdates, resolveContinueModeTargets } from "./continueModeMenu";
 import { canTargetCueType, resolveContextCueInsert } from "./contextCueInsert";
@@ -534,22 +534,6 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
     dropGroupAtEnd: boolean;
   } | null>(null);
 
-  // A selection sweep can start in a row's left gutter or in the empty list
-  // background. Row content keeps its existing reorder gesture.
-  const selectionDragRef = useRef<{
-    anchorId: string | null;
-    existingIds: string[];
-    additive: boolean;
-    startX: number;
-    startY: number;
-    active: boolean;
-  } | null>(null);
-
-  const [selectionSweepPreview, setSelectionSweepPreview] = useState<{
-    startY: number;
-    currentY: number;
-  } | null>(null);
-
   // Set to true for one event loop tick after a drag completes so the row's
   // onClick handler can ignore the spurious click that follows mouseup.
   const justDroppedRef = useRef(false);
@@ -713,34 +697,6 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
         return;
       }
 
-      // ── Cue range selection (row gutter or empty-background sweep) ──────
-      if (selectionDragRef.current) {
-        const drag = selectionDragRef.current;
-        if (!drag.active) {
-          if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 5) return;
-          drag.active = true;
-        }
-        setSelectionSweepPreview({ startY: drag.startY, currentY: e.clientY });
-        const row = document.elementFromPoint(e.clientX, e.clientY)
-          ?.closest("[data-cue-id]") as HTMLElement | null;
-        const endId = row?.dataset.cueId;
-        if (!endId) return;
-        if (drag.anchorId === null) drag.anchorId = endId;
-        if (drag.anchorId === null) return;
-        const visibleIds = flatItemsRef.current.map((item) => item.cue.id);
-        const next = cueSelectionFromSweep(
-          drag.anchorId,
-          endId,
-          visibleIds,
-          drag.existingIds,
-          drag.additive,
-        );
-        setCueSelection(next.selectedCueId, next.selectedCueIds);
-        anchorCueIdRef.current = drag.anchorId;
-        selectionEndRef.current = endId;
-        return;
-      }
-
       // ── Cue reorder ───────────────────────────────────────────────────────
       if (cueDragRef.current) {
         const drag = cueDragRef.current;
@@ -820,18 +776,6 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
         setNewCueDragInsertIdx(null);
         return;
       }
-      if (selectionDragRef.current) {
-        const drag = selectionDragRef.current;
-        if (drag.active && drag.anchorId !== null) {
-          // A sweep can cause a synthetic click in some WebView versions;
-          // suppress it so the completed range is not collapsed to one row.
-          justDroppedRef.current = true;
-          setTimeout(() => { justDroppedRef.current = false; }, 0);
-        }
-        selectionDragRef.current = null;
-        setSelectionSweepPreview(null);
-        return;
-      }
       if (colDragRef.current) {
         colDragRef.current = null;
         document.body.style.cursor = "";
@@ -906,8 +850,6 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (selectionDragRef.current) selectionDragRef.current = null;
-        setSelectionSweepPreview(null);
         if (colDragRef.current?.active) {
           const orig = colDragRef.current.originalOrder;
           setColConfigRef.current((prev) => ({ ...prev, order: orig }));
@@ -1003,29 +945,6 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
       dropGroupId: null,
       dropGroupAtEnd: true,
     };
-  }
-
-  function startSelectionDrag(e: React.MouseEvent, cueId: string | null) {
-    if (e.button !== 0) return;
-    selectionDragRef.current = {
-      anchorId: cueId,
-      existingIds: [...selectedCueIdsRef.current],
-      additive: isMultiSelectModifier(e.ctrlKey, e.metaKey),
-      startX: e.clientX,
-      startY: e.clientY,
-      active: false,
-    };
-    setSelectionSweepPreview({ startY: e.clientY, currentY: e.clientY });
-  }
-
-  function startBackgroundSelection(e: React.MouseEvent) {
-    if (e.button !== 0) return;
-    if (!prepareBackgroundSelection(
-      e.target as HTMLElement,
-      document.activeElement instanceof HTMLElement ? document.activeElement : null,
-      () => e.preventDefault(),
-    )) return;
-    startSelectionDrag(e, null);
   }
 
   // ---------- File drag-drop state ----------
@@ -1400,17 +1319,12 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
   // never going stale — the key to memoizing a large cue list.
   // flatItemsRef is already defined above (kept in sync via useEffect).
   const startCueDragRef = useRef(startCueDrag);  startCueDragRef.current = startCueDrag;
-  const startSelectionDragRef = useRef(startSelectionDrag); startSelectionDragRef.current = startSelectionDrag;
   const toggleGroupExpandRef = useRef(toggleGroupExpand); toggleGroupExpandRef.current = toggleGroupExpand;
   const onCueDoubleClickRef = useRef(onCueDoubleClick); onCueDoubleClickRef.current = onCueDoubleClick;
 
   const handleRowToggleExpand = useCallback((id: string) => toggleGroupExpandRef.current(id), []);
   const handleRowDragStart = useCallback(
     (id: string, index: number, e: React.MouseEvent) => startCueDragRef.current(e, id, index),
-    [],
-  );
-  const handleRowSelectionDragStart = useCallback(
-    (id: string, _index: number, e: React.MouseEvent) => startSelectionDragRef.current(e, id),
     [],
   );
   const handleRowDoubleClick = useCallback((cue: CueSummary) => onCueDoubleClickRef.current(cue), []);
@@ -1472,7 +1386,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
         // Park the Playhead on this exact cue (backend routes a child of a
         // Sequential group to its ancestor group). Optimistically reflect it.
         setPlayheadCueId(parentGroupId ?? id);
-        setPlayhead(id).catch(console.error);
+        void queueCueListPlayheadUpdate(() => setPlayhead(id)).catch(console.error);
         anchorCueIdRef.current = id;
         selectionEndRef.current = id;
       }
@@ -1621,7 +1535,13 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
       <div
         ref={rowsScrollRef}
         style={{ flex: 1, overflow: "auto", position: "relative" }}
-        onMouseDown={startBackgroundSelection}
+        onMouseDown={(e) => {
+          prepareBackgroundSelection(
+            e.target as HTMLElement,
+            document.activeElement instanceof HTMLElement ? document.activeElement : null,
+            () => e.preventDefault(),
+          );
+        }}
         onClick={(e) => {
           if (justDroppedRef.current) return;
           setContextMenu(null);
@@ -1640,33 +1560,6 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
           }
         }}
       >
-        {selectionSweepPreview && (() => {
-          const rect = rowsScrollRef.current?.getBoundingClientRect();
-          if (!rect) return null;
-          const top = Math.min(selectionSweepPreview.startY, selectionSweepPreview.currentY)
-            - rect.top + rowsScrollRef.current!.scrollTop;
-          const height = Math.max(
-            2,
-            Math.abs(selectionSweepPreview.currentY - selectionSweepPreview.startY),
-          );
-          return (
-            <div
-              aria-hidden="true"
-              style={{
-                position: "absolute",
-                left: 0,
-                right: 0,
-                top,
-                height,
-                background: "color-mix(in srgb, var(--wc-accent) 12%, transparent)",
-                borderTop: "1px solid color-mix(in srgb, var(--wc-accent) 65%, transparent)",
-                borderBottom: "1px solid color-mix(in srgb, var(--wc-accent) 65%, transparent)",
-                pointerEvents: "none",
-                zIndex: 20,
-              }}
-            />
-          );
-        })()}
         {cues.length === 0 && (
           <div style={{ padding: 32, textAlign: "center", color: "var(--wc-text-faint)", fontSize: 14 }}>
             {t("uiFixes.emptyCueList")}
@@ -1713,7 +1606,6 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
                 (cueDragRef.current?.ids.includes(cue.id) ?? false)
               }
               onCueDragStart={handleRowDragStart}
-              onSelectionDragStart={handleRowSelectionDragStart}
               onClick={handleRowClick}
               onDoubleClick={handleRowDoubleClick}
               onContextMenu={handleRowContextMenu}
