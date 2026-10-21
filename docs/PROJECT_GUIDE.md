@@ -54,9 +54,9 @@ the release after manual scenario checks. See [Output Monitor limits](output-mon
 for remaining technical limits.
 
 - Group and Number rows expand or collapse by double-click and Left/Right.
-- The editor's shared Play/Pause and seek controls operate the visual preview
-  and its sound. The headphone button only mutes or unmutes sound; it does not
-  start or stop the transport.
+- In Qlisa 1.5.12, the editor's shared Play/Pause and seek controls operated
+  the visual preview and its sound. The headphone button only muted or unmuted
+  sound; it did not start or stop the transport.
 - Cue List Up/Down moves the visible selection and backend Playhead. Space GO
   waits for the final arrow selection, including when navigation starts without
   a selection.
@@ -123,6 +123,34 @@ available. Updater end-to-end testing was not performed. Physical output
 FPS/audio drop rates and NDI/SRT receiver behavior remain unverified. See the
 [release notes](RELEASE_NOTES_1.5.14.md), [status bar guide](status-bar.md), and
 [window state note](window-state.md).
+
+## Current local editor and GO changes (unreleased)
+
+This section describes local working-tree changes. They are not part of the
+published Qlisa 1.5.14 release. The 1.5.12 and 1.5.14 release records above
+remain historical facts.
+
+The editor tab formerly named **Timeline** is now **Preview**. Preview keeps
+audition and editing controls. It does not show a runtime cursor or seek
+program playback. **Live** is a separate tab. It lists running and paused
+file-backed cues from every cue list, in latest cue-fired order, and excludes a
+background Number and its descendants. A manual Live dropdown choice stays
+selected. GO and cue selection do not switch the tab, and an empty Live view
+remains open. Live can seek the selected file's runtime voice.
+
+The tab choice is stored in `clip_editor_active_tab_v2` with `Preview`, `Live`,
+or `Slice`. For compatibility, legacy `show_live_panel` maps to Preview, and
+an older saved Live tab also migrates to Preview.
+
+A successful GO started from the toolbar, Space, or the frontend OSC path
+updates selection and Playhead together to the cue reported as fired. A late
+response cannot override a newer manual selection or a cue-list/workspace
+change. Ignored, canceled, or failed GO does not change selection. This rule
+covers frontend-initiated GO only; it does not promise that backend-only OSC
+triggers update frontend selection.
+
+`RunningLed` uses a discrete JavaScript timer: green means running, red means
+not running, with a 700 ms threshold.
 
 Features represented in the current tree include:
 
@@ -429,14 +457,15 @@ network destinations are distinct destination kinds. The default destination
 must remain an enabled physical display; network output is selected explicitly.
 
 Video/image editing includes media thumbnails/metadata, scrub/seek, trims,
-geometry, layer properties, and a video preview. Preview audio is an
+geometry, layer properties, and local preview audition. Preview audio is an
 operator-local session, held in `AppState::preview_session`, outside the show
 workspace/playhead. There is at most one active preview session. Its
 monotonically increasing generation token prevents a slow/stale start or late
-completion event from replacing/clearing a newer preview. Live standalone
-Audio/Video seeks reuse the preview voice and decoded stream. Media metadata
-probes are deduplicated and run in background workers; the cue-list summary
-reads a cache snapshot rather than probing files on every render.
+completion event from replacing/clearing a newer preview. In the current
+unreleased editor changes, Live runtime seek targets the selected active file's
+program voice; Preview does not seek program playback. Media metadata probes
+are deduplicated and run in background workers; the cue-list summary reads a
+cache snapshot rather than probing files on every render.
 
 The transport bar's global fullscreen control lists physical display outputs,
 shows or hides them, and assigns a monitor to an output. It controls physical
