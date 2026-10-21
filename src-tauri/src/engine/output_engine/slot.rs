@@ -607,12 +607,11 @@ fn create_slot(
         opt_str(lib, ctx, "ao", "null");
         opt_str(lib, ctx, "audio", "no");
         opt_str(lib, ctx, "video-sync", "desync");
-        // Transparent background: where the slot has no pixels (letterbox,
-        // idle) the FBO alpha is 0 so lower layers show through.
-        // `background=none` is mpv ≥ 0.38; `alpha=yes` covers older libmpv
-        // (Ubuntu 22.04 ships 0.34) — setting both is harmless.
+        // mpv 0.41 writes opaque black into the Fit letterbox area even with
+        // background=none. A transparent background color clears those bars;
+        // keep background=none so mpv does not premultiply source alpha twice.
         opt_str(lib, ctx, "background", "none");
-        opt_str(lib, ctx, "alpha", "yes");
+        opt_str(lib, ctx, "background-color", "0/0/0/0");
 
         let ret = (lib.mpv_initialize)(ctx);
         if ret < 0 {

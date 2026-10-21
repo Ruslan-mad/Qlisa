@@ -1819,12 +1819,12 @@ fn render_thread_main(
                 if external.opacity <= 0.0 { continue; }
                 let (Some(texture), Some(staging)) = (external_targets.get(&external.voice), external_layer_target.as_ref()) else { continue };
                 draw_geometry_pass(&gl, geometry_program, geometry_vao, texture.target.tex, external.geometry, texture.target.w, texture.target.h, w_px, h_px, staging.fbo);
-                draw_composite_pass(&gl, composite_program, composite_vao, backdrop_tex, staging.tex, external.blend_mode, external.opacity, w_px, h_px, dst_fbo);
+                draw_composite_pass(&gl, composite_program, composite_vao, backdrop_tex, staging.tex, external.blend_mode, external.opacity, false, w_px, h_px, dst_fbo);
             } else {
                 let layer = &layers[slot_at]; slot_at += 1;
                 if layer.opacity <= 0.0 { continue; }
                 let Some(Some(layer_t)) = slot_targets.get(layer.slot_index) else { continue };
-                draw_composite_pass(&gl, composite_program, composite_vao, backdrop_tex, layer_t.tex, layer.blend_mode, layer.opacity, w_px, h_px, dst_fbo);
+                draw_composite_pass(&gl, composite_program, composite_vao, backdrop_tex, layer_t.tex, layer.blend_mode, layer.opacity, true, w_px, h_px, dst_fbo);
             }
             src = dst;
         }
@@ -1835,7 +1835,7 @@ fn render_thread_main(
                 if let (Some(a), Some(b)) = (&pingpong[src], &pingpong[dst]) {
                     draw_composite_pass(
                         &gl, composite_program, composite_vao,
-                        a.tex, t.tex, 0, 1.0, w_px, h_px, b.fbo,
+                        a.tex, t.tex, 0, 1.0, true, w_px, h_px, b.fbo,
                     );
                     src = dst;
                 }
@@ -2499,6 +2499,7 @@ void main() {
 uniform sampler2D u_backdrop;
 uniform sampler2D u_layer;
 uniform int   u_blend_mode;
+uniform int   u_layer_premultiplied;
 uniform float u_opacity;
 in vec2 v_uv;
 out vec4 color;
@@ -2506,6 +2507,10 @@ out vec4 color;
 void main() {{
     vec4 b = texture(u_backdrop, v_uv);
     vec4 s = texture(u_layer, v_uv);
+    // libmpv's OpenGL render API returns premultiplied RGB for alpha media;
+    // blend_channel and the source-over equations below use straight RGB.
+    // External frame layers use their own upload contract and leave this off.
+    if (u_layer_premultiplied != 0 && s.a > 0.0) s.rgb /= s.a;
     float sa = clamp(s.a * u_opacity, 0.0, 1.0);
     float ao = sa + b.a * (1.0 - sa);
     vec3 rgb = vec3(0.0);
@@ -2612,6 +2617,7 @@ fn draw_composite_pass(
     layer_tex: glow::Texture,
     blend_mode: i32,
     opacity: f32,
+    layer_premultiplied: bool,
     w: u32,
     h: u32,
     dst_fbo: glow::Framebuffer,
@@ -2633,6 +2639,9 @@ fn draw_composite_pass(
         }
         if let Some(loc) = gl.get_uniform_location(program, "u_blend_mode") {
             gl.uniform_1_i32(Some(&loc), blend_mode);
+        }
+        if let Some(loc) = gl.get_uniform_location(program, "u_layer_premultiplied") {
+            gl.uniform_1_i32(Some(&loc), i32::from(layer_premultiplied));
         }
         if let Some(loc) = gl.get_uniform_location(program, "u_opacity") {
             gl.uniform_1_f32(Some(&loc), opacity);
