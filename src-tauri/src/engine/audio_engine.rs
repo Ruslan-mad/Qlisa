@@ -4110,6 +4110,15 @@ mod tests {
         const FRAMES: usize = 48;
         let info = crate::cue::media_decode::probe_audio_track(path).unwrap().unwrap();
         let start_frame = start_ms * info.sample_rate as u64 / 1000;
+        // Keep this continuity stress test at the former equal-power center
+        // output level so its absolute seam thresholds test loop behavior,
+        // not the intentional stereo balance gain change.
+        let continuity_gain = if info.channels > 1 {
+            std::f32::consts::FRAC_1_SQRT_2
+        } else {
+            1.0
+        };
+        let cue_gain_db = crate::cue::types::linear_to_db(continuity_gain as f64);
         let end_frame = end_ms.map(|ms| ms * info.sample_rate as u64 / 1000)
             .or(info.total_frames).expect("effective trim end");
         assert!(end_frame > start_frame, "{format}: invalid loop range");
@@ -4125,6 +4134,7 @@ mod tests {
         let mut cue = crate::cue::audio_cue::AudioCueFactory.from_json(serde_json::json!({
             "type": "audio",
             "file_path": path.to_string_lossy().to_string(),
+            "volume_db": cue_gain_db,
             "start_time_ms": start_ms,
             "end_time_ms": end_ms,
             "loop_count": REPEATS,
@@ -4195,7 +4205,13 @@ mod tests {
             .map(|(a, b)| (a - b).abs()).sum::<f32>() / pass_output_frames as f32).unwrap_or(f32::INFINITY);
         let (expected, _) = crate::cue::media_decode::decode_slice_ranges(path, info, &[(start_frame, effective_end_frame)])
             .unwrap().expect("reference trimmed PCM");
-        let expected_first = expected[0] * std::f32::consts::FRAC_1_SQRT_2;
+        let center_pan_gain = if info.channels > 1 {
+            1.0
+        } else {
+            std::f32::consts::FRAC_1_SQRT_2
+        };
+        let center_gain = crate::cue::types::db_to_linear(cue_gain_db) as f32 * center_pan_gain;
+        let expected_first = expected[0] * center_gain;
         for pass in 0..=REPEATS as usize {
             let sample_index = pass * pass_output_frames * 2;
             assert!(sample_index < rendered_pcm.len(), "{format}: missing pass {pass}");
@@ -4868,10 +4884,10 @@ mod tests {
         let mut received_b = Vec::new();
         receiver_a.drain_into(&mut received_a, 4);
         receiver_b.drain_into(&mut received_b, 4);
-        // The voice is centre-panned (equal-power pan) and master is 0.5;
+        // The stereo voice is centre-balanced at unity and master is 0.5;
         // checking one sample verifies that this is a post-master tap rather
         // than merely another copy of the source voice.
-        let expected_left = 0.8 * 0.5 * std::f32::consts::FRAC_1_SQRT_2;
+        let expected_left = 0.8 * 0.5;
         assert!((output[0] - expected_left).abs() < 0.000_001);
         assert_eq!(received_a, output);
         assert_eq!(received_b, output);
@@ -4951,11 +4967,58 @@ mod tests {
         let voice = Voice::new(Arc::new(vec![1.0_f32, -0.5]), 2, 48_000, 0.8, 0.0);
         voice.inner.set_patch_gain(0.5);
         let (_, program) = render_file_voice_with_program_tap(voice, 2, 0.25);
-        let pan = std::f32::consts::FRAC_1_SQRT_2;
-        let expected_l = 1.0 * pan * 0.8 * 0.5 * 0.25;
-        let expected_r = -0.5 * pan * 0.8 * 0.5 * 0.25;
+        let expected_l = 1.0 * 0.8 * 0.5 * 0.25;
+        let expected_r = -0.5 * 0.8 * 0.5 * 0.25;
         assert!((program[0] - expected_l).abs() < 0.000_001);
         assert!((program[1] - expected_r).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn stereo_balance_callback_preserves_center_and_only_attenuates_far_side() {
+        let cases = [
+            (-1.0, 0.25, 0.0),
+            (-0.5, 0.25, -0.25),
+            (0.0, 0.25, -0.5),
+            (0.5, 0.125, -0.5),
+            (1.0, 0.0, -0.5),
+        ];
+
+        for (pan, expected_l, expected_r) in cases {
+            let voice = Voice::new(Arc::new(vec![0.25_f32, -0.5]), 2, 48_000, 1.0, pan);
+            let (output, program) = render_file_voice_with_program_tap(voice, 2, 1.0);
+            assert!((output[0] - expected_l).abs() < 1e-6, "pan {pan}: device L {}", output[0]);
+            assert!((output[1] - expected_r).abs() < 1e-6, "pan {pan}: device R {}", output[1]);
+            assert!((program[0] - expected_l).abs() < 1e-6, "pan {pan}: program L {}", program[0]);
+            assert!((program[1] - expected_r).abs() < 1e-6, "pan {pan}: program R {}", program[1]);
+            assert!(output[0].abs() <= 0.25 && output[1].abs() <= 0.5, "pan {pan} amplified a source channel");
+        }
+    }
+
+    #[test]
+    fn mono_callback_keeps_the_existing_equal_power_pan() {
+        let voice = Voice::new(Arc::new(vec![0.4_f32]), 1, 48_000, 1.0, 0.0);
+        let (output, program) = render_file_voice_with_program_tap(voice, 2, 1.0);
+        let expected = 0.4 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!((output[0] - expected).abs() < 1e-6);
+        assert!((output[1] - expected).abs() < 1e-6);
+        assert!((program[0] - expected).abs() < 1e-6);
+        assert!((program[1] - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn unity_level_matrix_keeps_physical_routing_and_uses_stereo_balance_for_program_tap() {
+        let mut voice = Voice::new(Arc::new(vec![0.25_f32, -0.5]), 2, 48_000, 1.0, 0.0);
+        let matrix = crate::engine::voice::LevelMatrix::new(&[
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+        ]).expect("stereo identity matrix");
+        unsafe { *voice.inner.level_matrix.get() = Some(matrix); }
+
+        let (output, program) = render_file_voice_with_program_tap(voice, 2, 1.0);
+        assert!((output[0] - 0.25).abs() < 1e-6);
+        assert!((output[1] + 0.5).abs() < 1e-6);
+        assert!((program[0] - 0.25).abs() < 1e-6);
+        assert!((program[1] + 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -4965,9 +5028,9 @@ mod tests {
         voice.out_r = 3;
         let (output, program) = render_file_voice_with_program_tap(voice, 4, 1.0);
         assert!(output[..3].iter().all(|sample| *sample == 0.0));
-        assert!((output[3] - 1.0).abs() < 0.000_001);
-        assert!((program[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.000_001);
-        assert!((program[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.000_001);
+        assert!((output[3] - std::f32::consts::SQRT_2).abs() < 0.000_001);
+        assert_eq!(program[0], 1.0);
+        assert_eq!(program[1], 1.0);
     }
 
     #[test]
@@ -5100,7 +5163,7 @@ mod tests {
             }
         }
 
-        let center_gain = std::f32::consts::FRAC_1_SQRT_2;
+        let center_gain = 1.0_f32;
         for (block, level) in block_levels.iter().enumerate() {
             let elapsed = (block * BLOCK_FRAMES) as f32;
             let expected = center_gain * (1.0 - elapsed / FADE_FRAMES as f32);

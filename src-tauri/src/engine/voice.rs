@@ -721,8 +721,21 @@ impl Voice {
     pub fn pan_gains(&self) -> (f32, f32) {
         let pan = self.inner.pan();
         let gain = self.inner.mix_gain();
-        let left = ((1.0 - pan) * 0.5).clamp(0.0, 1.0).sqrt();
-        let right = ((1.0 + pan) * 0.5).clamp(0.0, 1.0).sqrt();
+        let (left, right) = if self.live.is_none() && self.channels > 1 {
+            // Stereo file voices use balance pan: preserve both channels at
+            // center and attenuate only the channel opposite the pan direction.
+            let pan = pan.clamp(-1.0, 1.0);
+            (
+                (1.0 - pan.max(0.0)).clamp(0.0, 1.0),
+                (1.0 + pan.min(0.0)).clamp(0.0, 1.0),
+            )
+        } else {
+            // Mono and live inputs retain the existing equal-power pan law.
+            (
+                ((1.0 - pan) * 0.5).clamp(0.0, 1.0).sqrt(),
+                ((1.0 + pan) * 0.5).clamp(0.0, 1.0).sqrt(),
+            )
+        };
         (left * gain, right * gain)
     }
 }
