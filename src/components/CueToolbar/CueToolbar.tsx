@@ -3,6 +3,7 @@ import { Pulse as Activity, CaretDown, SquaresFour } from "@phosphor-icons/react
 import { useLocale } from "../../i18n";
 import { COMMAND_CUE_TYPES, CUE_TYPE_COLORS, type CueType } from "../../lib/types";
 import { CueTypeIcon } from "../common/CueTypeIcon";
+import { animateButtonPress } from "../common/buttonPressAnimation";
 import { CUE_TOOLBAR_DESCRIPTORS, resolveCueToolbarLayout } from "./cueToolbarModel";
 
 type Props = {
@@ -113,14 +114,7 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
   });
 
   return (
-    <div className="stage-toolbar-row" style={{ display: "flex", flexWrap: "nowrap", gap: 8, padding: "0 12px 8px", alignItems: "center", minWidth: 0, position: "relative", zIndex: 0 }} onClick={(event) => {
-      const button = (event.target as HTMLElement).closest("button");
-      button?.animate([
-        { transform: "scale(1)", filter: "brightness(1)" },
-        { transform: "scale(0.88)", filter: "brightness(1.7)", offset: 0.35 },
-        { transform: "scale(1)", filter: "brightness(1)" },
-      ], { duration: 260, easing: "cubic-bezier(.2,.7,.3,1)" });
-    }}>
+    <div className="stage-toolbar-row" style={{ display: "flex", flexWrap: "nowrap", gap: 8, padding: "0 12px 8px", alignItems: "center", minWidth: 0, position: "relative", zIndex: 0 }} onClick={(event) => animateButtonPress((event.target as HTMLElement).closest("button"))}>
       <div ref={leftRef} className="stage-cue-actions" style={{ display: "flex", flex: "1 1 0", minWidth: 0, flexWrap: "nowrap", alignItems: "center", gap: 8, overflow: "visible" }}>
         {layout.visible.map((type) => mainButton(type))}
         {layout.showMore && <div ref={moreRef} style={{ position: "relative", flexShrink: 0, zIndex: open ? 10002 : undefined }}>

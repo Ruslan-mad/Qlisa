@@ -10,6 +10,7 @@ import { OscMonitor } from "../Osc/OscMonitor";
 import { LightingPanel } from "../Lighting/LightingPanel";
 import { TcStatusIndicator } from "../Timecode/TcStatusIndicator";
 import { OutputFtbControls } from "./OutputFtbControls";
+import { animateButtonPress } from "../common/buttonPressAnimation";
 import { useLocale } from "../../i18n";
 import { transportErrorFromEvent } from "./transportErrorModel";
 import { MediaConversionStatus } from "./MediaConversionStatus";
@@ -348,6 +349,7 @@ export function TransportBar({ onRefresh }: Props) {
     >
       {/* GO */}
       <button
+        onClickCapture={(event) => animateButtonPress(event.currentTarget)}
         onClick={async () => {
           setGoError(null);
           try {
@@ -384,6 +386,7 @@ export function TransportBar({ onRefresh }: Props) {
 
       {/* Stop the currently selected cue set; matches the Cue List S shortcut. */}
       <button
+        onClickCapture={(event) => animateButtonPress(event.currentTarget)}
         disabled={selectedCueIds.length === 0}
         onClick={async () => { await stopSelectedCueSet(selectedCueIds, cues, (cueId) => stopCue(cueId).catch(console.error)); onRefresh(); }}
         title={t("toolbar.stopSelectedButtonHint")}
@@ -407,6 +410,7 @@ export function TransportBar({ onRefresh }: Props) {
 
       {/* PAUSE / RESUME (toggle) */}
       <button
+        onClickCapture={(event) => animateButtonPress(event.currentTarget)}
         onClick={handlePauseToggle}
         disabled={pauseDisabled}
         title={`${t("components.pauseResumeAll")} · ${t("transport.pauseShortcutSelected")}`}
