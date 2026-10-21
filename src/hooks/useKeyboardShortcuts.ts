@@ -149,7 +149,7 @@ export function useKeyboardShortcuts(
 ) {
   const lastEscapeRef = useRef<number>(0);
   const lastGoRef = useRef<number>(0);
-  const { selectedCueId, generalPrefs } = useWorkspaceStore();
+  const { selectedCueId, selectedCueIds, cues, generalPrefs } = useWorkspaceStore();
 
   useEffect(() => {
     const handler = async (e: KeyboardEvent) => {
@@ -188,13 +188,15 @@ export function useKeyboardShortcuts(
       switch (getKeyboardShortcutKey(e)) {
         case "Escape": {
           // Single Escape → Stop All; double Escape → Hard Stop All
+          if (e.repeat) break;
           const now = Date.now();
-          if (now - lastEscapeRef.current < 500) {
+          const isDoubleEscape = now - lastEscapeRef.current < 500;
+          lastEscapeRef.current = now;
+          if (isDoubleEscape) {
             await hardStopAll().catch(console.error);
           } else {
             await stopAll().catch(console.error);
           }
-          lastEscapeRef.current = now;
           onRefresh();
           break;
         }
@@ -206,9 +208,9 @@ export function useKeyboardShortcuts(
           } else if (isSaveShortcut(e)) {
             e.preventDefault();
             onSave?.();
-          } else if (isSelectedCueStopShortcut(e) && selectedCueId) {
+          } else if (isSelectedCueStopShortcut(e) && selectedCueIds.length > 0) {
             e.preventDefault();
-            await stopCue(selectedCueId).catch(console.error);
+            await stopSelectedCueSet(selectedCueIds, cues, (cueId) => stopCue(cueId).catch(console.error));
             onRefresh();
           }
           break;
@@ -373,5 +375,5 @@ export function useKeyboardShortcuts(
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [selectedCueId, generalPrefs, onRefresh, onOpenPreferences, onSave, onOpen, onToggleInspector, onGoto, onToggleOutputWindow, onToggleShowMode, onToggleSearch, onNewWorkspace, onSaveAs]);
+  }, [selectedCueId, selectedCueIds, cues, generalPrefs, onRefresh, onOpenPreferences, onSave, onOpen, onToggleInspector, onGoto, onToggleOutputWindow, onToggleShowMode, onToggleSearch, onNewWorkspace, onSaveAs]);
 }
