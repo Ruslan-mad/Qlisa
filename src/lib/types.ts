@@ -1365,6 +1365,8 @@ export interface DisplayPreferences {
   show_slice_panel?: boolean;
   /** Last selected Clip Editor tab, mirrored in the workspace for compatibility. */
   clip_editor_active_tab?: "Live" | "Slice";
+  /** Version 2 separates the operator preview from the runtime Live timeline. */
+  clip_editor_active_tab_v2?: "Preview" | "Live" | "Slice" | null;
   status_bar?: StatusBarPreferences;
 }
 

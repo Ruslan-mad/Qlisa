@@ -90,9 +90,10 @@ describe('Qlisa i18n core', () => {
   it('keeps cue and media editor labels consistent in Russian', () => {
     const russianText = JSON.stringify(ru);
     expect(russianText).not.toMatch(/кью|корзин|вживую|срезы/i);
-    expect(ru.menus.livePanel).toBe('Timeline');
+    expect(ru.menus.livePanel).toBe('Превью');
     expect(ru.menus.slicePanel).toBe('Slice');
-    expect(ru.editorUi.liveTab).toBe('Timeline');
+    expect(ru.editorUi.previewTab).toBe('Превью');
+    expect(ru.editorUi.liveTab).toBe('Лайв');
     expect(ru.editorUi.sliceTab).toBe('Slice');
     expect(ru.editorUi.emptyCueTitle).toContain('cue');
     expect(ru.editorUi.emptyCueMessage).toContain('cue');

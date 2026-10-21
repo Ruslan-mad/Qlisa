@@ -467,6 +467,11 @@ pub struct DisplayPreferences {
     #[serde(default = "DisplayPreferences::default_clip_editor_active_tab")]
     pub clip_editor_active_tab: String,
 
+    /// Versioned tab preference. `None` means the workspace still uses the
+    /// legacy Timeline/Live value above and needs frontend migration.
+    #[serde(default)]
+    pub clip_editor_active_tab_v2: Option<String>,
+
     /// Monitor index for the unified output surface.
     /// `None` = floating windowed (no fixed screen).
     /// `Some(n)` = fullscreen on monitor n (0 = primary).
@@ -754,6 +759,7 @@ impl Default for DisplayPreferences {
             show_live_panel: true,
             show_slice_panel: true,
             clip_editor_active_tab: Self::default_clip_editor_active_tab(),
+            clip_editor_active_tab_v2: None,
             output_screen: None,
             show_output_timer: false,
             timer_count_down: false,
@@ -1170,6 +1176,7 @@ mod tests {
         assert!(p.show_live_panel);
         assert!(p.show_slice_panel);
         assert_eq!(p.clip_editor_active_tab, "Live");
+        assert_eq!(p.clip_editor_active_tab_v2, None);
         assert_eq!(p.cue_color_style, CueColorStyle::FullRow);
     }
 
@@ -1189,10 +1196,12 @@ mod tests {
         p.show_live_panel = false;
         p.show_slice_panel = true;
         p.clip_editor_active_tab = "Slice".into();
+        p.clip_editor_active_tab_v2 = Some("Live".into());
         let back: DisplayPreferences = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert!(!back.show_live_panel);
         assert!(back.show_slice_panel);
         assert_eq!(back.clip_editor_active_tab, "Slice");
+        assert_eq!(back.clip_editor_active_tab_v2.as_deref(), Some("Live"));
     }
 
     #[test]

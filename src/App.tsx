@@ -34,7 +34,7 @@ import type { CollectReport, ImportReport, RecoveryInfo, CueType, NumberCueData 
 import { QlabImportDialog } from "./components/Import/QlabImportDialog";
 import type { CueSummary } from "./lib/types";
 import { useLocale } from "./i18n";
-import { CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, normalizeClipEditorVisibility, resolveClipEditorTargetCueId, toggleClipEditorPanel } from "./lib/clipEditorPrefs";
+import { clipEditorDockVisible, normalizeClipEditorVisibility, resolveClipEditorTargetCueId, toggleClipEditorPanel } from "./lib/clipEditorPrefs";
 import { CLIP_EDITOR_DOCK_HEIGHT } from "./components/Editor/clipEditorLayout";
 import { hasActivePlayback } from "./lib/closeGuard";
 import { normalizeNumberCueData } from "./components/Inspector/numberModel";
@@ -802,7 +802,7 @@ export default function App() {
   const [showSearchBar, setShowSearchBar]         = useState(() => loadUiLayout().showSearchBar);
   const [showLivePanel, setShowLivePanel]         = useState(() => loadUiLayout().showLivePanel);
   const [showSlicePanel, setShowSlicePanel]       = useState(() => loadUiLayout().showSlicePanel);
-  const [activeClipTab, setActiveClipTab]         = useState<"Live" | "Slice">(() => loadUiLayout().activeClipTab);
+  const [activeClipTab, setActiveClipTab]         = useState<"Preview" | "Live" | "Slice">(() => loadUiLayout().activeClipTab);
   const [inspectorWidth, setInspectorWidth]       = useState(() => loadUiLayout().inspectorWidth);
   const [editorCueId, setEditorCueId]             = useState<string | null>(null);
   const [numberTimelineCueId, setNumberTimelineCueId] = useState<string | null>(null);
@@ -836,7 +836,7 @@ export default function App() {
 
   // Persist panel visibility + inspector width across launches.
   useEffect(() => {
-    saveUiLayout({ showCueListTabs, rightPanel, activeCuesOpen, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab });
+    saveUiLayout({ showCueListTabs, rightPanel, activeCuesOpen, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab, clipEditorTabVersion: 2 });
   }, [showCueListTabs, rightPanel, activeCuesOpen, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab]);
 
   useEffect(() => {
@@ -857,10 +857,10 @@ export default function App() {
     const migrated = normalizeClipEditorVisibility(displayPrefs);
     setShowLivePanel(migrated.show_live_panel);
     setShowSlicePanel(migrated.show_slice_panel);
-    setActiveClipTab(migrated.clip_editor_active_tab);
-  }, [displayPrefs.show_live_panel, displayPrefs.show_slice_panel, displayPrefs.clip_editor_active_tab]);
+    setActiveClipTab(migrated.clip_editor_active_tab_v2);
+  }, [displayPrefs.show_live_panel, displayPrefs.show_slice_panel, displayPrefs.clip_editor_active_tab, displayPrefs.clip_editor_active_tab_v2]);
 
-  const persistClipEditorPrefs = useCallback((patch: Partial<Pick<import("./lib/types").DisplayPreferences, "show_live_panel" | "show_slice_panel" | "clip_editor_active_tab">>) => {
+  const persistClipEditorPrefs = useCallback((patch: Partial<Pick<import("./lib/types").DisplayPreferences, "show_live_panel" | "show_slice_panel" | "clip_editor_active_tab" | "clip_editor_active_tab_v2">>) => {
     const store = useWorkspaceStore.getState();
     const next = { ...store.displayPrefs, ...patch };
     store.setDisplayPrefs(next);
@@ -1387,16 +1387,21 @@ export default function App() {
     }
   };
 
-  const handleClipTabChange = (tab: "Live" | "Slice") => {
+  const handleClipTabChange = (tab: "Preview" | "Live" | "Slice") => {
     setActiveClipTab(tab);
-    persistClipEditorPrefs({ clip_editor_active_tab: tab });
+    persistClipEditorPrefs({ clip_editor_active_tab: tab === "Slice" ? "Slice" : "Live", clip_editor_active_tab_v2: tab });
   };
 
-  const toggleClipPanel = (panel: "Live" | "Slice") => {
-    const next = toggleClipEditorPanel({ show_live_panel: showLivePanel, show_slice_panel: showSlicePanel, clip_editor_active_tab: activeClipTab }, panel);
+  const toggleClipPanel = (panel: "Preview" | "Slice") => {
+    const next = toggleClipEditorPanel({
+      show_live_panel: showLivePanel,
+      show_slice_panel: showSlicePanel,
+      clip_editor_active_tab: activeClipTab === "Slice" ? "Slice" : "Live",
+      clip_editor_active_tab_v2: activeClipTab,
+    }, panel);
     setShowLivePanel(next.show_live_panel);
     setShowSlicePanel(next.show_slice_panel);
-    setActiveClipTab(next.clip_editor_active_tab);
+    setActiveClipTab(next.clip_editor_active_tab_v2);
     persistClipEditorPrefs(next);
   };
 
@@ -1676,8 +1681,8 @@ export default function App() {
             items={[
               { label: t("menus.showMode"), checked: showMode, onClick: () => setShowMode((v) => !v), shortcut: "F5" },
               { label: t("menus.cueListTabs"), checked: showCueListTabs, onClick: () => setShowCueListTabs((v) => !v) },
-              { label: CLIP_EDITOR_TAB_LABELS.timeline, checked: showLivePanel, onClick: () => toggleClipPanel("Live") },
-              { label: CLIP_EDITOR_TAB_LABELS.slice, checked: showSlicePanel, onClick: () => toggleClipPanel("Slice") },
+              { label: t("menus.livePanel"), checked: showLivePanel, onClick: () => toggleClipPanel("Preview") },
+              { label: t("menus.slicePanel"), checked: showSlicePanel, onClick: () => toggleClipPanel("Slice") },
               { label: t("menus.searchBar"), checked: showSearchBar, onClick: handleToggleSearch, shortcut: "Ctrl+F" },
               { label: t("menus.activeCues"), checked: activeCuesOpen, onClick: () => setActiveCuesOpen((value) => !value) },
               { label: t("menus.inspector"), checked: rightPanel === "inspector", onClick: () => setRightPanel((value) => value === "inspector" ? "closed" : "inspector") },
@@ -1824,7 +1829,7 @@ export default function App() {
                       setEditorCueId(id);
                       setShowSlicePanel(true);
                       setActiveClipTab("Slice");
-                      persistClipEditorPrefs({ show_slice_panel: true, clip_editor_active_tab: "Slice" });
+                      persistClipEditorPrefs({ show_slice_panel: true, clip_editor_active_tab: "Slice", clip_editor_active_tab_v2: "Slice" });
                     }}
                     onOpenCurveEditor={(id) => setCurveCueId(id)}
                     reloadToken={inspectorReload}

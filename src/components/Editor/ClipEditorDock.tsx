@@ -3,16 +3,16 @@
 // inline waveform / filmstrip; audio cues can be auditioned in place.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { AudioCueData, NumberCueData, SliceList, VideoCueData, WaveformData } from "../../lib/types";
+import type { AudioCueData, ImageCueData, NumberCueData, SliceList, VideoCueData, WaveformData } from "../../lib/types";
 import { PLAY_COUNT_INFINITE } from "../../lib/types";
-import { getCue, getVideoFilmstrip, getVideoFilmstripRange, getWaveformPeaks, previewCueOnHeadphones, stopCuePreview, stopPreview, controlCuePreview, seekCue, seekCueMedia, updateCue, setNumberActionOffset } from "../../lib/commands";
+import { getCue, getVideoFilmstrip, getVideoFilmstripRange, getWaveformPeaks, previewCueOnHeadphones, stopCuePreview, stopPreview, controlCuePreview, seekCueMedia, updateCue, setNumberActionOffset } from "../../lib/commands";
 import { SliceTimeline } from "./SliceTimeline";
 import { LiveTimeline, type NumberTimelineTrack } from "./LiveTimeline";
 import type { TrimPainter, TrimView } from "../Inspector/TrimStrip";
 import { useLocale } from "../../i18n";
 import { useTimingStore } from "../../stores/timingStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { CLIP_EDITOR_TAB_LABELS, previewPlayheadForCue } from "../../lib/clipEditorPrefs";
+import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, previewPlayheadForCue, resolveLiveMediaSelection, type ClipEditorTab } from "../../lib/clipEditorPrefs";
 import { findCueIsLoading, isCurrentClipLoad, previewUiForCue, shouldRetainCueDataForTarget, shouldRetryWaveform, type CueBoundPreviewUi } from "../../lib/clipEditorLoadGuards";
 import { formatInspectorSaveError, isCurrentCueRequest, persistThenCommit } from "../Inspector/singleCueSave";
 import { normalizeNumberCueData } from "../Inspector/numberModel";
@@ -24,6 +24,7 @@ import { NumberPreviewControls } from "../Inspector/NumberPreview";
 import { useVideoPreviewTransport } from "../Inspector/mediaPreviewTransport";
 import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, numberActionDuration, numberActionLooped, numberGroupTimelineActions, numberMasterDuration, numberMediaLayoutSignature, numberMediaSourceSignature, numberVisualActions, snapNumberTime } from "./numberTimelineModel";
 import { useNumberPreviewStore } from "../../stores/numberPreviewStore";
+import { useShallow } from "zustand/react/shallow";
 import { editorPreviewCursorPosition, headphonePreviewStartPosition, PreviewSessionController, stepPreviewAndSyncHeadphones } from "./headphonePreviewTransport";
 import {
   CLIP_EDITOR_BODY_PADDING_BOTTOM,
@@ -60,17 +61,6 @@ type NumberMediaAsset = {
 
 function normalizeSlices(s: SliceList | undefined): SliceList {
   return { markers: s?.markers ?? [], play_counts: s?.play_counts ?? [1] };
-}
-
-function findCueState(cues: { id: string; state: string; children?: unknown[] }[], id: string): string | undefined {
-  for (const cue of cues) {
-    if (cue.id === id) return cue.state;
-    if (Array.isArray(cue.children)) {
-      const found = findCueState(cue.children as { id: string; state: string; children?: unknown[] }[], id);
-      if (found) return found;
-    }
-  }
-  return undefined;
 }
 
 function findCueTreeLoading(cues: { id: string; is_loading?: boolean; children?: unknown[] }[], id: string): boolean {
@@ -115,8 +105,8 @@ export function ClipEditorDock({
   /** View-menu visibility controls, persisted by the owning workspace. */
   showLivePanel?: boolean;
   showSlicePanel?: boolean;
-  activeTab?: "Live" | "Slice";
-  onActiveTabChange?: (tab: "Live" | "Slice") => void;
+  activeTab?: ClipEditorTab;
+  onActiveTabChange?: (tab: ClipEditorTab) => void;
 }) {
   const { t } = useLocale();
   const [cue, setCue] = useState<ClipCue | null>(null);
@@ -133,7 +123,8 @@ export function ClipEditorDock({
   /** Window-matched frames streamed in while zoomed. */
   const [rangeStrip, setRangeStrip] =
     useState<{ startMs: number; endMs: number; tiles: HTMLImageElement[] } | null>(null);
-  const [localActiveTab, setLocalActiveTab] = useState<"Live" | "Slice">("Live");
+  const [localActiveTab, setLocalActiveTab] = useState<ClipEditorTab>("Preview");
+  const [manualLiveCueId, setManualLiveCueId] = useState<string | null>(null);
   const previewActiveRef = useRef(false);
   const previewPlayingIntentRef = useRef(false);
   const [previewSoundEnabled, setPreviewSoundEnabled] = useState(false);
@@ -151,7 +142,6 @@ export function ClipEditorDock({
   const [saveError, setSaveError] = useState<string | null>(null);
   const displayedCueIdRef = useRef(cueId);
   const seekAuditionHandlerRef = useRef<(positionMs: number, pauseBeforeSeek?: boolean) => void>(() => {});
-  const timing = useTimingStore((state) => cueId ? state.timings[cueId] : undefined);
   const previewStoreEvent = useTimingStore((state) => state.previewPlayhead);
   const previewStoreGeneration = useTimingStore((state) => state.previewPlayheadGeneration);
   const previewPlayhead = previewPlayheadForCue(previewStoreEvent, cueId);
@@ -159,9 +149,25 @@ export function ClipEditorDock({
   const previewVoice = displayedPreviewUi?.voiceId ?? null;
   const previewPosition = displayedPreviewUi?.positionMs ?? null;
   const previewError = displayedPreviewUi?.error ?? null;
-  const runtimeCueState = useWorkspaceStore((state) => cueId ? findCueState(state.cues, cueId) : undefined);
   const cueIsLoading = useWorkspaceStore((state) => cueId ? findCueIsLoading(state.cues, cueId) : undefined);
   const cueTreeIsLoading = useWorkspaceStore((state) => cueId ? findCueTreeLoading(state.cues, cueId) : false);
+  const liveCueCatalog = useWorkspaceStore((state) => state.cueCatalog);
+  const cueStartOrder = useWorkspaceStore((state) => state.cueStartOrder);
+  const preWaitCueIds = useTimingStore(useShallow((state) => Object.keys(state.timings)
+    .filter((id) => state.timings[id]?.wait_phase === "pre_wait")
+    .sort()));
+  const preWaitTimings = useMemo(() => Object.fromEntries(preWaitCueIds.map((id) => [id, { wait_phase: "pre_wait" as const }])), [preWaitCueIds]);
+  const liveCandidates = useMemo(() => activeLiveMediaCandidates(
+    liveCueCatalog.flatMap((list) => list.cues),
+    cueStartOrder,
+    preWaitTimings,
+  ), [liveCueCatalog, cueStartOrder, preWaitTimings]);
+  const selectedLiveCue = resolveLiveMediaSelection(liveCandidates, manualLiveCueId);
+  useEffect(() => {
+    if (manualLiveCueId && !liveCandidates.some((candidate) => candidate.id === manualLiveCueId)) {
+      setManualLiveCueId(null);
+    }
+  }, [liveCandidates, manualLiveCueId]);
   const isVideo = cue?.cue_type === "video";
   const isNumber = cue?.cue_type === "number";
   const numberPreviewPositionMs = useNumberPreviewStore((state) =>
@@ -217,13 +223,13 @@ export function ClipEditorDock({
     previewController.activate();
     return () => previewController.dispose();
   }, [previewController]);
-  const setActiveTab = (tab: "Live" | "Slice") => {
+  const setActiveTab = (tab: ClipEditorTab) => {
     setLocalActiveTab(tab);
     onActiveTabChange?.(tab);
   };
 
   useEffect(() => {
-    if (!mediaIdentity || activeTab !== "Live" || !showLivePanel) {
+    if (!mediaIdentity || activeTab !== "Preview" || !showLivePanel) {
       if (mediaIdentity) useVideoPreviewTransport.getState().stop(mediaIdentity);
     }
     return () => {
@@ -232,7 +238,7 @@ export function ClipEditorDock({
   }, [activeTab, mediaIdentity, showLivePanel]);
 
   useEffect(() => {
-    if (!mediaIdentity || !isVideo || activeTab !== "Live" || !showLivePanel) return;
+    if (!mediaIdentity || !isVideo || activeTab !== "Preview" || !showLivePanel) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (
@@ -546,7 +552,7 @@ export function ClipEditorDock({
   // Hiding Live or switching to Slice is a lifecycle boundary for the
   // operator-only preview. It can never leak into the next selected cue.
   useEffect(() => {
-    if (activeTab !== "Live" || !showLivePanel) {
+    if (activeTab !== "Preview" || !showLivePanel) {
       previewController.end();
       previewActiveRef.current = false;
       previewPlayingIntentRef.current = false;
@@ -558,8 +564,8 @@ export function ClipEditorDock({
 
   // Repair an active tab when the View menu hides it.
   useEffect(() => {
-    if (activeTab === "Live" && !showLivePanel && showSlicePanel) setActiveTab("Slice");
-    if (activeTab === "Slice" && !showSlicePanel && showLivePanel) setActiveTab("Live");
+    if (activeTab === "Preview" && !showLivePanel) setActiveTab("Live");
+    if (activeTab === "Slice" && !showSlicePanel) setActiveTab(showLivePanel ? "Preview" : "Live");
   }, [activeTab, showLivePanel, showSlicePanel]);
 
   // High-resolution swap once the operator zooms in: finer waveform bins /
@@ -835,7 +841,7 @@ export function ClipEditorDock({
       const requestedStart = headphonePreviewStartPosition(
         isNumber, numberPreviewPositionMs,
         editorPreviewCursorPosition(isVideo, videoTransport?.positionMs ?? null, previewPosition),
-        runtimeCueState === "running" || runtimeCueState === "paused" ? timing?.media_position_ms ?? null : null,
+        null,
         cue.start_time_ms,
       );
       const endPosition = isNumber ? timelineDurationMs : cue.end_time_ms ?? durationMs;
@@ -854,17 +860,22 @@ export function ClipEditorDock({
     <div role="tablist" aria-label="Clip editor view" style={{ display: "flex", gap: 2 }}>
       {showLivePanel && (
         <button
-          type="button" role="tab" aria-selected={activeTab === "Live"}
-          onClick={() => setActiveTab("Live")}
-          style={tabButton(activeTab === "Live")}
-        >{CLIP_EDITOR_TAB_LABELS.timeline}</button>
+          type="button" role="tab" aria-selected={activeTab === "Preview"}
+          onClick={() => setActiveTab("Preview")}
+          style={tabButton(activeTab === "Preview")}
+        >{t("editorUi.previewTab")}</button>
       )}
+      <button
+        type="button" role="tab" aria-selected={activeTab === "Live"}
+        onClick={() => setActiveTab("Live")}
+        style={tabButton(activeTab === "Live")}
+      >{t("editorUi.liveTab")}</button>
       {showSlicePanel && !isNumber && (
         <button
           type="button" role="tab" aria-selected={activeTab === "Slice"}
           onClick={() => setActiveTab("Slice")}
           style={tabButton(activeTab === "Slice")}
-        >{CLIP_EDITOR_TAB_LABELS.slice}</button>
+        >{t("editorUi.sliceTab")}</button>
       )}
     </div>
   );
@@ -1009,6 +1020,20 @@ export function ClipEditorDock({
     });
   }, []);
 
+  if (activeTab === "Live") {
+    return (
+      <LiveMediaDock
+        candidates={liveCandidates}
+        selectedCue={selectedLiveCue}
+        onSelectCue={setManualLiveCueId}
+        showPreviewPanel={showLivePanel}
+        showSlicePanel={showSlicePanel && !isNumber}
+        onTabChange={setActiveTab}
+        onClose={onClose}
+      />
+    );
+  }
+
   if (!cue || cue.id !== cueId) {
     return (
       <div style={dockShell}>
@@ -1028,9 +1053,6 @@ export function ClipEditorDock({
 
   const hasVamp = slices.play_counts.some((c) => c === PLAY_COUNT_INFINITE);
   if (!cueId) return null;
-  const mediaPositionMs = isNumber
-    ? timing?.action_elapsed_ms ?? null
-    : timing?.media_position_ms ?? null;
   // Keep the silent inline-video cursor separate from both the main transport
   // playhead and the configured-headphone audition cursor.
   const previewPositionMs = isNumber
@@ -1044,10 +1066,6 @@ export function ClipEditorDock({
   // safe seek authority for a Number: after a stop the children may already
   // be gone while the last sample is still in the store. In that state a
   // timeline click is an inspector-preview seek, never a runtime seek.
-  const seekEnabled = isNumber
-    ? runtimeCueState === "running" || runtimeCueState === "paused"
-    : timing != null || runtimeCueState === "running" || runtimeCueState === "paused";
-
   if (!showLivePanel && !showSlicePanel) return null;
 
   return (
@@ -1055,7 +1073,7 @@ export function ClipEditorDock({
       {/* Header */}
       <div style={dockHeader}>
         <div style={controlsSlot}>
-          {activeTab === "Live" || isNumber ? (
+        {activeTab === "Preview" || isNumber ? (
             <>
               {mediaIdentity
                 ? <div style={videoControlsGroup}><VideoPreviewControls identity={mediaIdentity} buttonStyle={headerBtn} onTransportToggle={syncAuditionPlayback} onSeek={seekAuditionFromControl} /></div>
@@ -1117,7 +1135,7 @@ export function ClipEditorDock({
       {/* Timeline */}
       <div style={dockTimelineBody}>
         {timelineDurationMs > 0 ? (
-          activeTab === "Live" || isNumber ? (
+          activeTab === "Preview" || isNumber ? (
             <EditorErrorBoundary label="Таймлайн временно недоступен">
             <LiveTimeline
               durationMs={timelineDurationMs}
@@ -1128,42 +1146,12 @@ export function ClipEditorDock({
               paint={isVideo ? paintVideoTimeline : paintWaveform}
               paintKey={isVideo ? videoPaintKey : waveform}
               resetKey={cue.file_path}
-              mediaPositionMs={mediaPositionMs}
+              mediaPositionMs={null}
               previewPositionMs={previewPositionMs}
-              seekEnabled={seekEnabled}
+              seekEnabled={canSeekProgramFromClipEditor(activeTab, cue.state, cue.cue_type)}
               numberPreWaitMs={isNumber ? cue.pre_wait_ms : 0}
               numberPostWaitMs={isNumber ? cue.post_wait_ms : 0}
-              numberRuntimeElapsedMs={isNumber ? timing?.elapsed_ms ?? null : null}
-              onSeek={(ms) => {
-                const targetCueId = cueId;
-                if (isNumber) {
-                  // Number's master audio and visual children share one
-                  // clock. Always move the local cursor; only a live/paused
-                  // Number is allowed to receive a runtime seek command.
-                  useNumberPreviewStore.getState().setPosition(targetCueId, ms, timelineDurationMs);
-                  if (!seekEnabled) return;
-                  // Tauri deserializes Rust `u64` arguments strictly. The
-                  // canvas maps a pointer to a fractional millisecond, so
-                  // normalize it before crossing the command boundary.
-                  void seekCue(targetCueId, Math.max(0, Math.round(ms))).catch((err) => {
-                    if (displayedCueIdRef.current !== targetCueId) return;
-                    setPreviewUi((prev) => ({
-                      ...(prev?.cueId === targetCueId ? prev : { cueId: targetCueId, voiceId: null, positionMs: null, error: null }),
-                      error: String(err),
-                    }));
-                  });
-                  return;
-                }
-                if (mediaIdentity) useVideoPreviewTransport.getState().seek(mediaIdentity, ms);
-                const seek = seekCueMedia(targetCueId, Math.max(0, Math.round(ms)));
-                void seek.catch((err) => {
-                  if (displayedCueIdRef.current !== targetCueId) return;
-                  setPreviewUi((prev) => ({
-                    ...(prev?.cueId === targetCueId ? prev : { cueId: targetCueId, voiceId: null, positionMs: null, error: null }),
-                    error: String(err),
-                  }));
-                });
-              }}
+              numberRuntimeElapsedMs={null}
               onSeekEnd={seekAuditionFromControl}
               onPreviewPosition={(ms) => {
                 if (isNumber) {
@@ -1263,6 +1251,164 @@ export function ClipEditorDock({
           <div style={{ color: "var(--wc-text-faint)", fontSize: 12, padding: 16, textAlign: "center" }}>
             {cue.file_path ? t("sweepUi.waitingMedia") : t("sweepUi.noFileAssigned")}
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LiveMediaDock({
+  candidates,
+  selectedCue,
+  onSelectCue,
+  showPreviewPanel,
+  showSlicePanel,
+  onTabChange,
+  onClose,
+}: {
+  candidates: ReturnType<typeof activeLiveMediaCandidates>;
+  selectedCue: ReturnType<typeof resolveLiveMediaSelection>;
+  onSelectCue: (cueId: string) => void;
+  showPreviewPanel: boolean;
+  showSlicePanel: boolean;
+  onTabChange: (tab: ClipEditorTab) => void;
+  onClose: () => void;
+}) {
+  const { t } = useLocale();
+  const [cue, setCue] = useState<AudioCueData | VideoCueData | ImageCueData | null>(null);
+  const [waveform, setWaveform] = useState<WaveformData | null>(null);
+  const [tiles, setTiles] = useState<HTMLImageElement[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const timing = useTimingStore((state) => selectedCue ? state.timings[selectedCue.id] : undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCue(null);
+    setWaveform(null);
+    setTiles(null);
+    setLoadError(null);
+    if (!selectedCue) return () => { cancelled = true; };
+    void (async () => {
+      try {
+        const details = await getCue(selectedCue.id);
+        if (cancelled) return;
+        if (details.cue_type !== "audio" && details.cue_type !== "video" && details.cue_type !== "image") return;
+        setCue(details as AudioCueData | VideoCueData | ImageCueData);
+        if (details.cue_type !== "image") {
+          void getWaveformPeaks(selectedCue.id, 4096).then((peaks) => {
+            if (!cancelled) setWaveform(peaks);
+          }).catch(() => {});
+        }
+        if (details.cue_type === "video" && details.file_path) {
+          void getVideoFilmstrip(details.file_path, 16, FILMSTRIP_TILE_WIDTH)
+            .then((urls) => Promise.all(urls.map(loadImage)))
+            .then((images) => { if (!cancelled) setTiles(images); })
+            .catch(() => {});
+        }
+      } catch (error) {
+        if (!cancelled) setLoadError(String(error));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedCue?.id, selectedCue?.media_source_revision]);
+
+  const durationMs = cue && "display_duration_ms" in cue
+    ? Math.max(0, cue.display_duration_ms ?? selectedCue?.duration_ms ?? 0)
+    : (waveform?.file_duration_s ?? 0) * 1000
+      || cue?.file_duration_ms
+      || cue?.cached_duration_ms
+      || cue?.duration_ms
+      || selectedCue?.file_duration_ms
+      || selectedCue?.duration_ms
+      || 0;
+  const cueType = cue?.cue_type ?? selectedCue?.cue_type;
+  const trackName = cue?.name ?? selectedCue?.name ?? "";
+  const runtimePositionMs = cueType === "image"
+    ? timing?.elapsed_ms ?? null
+    : timing?.media_position_ms ?? null;
+  const seekEnabled = canSeekProgramFromClipEditor("Live", selectedCue?.state, cueType);
+  const trimStartMs = cue && "start_time_ms" in cue ? cue.start_time_ms : null;
+  const trimEndMs = cue && "end_time_ms" in cue ? cue.end_time_ms : null;
+  const liveSlices = cue && "slices" in cue ? cue.slices : undefined;
+  const livePaint = useCallback<TrimPainter>((ctx, width, height) => {
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(0, 0, width, height);
+  }, []);
+  const track = selectedCue && durationMs > 0 ? [{
+    id: selectedCue.id,
+    name: trackName,
+    startMs: 0,
+    endMs: durationMs,
+    sourceStartMs: 0,
+    sourceEndMs: durationMs,
+    master: true,
+    cueType: cueType as "audio" | "video" | "image",
+    media: { waveform, tiles },
+  }] : [];
+  const tabControls = (
+    <div role="tablist" aria-label="Clip editor view" style={{ display: "flex", gap: 2 }}>
+      {showPreviewPanel && <button type="button" role="tab" aria-selected={false} onClick={() => onTabChange("Preview")} style={tabButton(false)}>{t("editorUi.previewTab")}</button>}
+      <button type="button" role="tab" aria-selected="true" onClick={() => onTabChange("Live")} style={tabButton(true)}>{t("editorUi.liveTab")}</button>
+      {showSlicePanel && <button type="button" role="tab" aria-selected={false} onClick={() => onTabChange("Slice")} style={tabButton(false)}>{t("editorUi.sliceTab")}</button>}
+    </div>
+  );
+
+  return (
+    <div style={dockShell}>
+      <div style={dockHeader}>
+        <span style={{ width: HEADER_CONTROLS_SLOT_WIDTH, flex: `0 0 ${HEADER_CONTROLS_SLOT_WIDTH}px` }} />
+        {candidates.length > 0 ? (
+          <select
+            aria-label={t("editorUi.liveCueSelect")}
+            value={selectedCue?.id ?? ""}
+            onChange={(event) => onSelectCue(event.target.value)}
+            style={{ maxWidth: 320, minWidth: 160, color: "var(--wc-text)", background: "var(--wc-bg-app)", border: "1px solid var(--wc-border)", borderRadius: 4, padding: "3px 6px" }}
+          >
+            {candidates.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.number ? `#${candidate.number} ` : ""}{candidate.name ?? candidate.id}
+                {candidate.file_path ? ` · ${candidate.file_path.split(/[\\/]/).pop()}` : ""}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span style={{ color: "var(--wc-text-muted)", fontSize: 12 }}>{t("editorUi.noLiveMedia")}</span>
+        )}
+        <span style={{ flex: 1 }} />
+        {tabControls}
+        <button onClick={onClose} style={headerBtn} title={t("editorUi.closeEditor")}>✕</button>
+      </div>
+      <div style={dockTimelineBody}>
+        {loadError ? (
+          <div role="alert" style={{ color: "var(--wc-text-muted)", padding: 16 }}>{loadError}</div>
+        ) : !selectedCue ? (
+          <div style={{ color: "var(--wc-text-faint)", fontSize: 12, padding: 16, textAlign: "center" }}>{t("editorUi.noLiveMedia")}</div>
+        ) : !cue || (durationMs <= 0 && cue.cue_type !== "image") ? (
+          <div style={{ color: "var(--wc-text-faint)", fontSize: 12, padding: 16, textAlign: "center" }}>{t("sweepUi.waitingMedia")}</div>
+        ) : "display_duration_ms" in cue && durationMs <= 0 ? (
+          <div style={{ color: "var(--wc-text-faint)", fontSize: 12, padding: 16, textAlign: "center" }}>
+            {t("editorUi.liveImageIndeterminate")}{timing ? ` · ${(timing.elapsed_ms / 1000).toFixed(1)}s` : ""}
+          </div>
+        ) : (
+          <EditorErrorBoundary label="Таймлайн временно недоступен">
+            <LiveTimeline
+              durationMs={durationMs}
+              startMs={trimStartMs ?? null}
+              endMs={trimEndMs ?? durationMs}
+              slices={normalizeSlices(liveSlices)}
+              height={CLIP_EDITOR_TIMELINE_HEIGHT}
+              paint={livePaint}
+              paintKey={{ waveform, tiles }}
+              resetKey={selectedCue.id}
+              mediaPositionMs={runtimePositionMs}
+              seekEnabled={seekEnabled}
+              numberTracks={track}
+              onSeek={(positionMs) => {
+                if (!seekEnabled || !selectedCue) return;
+                void seekCueMedia(selectedCue.id, Math.max(0, Math.round(positionMs))).catch((error) => setLoadError(String(error)));
+              }}
+            />
+          </EditorErrorBoundary>
         )}
       </div>
     </div>

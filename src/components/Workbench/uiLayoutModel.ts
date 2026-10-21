@@ -8,7 +8,8 @@ export interface UiLayout {
   inspectorWidth: number;
   showLivePanel: boolean;
   showSlicePanel: boolean;
-  activeClipTab: "Live" | "Slice";
+  activeClipTab: "Preview" | "Live" | "Slice";
+  clipEditorTabVersion: 2;
 }
 
 export const INSPECTOR_MIN_WIDTH = 320;
@@ -22,7 +23,8 @@ export const DEFAULT_UI_LAYOUT: UiLayout = {
   inspectorWidth: INSPECTOR_DEFAULT_WIDTH,
   showLivePanel: true,
   showSlicePanel: true,
-  activeClipTab: "Live",
+  activeClipTab: "Preview",
+  clipEditorTabVersion: 2,
 };
 
 export const clampInspectorWidth = (width: number) =>
@@ -45,6 +47,10 @@ export function normalizeUiLayout(value: unknown): UiLayout {
     inspectorWidth: clampInspectorWidth(typeof parsed.inspectorWidth === "number" ? parsed.inspectorWidth : INSPECTOR_DEFAULT_WIDTH),
     showLivePanel: typeof parsed.showLivePanel === "boolean" ? parsed.showLivePanel : true,
     showSlicePanel: typeof parsed.showSlicePanel === "boolean" ? parsed.showSlicePanel : true,
-    activeClipTab: parsed.activeClipTab === "Slice" ? "Slice" : "Live",
+    activeClipTab: parsed.clipEditorTabVersion === 2
+      && (parsed.activeClipTab === "Preview" || parsed.activeClipTab === "Live" || parsed.activeClipTab === "Slice")
+      ? parsed.activeClipTab
+      : parsed.activeClipTab === "Slice" ? "Slice" : "Preview",
+    clipEditorTabVersion: 2,
   };
 }

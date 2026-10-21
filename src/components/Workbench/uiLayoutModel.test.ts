@@ -22,4 +22,9 @@ describe("normalizeUiLayout", () => {
     expect(normalizeUiLayout({ rightPanel: "closed", inspectorOpen: true, activeCuesOpen: true }))
       .toMatchObject({ rightPanel: "inspector", activeCuesOpen: true });
   });
+
+  it("migrates the old Timeline value once and preserves the version 2 Live tab", () => {
+    expect(normalizeUiLayout({ activeClipTab: "Live" }).activeClipTab).toBe("Preview");
+    expect(normalizeUiLayout({ activeClipTab: "Live", clipEditorTabVersion: 2 }).activeClipTab).toBe("Live");
+  });
 });

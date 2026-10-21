@@ -1266,6 +1266,7 @@ fn apply_display_preferences(next: &mut AppPreferences, prefs: DisplayPreference
     next.display.show_live_panel = prefs.show_live_panel;
     next.display.show_slice_panel = prefs.show_slice_panel;
     next.display.clip_editor_active_tab = prefs.clip_editor_active_tab;
+    next.display.clip_editor_active_tab_v2 = prefs.clip_editor_active_tab_v2;
     next.display.status_bar = prefs.status_bar;
 }
 
