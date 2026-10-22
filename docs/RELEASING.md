@@ -23,6 +23,12 @@ Actions workflow are separate checks.
 - The private updater key at `%USERPROFILE%\.tauri\qlisa.key`, or its external
   path passed with `-SigningKeyPath`. The script prompts for the password with
   a masked PowerShell prompt. It never prints or creates the private key.
+- A maintainer may use the local signing wrapper at
+  `%USERPROFILE%\.tauri\Invoke-QlisaReleaseSigning.ps1`. It reads a
+  CurrentUser-protected credential and exposes signing variables only to the
+  wrapped process, then restores the previous environment. Check that the
+  wrapper exists before using it. Do not copy its credential store into the
+  repository or pass the password on a command line.
 - `scripts/runtime-manifest.json` with the pinned upstream archive URLs and
   SHA-256 values. The app embeds this manifest as runtime configuration. No
   local media binaries, staging directory, or `prepare-runtime.ps1` step is
@@ -59,6 +65,21 @@ are under `src-tauri/target/release/bundle/nsis/`. The generated
 `latest.json` is under `src-tauri/target/release/prepared/vX.Y.Z/`. The script
 prints the artifact paths and SHA-256 values. It does not tag, push, or publish
 anything.
+
+When the local signing wrapper is present, invoke the same pipeline through it:
+
+```powershell
+$signingWrapper = Join-Path $env:USERPROFILE '.tauri\Invoke-QlisaReleaseSigning.ps1'
+if (-not (Test-Path -LiteralPath $signingWrapper -PathType Leaf)) {
+    throw 'Local signing wrapper is missing.'
+}
+& $signingWrapper -Action { .\scripts\publish.ps1 -Version "<target-version>" }
+```
+
+The wrapper uses Windows DPAPI with the current user's profile. It is a local
+credential helper, not a repository file. Keep the signing key and protected
+credential outside the repository. The normal masked prompt remains available
+when the wrapper is not used.
 
 `-DryRun` checks prerequisites without changing
 version files or building artifacts:
