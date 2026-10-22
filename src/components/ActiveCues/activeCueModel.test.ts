@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CueSummary, WorkspaceCueCatalogList } from "../../lib/types";
-import { cueProgressPercent, flattenActiveCues, flattenCatalogActiveCues, getActiveCueDisplayRows, getCatalogPauseTargets, migrateRightPanelMode, toggleRightPanel } from "./activeCueModel";
+import { cueProgressPercent, flattenActiveCues, flattenCatalogActiveCues, getActiveCueDisplayRows, getCatalogPauseTargets, getSelectedPauseTargets, migrateRightPanelMode, toggleRightPanel } from "./activeCueModel";
 
 const cue = (id: string, state: CueSummary["state"], children?: CueSummary["children"]): CueSummary => ({
   id, cue_type: "group", number: null, name: id, color: "none", state,
@@ -78,6 +78,47 @@ describe("Active Cues model", () => {
       { id: "remote", name: "Remote", cues: [{ id: "remote-running", cue_type: "audio", name: "Running", number: "1", state: "running", color: "none", duration_ms: 10, is_disabled: false }] },
     ];
     expect(getCatalogPauseTargets(lists).map((cue) => cue.id)).toEqual(["remote-running"]);
+  });
+
+  it("pauses only selected running cues in the active list and leaves parallel cues alone", () => {
+    const lists: WorkspaceCueCatalogList[] = [
+      { id: "active", name: "Active", cues: [
+        { id: "selected", cue_type: "audio", name: "Selected", number: "1", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+        { id: "parallel", cue_type: "audio", name: "Parallel", number: "2", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+      ] },
+      { id: "other", name: "Other", cues: [
+        { id: "remote", cue_type: "audio", name: "Remote", number: "1", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+      ] },
+    ];
+    expect(getSelectedPauseTargets(lists[0], ["selected"]).map(({ id }) => id)).toEqual(["selected"]);
+    expect(getSelectedPauseTargets(lists[1], ["selected"])).toEqual([]);
+    expect(getSelectedPauseTargets(lists[0], [])).toEqual([]);
+  });
+
+  it("uses selected Group and Number pause state without targeting their children twice", () => {
+    const list: WorkspaceCueCatalogList = { id: "active", name: "Active", cues: [
+      { id: "group", cue_type: "group", name: "Group", number: "1", state: "running", color: "none", duration_ms: null, is_disabled: false, children: [
+        { id: "child", cue_type: "audio", name: "Child", number: "1.1", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+      ] },
+      { id: "number", cue_type: "number", name: "Number", number: "2", state: "paused", color: "none", duration_ms: null, is_disabled: false, children: [
+        { id: "number-child", cue_type: "audio", name: "Number child", number: "2.1", state: "paused", color: "none", duration_ms: 10, is_disabled: false },
+      ] },
+    ] };
+    expect(getSelectedPauseTargets(list, ["group", "child"]).map(({ id }) => id)).toEqual(["group"]);
+    // When no selected cue runs, resume selected paused containers; pauseCue/resumeCue
+    // already apply the Group/Number behavior to their descendants.
+    expect(getSelectedPauseTargets(list, ["number", "number-child"]).map(({ id }) => id)).toEqual(["number"]);
+  });
+
+  it("keeps independently running children eligible under inactive or paused selected containers", () => {
+    const list: WorkspaceCueCatalogList = { id: "active", name: "Active", cues: [
+      { id: "group", cue_type: "group", name: "Group", number: "1", state: "standby", color: "none", duration_ms: null, is_disabled: false, children: [
+        { id: "child", cue_type: "audio", name: "Child", number: "1.1", state: "running", color: "none", duration_ms: 10, is_disabled: false },
+      ] },
+    ] };
+    expect(getSelectedPauseTargets(list, ["group", "child"]).map(({ id }) => id)).toEqual(["child"]);
+    list.cues[0].state = "paused";
+    expect(getSelectedPauseTargets(list, ["group", "child"]).map(({ id }) => id)).toEqual(["child"]);
   });
 
   it("does not invent progress for indefinite cues", () => {

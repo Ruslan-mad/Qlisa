@@ -62,12 +62,14 @@ when selection order differs. Backend cue moves preserve the existing nested
 membership and undo snapshots.
 
 An active Group or Number appears as one row in Active Cues; its active
-descendants remain available to global Pause/Resume. The Active Cues row's
-explicit Stop addresses that container and can stop a protected background
-Number. Ordinary Stop, Hard Stop, and Number stop-on-start preserve a Number
-marked as a background screensaver and its protected subtree. Global Panic also
-preserves those protected voices. These are code-path guarantees; this note does
-not claim hardware playback validation.
+descendants remain available to global OSC Pause/Resume. The transport bar
+Pause/Resume acts on selected active cues in the active cue list. A selected
+Group or Number handles its descendants through the existing cue behavior. The
+Active Cues row's explicit Stop addresses that container and can stop a
+protected background Number. Ordinary Stop, Hard Stop, and Number stop-on-start
+preserve a Number marked as a background screensaver and its protected subtree.
+Global Panic also preserves those protected voices. These are code-path
+guarantees; this note does not claim hardware playback validation.
 
 ## Tree appearance
 

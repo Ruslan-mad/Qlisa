@@ -910,7 +910,9 @@ Active Cues flattens running and paused cues from the recursive summaries in
 `workspaceStore.cues`, including nested Group children. It reads per-cue time
 from event-driven `timingStore`; it does not own playback state or run a timer.
 An active Group or Number is shown as one container row instead of also showing
-its active descendants. Global Pause/Resume still targets active descendants.
+its active descendants. The transport bar Pause/Resume acts on selected active
+cues in the active cue list. OSC `/inkue/pause_toggle` keeps its global behavior
+and still targets active descendants across lists.
 Each row's explicit Stop can stop its cue even when a Number background flag
 protects it from ordinary stop commands.
 The cue list retains its existing 30 Hz timing events. Finite-duration cues

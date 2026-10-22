@@ -14,7 +14,7 @@ import { animateButtonPress } from "../common/buttonPressAnimation";
 import { useLocale } from "../../i18n";
 import { transportErrorFromEvent } from "./transportErrorModel";
 import { MediaConversionStatus } from "./MediaConversionStatus";
-import { flattenCatalogActiveCues, getCatalogPauseTargets } from "../ActiveCues/activeCueModel";
+import { flattenCatalogActiveCues, getSelectedPauseTargets } from "../ActiveCues/activeCueModel";
 import { stopSelectedCueSet } from "../CueList/cueListKeyboard";
 
 interface Props {
@@ -210,6 +210,7 @@ const OSC_ACTIVITY_MS = 300;
 export function TransportBar({ onRefresh }: Props) {
   const { t } = useLocale();
   const cueCatalog = useWorkspaceStore((state) => state.cueCatalog);
+  const activeCueListId = useWorkspaceStore((state) => state.activeCueListId);
   const selectedCueIds = useWorkspaceStore((state) => state.selectedCueIds);
   const cues = useWorkspaceStore((state) => state.cues);
   const { masterPeakL, masterPeakR, oscActivityAt } = useTransportStore();
@@ -313,19 +314,21 @@ export function TransportBar({ onRefresh }: Props) {
 
   const runningCues = flattenCatalogActiveCues(cueCatalog);
 
-  // Pause toggle: pause every running cue, or (if none running) resume every
-  // paused cue — same semantics as the OSC `/inkue/pause_toggle` handler.
-  const hasRunning = runningCues.some((c) => c.state === "running");
-  const hasPaused = runningCues.some((c) => c.state === "paused");
+  // Toolbar Pause follows the selected cues in the active list. Global OSC
+  // pause_toggle keeps its separate all-cues behavior.
+  const activeCueList = cueCatalog.find((list) => list.id === activeCueListId);
+  const pauseTargets = getSelectedPauseTargets(activeCueList, selectedCueIds);
+  const hasRunning = pauseTargets.some((c) => c.state === "running");
+  const hasPaused = pauseTargets.some((c) => c.state === "paused");
   const pauseDisabled = !hasRunning && !hasPaused;
   const pauseLabel = hasRunning ? "PAUSE" : hasPaused ? "RESUME" : "PAUSE";
 
   const handlePauseToggle = async () => {
     try {
       if (hasRunning) {
-        for (const c of getCatalogPauseTargets(cueCatalog)) await pauseCue(c.id);
+        for (const c of pauseTargets) await pauseCue(c.id);
       } else if (hasPaused) {
-        for (const c of getCatalogPauseTargets(cueCatalog)) await resumeCue(c.id);
+        for (const c of pauseTargets) await resumeCue(c.id);
       }
     } catch (err) {
       console.error(err);
@@ -413,7 +416,7 @@ export function TransportBar({ onRefresh }: Props) {
         onClickCapture={(event) => animateButtonPress(event.currentTarget)}
         onClick={handlePauseToggle}
         disabled={pauseDisabled}
-        title={`${t("components.pauseResumeAll")} · ${t("transport.pauseShortcutSelected")}`}
+        title={`${t("components.pauseResumeSelected")} · ${t("transport.pauseShortcutSelected")}`}
         className="stage-transport-button stage-transport-pause"
         style={{
           width: 118, height: 72, padding: "7px 12px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,

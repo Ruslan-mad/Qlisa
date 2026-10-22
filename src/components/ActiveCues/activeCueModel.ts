@@ -1,4 +1,5 @@
 import type { CueSummary, WorkspaceCueCatalogEntry, WorkspaceCueCatalogList } from "../../lib/types";
+import { topLevelSelectedStopIds, type KeyboardCueNode } from "../CueList/cueListKeyboard";
 
 export type RightPanelMode = "closed" | "inspector" | "active-cues";
 
@@ -55,6 +56,30 @@ export function getCatalogPauseTargets(lists: WorkspaceCueCatalogList[]): Catalo
   const active = [...activeById.values()];
   const running = active.filter((cue) => cue.state === "running");
   return running.length > 0 ? running : active.filter((cue) => cue.state === "paused");
+}
+
+/** Resolve the selected active cues in one list for the transport toggle. */
+export function getSelectedPauseTargets(
+  list: WorkspaceCueCatalogList | null | undefined,
+  selectedIds: readonly string[],
+): WorkspaceCueCatalogEntry[] {
+  if (!list || selectedIds.length === 0) return [];
+  const byId = new Map<string, WorkspaceCueCatalogEntry>();
+  const collect = (cues: WorkspaceCueCatalogEntry[]) => {
+    for (const cue of cues) {
+      byId.set(cue.id, cue);
+      if (cue.children) collect(cue.children);
+    }
+  };
+  collect(list.cues);
+  const selected = selectedIds.map((id) => byId.get(id)).filter(
+    (cue): cue is WorkspaceCueCatalogEntry => cue != null && (cue.state === "running" || cue.state === "paused"),
+  );
+  const running = selected.filter((cue) => cue.state === "running");
+  const targets = running.length > 0 ? running : selected.filter((cue) => cue.state === "paused");
+  const tree: KeyboardCueNode[] = list.cues;
+  const topLevelIds = new Set(topLevelSelectedStopIds(targets.map((cue) => cue.id), tree));
+  return targets.filter((cue) => topLevelIds.has(cue.id));
 }
 
 export function cueProgressPercent(elapsedMs: number, durationMs: number | null | undefined): number | null {
