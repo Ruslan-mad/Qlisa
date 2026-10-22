@@ -68,4 +68,26 @@ describe("headphone preview timing", () => {
     });
     expect(useTimingStore.getState().previewPlayhead).toBeNull();
   });
+
+  it("clears workspace timing without lowering the preview generation watermark", () => {
+    const store = useTimingStore.getState();
+    store.setTiming("cue-old", {
+      elapsed_ms: 1, action_elapsed_ms: 1, remaining_ms: 9,
+      media_position_ms: 1, wait_phase: null, wait_elapsed_ms: null, wait_duration_ms: null,
+    });
+    store.setPreviewPlayhead({
+      cue_id: "preview-old", media_position_ms: 42, playing: true,
+      active: true, generation: 15,
+    });
+
+    useTimingStore.getState().resetWorkspaceTiming();
+    expect(useTimingStore.getState().timings).toEqual({});
+    expect(useTimingStore.getState().previewPlayhead).toBeNull();
+    expect(useTimingStore.getState().previewPlayheadGeneration).toBe(15);
+    useTimingStore.getState().setPreviewPlayhead({
+      cue_id: "preview-old", media_position_ms: 43, playing: true,
+      active: true, generation: 15,
+    });
+    expect(useTimingStore.getState().previewPlayhead).toBeNull();
+  });
 });

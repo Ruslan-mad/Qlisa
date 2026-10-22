@@ -25,6 +25,7 @@ use commands::{
         add_cue, add_cue_to_group, add_number_action, add_targeted_cue, bulk_update_cues,
         clear_cue_numbers, control_cue_preview, duplicate_cue, duplicate_cues, get_all_cues, get_cue, get_cues, get_workspace_cue_catalog,
         get_media_thumbnail, get_normalize_db, get_output_window_visible, get_playhead,
+        get_workspace_snapshot,
         get_video_filmstrip, get_video_filmstrip_range, get_waveform_peaks, group_cues,
         identify_output_screen, list_camera_devices, list_ndi_sources, list_video_screens,
         move_cue, move_cues, move_to_top_level, prepare_video_preview, preview_cue, remove_cue,
@@ -658,6 +659,7 @@ pub fn run() {
             // Cues
             get_all_cues,
             get_workspace_cue_catalog,
+            get_workspace_snapshot,
             get_cue,
             get_cues,
             add_cue,

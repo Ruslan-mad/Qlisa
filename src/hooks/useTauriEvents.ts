@@ -24,13 +24,15 @@ import type {
 
 interface TauriEventsOptions {
   onLoadError?: (cueId: string, error: string) => void;
+  onReady?: () => void;
+  onSetupError?: (error: unknown) => void;
 }
 
-export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
-  const { refreshCues, refreshWorkspaceInfo, refreshValidation, refreshHealth, loadDisplayPrefs, loadGeneralPrefs, setPlayheadCueId, updateCueState, setCueLists, markCuePlayed, clearPlayedCueHistory } =
+export function useTauriEvents({ onLoadError, onReady, onSetupError }: TauriEventsOptions = {}) {
+  const { refreshCues, refreshWorkspaceInfo, refreshValidation, refreshHealth, loadDisplayPrefs, loadGeneralPrefs, setPlayheadCueId, updateCueState, setCueLists, markCuePlayed, resetWorkspaceView } =
     useWorkspaceStore();
   const { updateMasterLevels, markOscActivity, addOscLog } = useTransportStore();
-  const { setTiming, clearTiming, setPreviewPlayhead } = useTimingStore();
+  const { setTiming, clearTiming, setPreviewPlayhead, resetWorkspaceTiming } = useTimingStore();
 
   useEffect(() => {
     let cancelled = false;
@@ -107,7 +109,8 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
 
       unlisteners.push(
         await listen("workspace-replaced", async () => {
-          clearPlayedCueHistory();
+          resetWorkspaceView();
+          resetWorkspaceTiming();
           // Workspace replacement overlays the global preferences mirror. Keep
           // the main-window selectors in sync; ordinary global updates use the
           // dedicated preferences-updated event below.
@@ -315,8 +318,14 @@ export function useTauriEvents({ onLoadError }: TauriEventsOptions = {}) {
         // instantly re-showing the output window). Sweep again once setup
         // settles.
         if (cancelled) unlisteners.splice(0).forEach((u) => u());
+        else onReady?.();
       })
-      .catch(console.error);
+      .catch((error) => {
+        unlisteners.splice(0).forEach((unlisten) => unlisten());
+        if (cancelled) return;
+        console.error("Failed to register backend event listeners:", error);
+        onSetupError?.(error);
+      });
 
     return () => {
       cancelled = true;

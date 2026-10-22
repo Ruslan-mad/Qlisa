@@ -124,7 +124,7 @@ describe("session-only fired cue history", () => {
   });
 
   it("keeps unique fired history, updates repeat start order, and clears on workspace replacement", () => {
-    const { markCuePlayed, clearPlayedCueHistory } = useWorkspaceStore.getState();
+    const { markCuePlayed, resetWorkspaceView } = useWorkspaceStore.getState();
     markCuePlayed("cue-a");
     const firstOrder = useWorkspaceStore.getState().cueStartOrder["cue-a"];
     markCuePlayed("cue-a");
@@ -135,7 +135,7 @@ describe("session-only fired cue history", () => {
     expect(useWorkspaceStore.getState().cueStartOrderCounter).toBe(3);
 
     const revisionBeforeWorkspaceReplacement = useWorkspaceStore.getState().cueSelectionRevision;
-    clearPlayedCueHistory();
+    resetWorkspaceView();
     expect(useWorkspaceStore.getState().playedCueIds.size).toBe(0);
     expect(useWorkspaceStore.getState().cueStartOrder).toEqual({});
     expect(useWorkspaceStore.getState().cueStartOrderCounter).toBe(0);

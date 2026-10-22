@@ -386,7 +386,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
   const { t, locale } = useLocale();
   const {
     cues, selectedCueId, selectedCueIds, playheadCueId,
-    setCueSelection, setPlayheadCueId, generalPrefs, displayPrefs,
+    setCueSelection, setPlayheadCueId, generalPrefs, displayPrefs, workspaceContextRevision,
   } = useWorkspaceStore();
   const [outputStatuses, setOutputStatuses] = useState<OutputControlStatus[]>([]);
 
@@ -471,6 +471,11 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
   const anchorCueIdRef = useRef<string | null>(null);
   const selectionEndRef = useRef<string | null>(null);
   const selectedCueSet = useMemo(() => new Set(selectedCueIds), [selectedCueIds]);
+
+  useEffect(() => {
+    anchorCueIdRef.current = null;
+    selectionEndRef.current = null;
+  }, [workspaceContextRevision]);
 
   useEffect(() => {
     if (columnThemeRef.current === columnTheme) return;

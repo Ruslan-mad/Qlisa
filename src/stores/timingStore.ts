@@ -22,6 +22,7 @@ interface TimingState {
   previewPlayheadGeneration: number;
   setTiming: (cueId: CueId, t: CueTiming) => void;
   clearTiming: (cueId: CueId) => void;
+  resetWorkspaceTiming: () => void;
   setPreviewPlayhead: (event: PreviewPlayheadEvent) => void;
 }
 
@@ -39,6 +40,15 @@ export const useTimingStore = create<TimingState>((set) => ({
       const { [cueId]: _removed, ...rest } = s.timings;
       return { timings: rest };
     }),
+
+  resetWorkspaceTiming: () =>
+    set((state) => ({
+      timings: {},
+      // Keep the terminal generation watermark. A delayed preview packet from
+      // the previous workspace must not revive a cursor after replacement.
+      previewPlayhead: null,
+      previewPlayheadGeneration: state.previewPlayheadGeneration,
+    })),
 
   setPreviewPlayhead: (event) =>
     set((state) => {

@@ -244,6 +244,18 @@ pub struct WorkspaceCueCatalogEntry {
     pub children: Vec<WorkspaceCueCatalogEntry>,
 }
 
+/// A consistent read of the frontend's workspace identity and its display data.
+/// Kept in one command so a project replacement cannot split list IDs, cues,
+/// playhead, and target catalog across different backend workspace versions.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceSnapshot {
+    pub cue_lists: Vec<crate::commands::cue_list_cmds::CueListInfo>,
+    pub active_cue_list_id: String,
+    pub cues: Vec<CueSummary>,
+    pub playhead_cue_id: Option<String>,
+    pub cue_catalog: Vec<WorkspaceCueCatalogList>,
+}
+
 fn catalog_cues(
     cues: &[Box<dyn Cue>],
     patches: &PatchTable,
@@ -1127,6 +1139,89 @@ pub fn get_workspace_cue_catalog(
         populate_catalog_source_revisions(&mut list.cues, workspace_dir.as_deref());
     }
     Ok(catalog)
+}
+
+/// Return one workspace-consistent snapshot for frontend startup and replacement.
+#[tauri::command]
+pub fn get_workspace_snapshot(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<WorkspaceSnapshot, String> {
+    let metadata = state
+        .media_metadata
+        .lock()
+        .map_err(|e| e.to_string())?
+        .snapshot();
+    let ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let loading = state.loading_cues.lock().map_err(|e| e.to_string())?;
+    let active = ws.active_cue_list().ok_or("No active cue list")?;
+    let active_cue_list_id = active.id.to_string();
+    let playhead_cue_id = active.playhead_cue_id.map(|id| id.to_string());
+    let cue_lists = crate::commands::cue_list_cmds::cue_list_infos(&ws);
+    let ws_dir = ws
+        .file_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(std::path::Path::to_owned);
+    let ws_dir_ref = ws_dir.as_deref();
+    let patch_table = PatchTable {
+        patches: &ws.output_patches,
+        default_id: ws.default_output_patch_id,
+    };
+    let target_index = workspace_target_index(&ws);
+    let mut metadata_requests = HashSet::new();
+    let cues = active
+        .cues
+        .iter()
+        .map(|cue| {
+            summarise(
+                cue.as_ref(),
+                ws_dir_ref,
+                &patch_table,
+                &metadata,
+                &target_index,
+                &mut metadata_requests,
+                &loading,
+            )
+        })
+        .collect();
+    let mut cue_catalog: Vec<_> = ws
+        .cue_lists
+        .iter()
+        .map(|list| WorkspaceCueCatalogList {
+            id: list.id.to_string(),
+            name: list.name.clone(),
+            cues: catalog_cues(&list.cues, &patch_table, &loading),
+        })
+        .collect();
+    drop(loading);
+    drop(ws);
+
+    // File metadata probing must stay outside the workspace lock.
+    for list in &mut cue_catalog {
+        populate_catalog_source_revisions(&mut list.cues, ws_dir_ref);
+    }
+    let jobs = state
+        .media_metadata
+        .lock()
+        .map_err(|e| e.to_string())?
+        .reserve_missing(metadata_requests);
+    if !jobs.is_empty() {
+        let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
+    }
+    spawn_media_metadata_batch(
+        jobs,
+        Arc::clone(&state.media_metadata),
+        state.output_engine.try_mpv_lib_arc(),
+        app_handle,
+    );
+    Ok(WorkspaceSnapshot {
+        cue_lists,
+        active_cue_list_id,
+        cues,
+        playhead_cue_id,
+        cue_catalog,
+    })
 }
 
 /// Return the full serialised JSON for a single cue.

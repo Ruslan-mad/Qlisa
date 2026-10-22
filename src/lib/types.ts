@@ -850,6 +850,15 @@ export interface WorkspaceCueCatalogList {
   cues: WorkspaceCueCatalogEntry[];
 }
 
+/** One backend-consistent read of the active list and all cue-list targets. */
+export interface WorkspaceSnapshot {
+  cue_lists: CueListSummary[];
+  active_cue_list_id: string;
+  cues: CueSummary[];
+  playhead_cue_id: CueId | null;
+  cue_catalog: WorkspaceCueCatalogList[];
+}
+
 export interface WorkspaceInfo {
   name: string;
   is_modified: boolean;

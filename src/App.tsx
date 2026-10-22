@@ -20,9 +20,11 @@ import { TransportBar } from "./components/Transport/TransportBar";
 import { StatusBar } from "./components/Transport/StatusBar";
 import { FullscreenControl } from "./components/Transport/FullscreenControl";
 import { useTauriEvents } from "./hooks/useTauriEvents";
+import { createProjectOpenStartupGate } from "./lib/projectOpenStartup";
+import { reconcileWorkspaceAfterReplacement } from "./lib/reconcileWorkspaceReplacement";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useWorkspaceStore } from "./stores/workspaceStore";
-import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, getWorkspaceInfo, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, getCueLists, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences, stopAll, hardStopAll } from "./lib/commands";
+import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, getWorkspaceInfo, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences, stopAll, hardStopAll } from "./lib/commands";
 import { AboutDialog } from "./components/About/AboutDialog";
 import { UpdateDialog } from "./components/Update/UpdateDialog";
 import { useUpdateStore } from "./stores/updateStore";
@@ -830,6 +832,7 @@ export default function App() {
   const [logsOpen, setLogsOpen]                   = useState(false);
   const [searchQuery, setSearchQuery]             = useState("");
   const [recoveryInfo, setRecoveryInfo]           = useState<RecoveryInfo | null>(null);
+  const projectOpenGateRef = useRef<ReturnType<typeof createProjectOpenStartupGate> | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const closeDialogOpenRef = useRef(false);
   const activePlaybackCloseOpenRef = useRef(false);
@@ -912,15 +915,6 @@ export default function App() {
   // Bootstrap
   useEffect(() => {
     refreshCues();
-    // Use getState() inside the .then() so we read the store at resolution time,
-    // not at call time. This prevents a stale response from overwriting a
-    // cue-lists-changed event that fired while the IPC was in flight.
-    void getCueLists().then((lists) => {
-      const store = useWorkspaceStore.getState();
-      if (store.cueLists.length === 0 && lists.length > 0) {
-        store.setCueLists(lists, lists[0].id);
-      }
-    }).catch(console.error);
     refreshWorkspaceInfo();
     void refreshValidation();
     void refreshHealth();
@@ -954,14 +948,14 @@ export default function App() {
   const handleRecover = useCallback(async () => {
     setRecoveryInfo(null);
     try {
+      const replacementRevision = useWorkspaceStore.getState().workspaceReplacementRevision;
       await restoreRecovery();
-      await refreshCues();
-      await refreshWorkspaceInfo();
+      await reconcileWorkspaceAfterReplacement(replacementRevision);
     } catch (err) {
       console.error("restore recovery failed", err);
       setLoadError(t("sweepUi.recoveryFailed", { error: String(err) }));
     }
-  }, [refreshCues, refreshWorkspaceInfo, t]);
+  }, [t]);
 
   const handleDiscardRecovery = useCallback(async () => {
     setRecoveryInfo(null);
@@ -1021,7 +1015,9 @@ export default function App() {
 
   const performOpenWorkspacePath = useCallback(async (path: string): Promise<boolean> => {
     try {
+      const replacementRevision = useWorkspaceStore.getState().workspaceReplacementRevision;
       await loadWorkspace(path);
+      await reconcileWorkspaceAfterReplacement(replacementRevision);
       setConfirmedSavedAt(null);
       setRecentFiles(pushRecentFile(path));
       setSearchQuery("");
@@ -1142,7 +1138,12 @@ export default function App() {
 
   const handleNew = useCallback(async () => {
     runWorkspaceAction(async () => {
-      try { await newWorkspace(); setConfirmedSavedAt(null); }
+      try {
+        const replacementRevision = useWorkspaceStore.getState().workspaceReplacementRevision;
+        await newWorkspace();
+        await reconcileWorkspaceAfterReplacement(replacementRevision);
+        setConfirmedSavedAt(null);
+      }
       catch (error) { console.error("Failed to create Qlisa project", error); setWorkspaceError(String(error)); }
     });
   }, [runWorkspaceAction]);
@@ -1158,7 +1159,9 @@ export default function App() {
         // The import replaces the current show and is deliberately left unsaved:
         // media resolves against the QLab bundle folder, so nothing is written
         // into the user's QLab project. Save As is the operator's next step.
+        const replacementRevision = useWorkspaceStore.getState().workspaceReplacementRevision;
         setImportReport(await importQlabWorkspace(path));
+        await reconcileWorkspaceAfterReplacement(replacementRevision);
         setSearchQuery("");
       } catch (err) {
         setWorkspaceError(String(err));
@@ -1181,21 +1184,31 @@ export default function App() {
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    const drain = () => {
+    const gate = createProjectOpenStartupGate(() => {
       void drainPendingProjectOpens()
         .then(enqueueProjectOpens)
         .catch((error) => console.error("Failed to receive project-open request", error));
-    };
+    });
+    projectOpenGateRef.current = gate;
     // Register first. The queue then covers both startup arguments and later
     // single-instance/open-with requests without a startup race.
-    void listen("project-open-requested", drain).then((stop) => {
+    void listen("project-open-requested", gate.requestDrain).then((stop) => {
       if (disposed) stop();
       else {
         unlisten = stop;
-        drain();
+        gate.requestDrain();
       }
-    }).catch((error) => console.error("Failed to listen for project-open requests", error));
-    return () => { disposed = true; unlisten?.(); };
+    }).catch((error) => {
+      if (disposed) return;
+      console.error("Failed to listen for project-open requests", error);
+      setLoadError(`Failed to listen for project-open requests: ${String(error)}`);
+    });
+    return () => {
+      disposed = true;
+      gate.dispose();
+      if (projectOpenGateRef.current === gate) projectOpenGateRef.current = null;
+      unlisten?.();
+    };
   }, [enqueueProjectOpens]);
 
   useEffect(() => {
@@ -1293,7 +1306,15 @@ export default function App() {
     setLoadError(error);
   }, []);
 
-  useTauriEvents({ onLoadError: handleLoadError });
+  useTauriEvents({
+    onLoadError: handleLoadError,
+    onReady: () => {
+      projectOpenGateRef.current?.markListenersReady();
+    },
+    onSetupError: (error) => {
+      setLoadError(`Failed to register backend event listeners: ${String(error)}`);
+    },
+  });
 
   const handleRefresh = useCallback(async () => {
     await refreshCues();

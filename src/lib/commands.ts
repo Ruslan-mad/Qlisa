@@ -59,6 +59,7 @@ import type {
   WaveformData,
   WorkspaceInfo,
   WorkspaceCueCatalogList,
+  WorkspaceSnapshot,
   MediaInfo,
   ProbeMetadata,
   MediaCompatibility,
@@ -120,6 +121,7 @@ export const resumeCue = (cueId: CueId) =>
 
 export const getAllCues = () => invoke<CueSummary[]>("get_all_cues");
 export const getWorkspaceCueCatalog = () => invoke<WorkspaceCueCatalogList[]>("get_workspace_cue_catalog");
+export const getWorkspaceSnapshot = () => invoke<WorkspaceSnapshot>("get_workspace_snapshot");
 export const getCue = (cueId: CueId) =>
   invoke<AudioCueData | VideoCueData | ImageCueData | NumberCueData>("get_cue", { cueId });
 export const addCue = (cueType: CueType, position = -1) =>
@@ -400,7 +402,7 @@ export const collectAndSave = (targetDir: string) =>
 
 /** Returns snapshot metadata if a previous session ended without a clean exit. */
 export const checkRecovery = () => invoke<RecoveryInfo | null>("check_recovery");
-export const restoreRecovery = () => invoke<void>("restore_recovery");
+export const restoreRecovery = () => runCueListContextTransition(() => invoke<void>("restore_recovery"));
 export const discardRecovery = () => invoke<void>("discard_recovery");
 
 // ---------------------------------------------------------------------------

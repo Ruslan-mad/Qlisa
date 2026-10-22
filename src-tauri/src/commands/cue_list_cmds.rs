@@ -119,7 +119,7 @@ pub fn set_active_cue_list(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn cue_list_infos(ws: &Workspace) -> Vec<CueListInfo> {
+pub(crate) fn cue_list_infos(ws: &Workspace) -> Vec<CueListInfo> {
     ws.cue_lists
         .iter()
         .map(|cl| CueListInfo {
