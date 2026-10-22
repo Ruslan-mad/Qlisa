@@ -259,6 +259,15 @@ Features represented in the current tree include:
   overrides use cue-level geometry. Newly created visual cues can route to the
   enabled displays selected in Preferences → Display. Browser uses only the
   first selected display; if none is enabled, the regular default output applies.
+- Preferences → Defaults stores six global initial Black Bars values: Video ON,
+  Photos (JPG/JPEG/BMP) ON, and PNG, WebP, GIF, and SVG OFF. The Video value
+  applies when a new Video cue is created, including Number actions. The image
+  value applies on first file assignment. Saved cue values and values on later
+  file replacement remain unchanged. Verification passed: 563 frontend tests,
+  five targeted Rust tests, `pnpm build`, and `pnpm tauri:check`. Native QA
+  confirmed all six initial values and showed an existing Video cue with Black
+  Bars off. UI checks of persistence, new-cue creation, and file replacement
+  were stopped by the user with Esc and not completed.
 - Enabling Loop in the Audio or Video Time tab starts infinite playback; its
   infinity control switches between infinite looping and one finite extra
   repeat. The compact Basics Loop control toggles between infinite looping and
