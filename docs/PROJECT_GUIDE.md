@@ -1005,6 +1005,21 @@ with playing Video 3 selected, P froze the clock at 0:14 and the next P resumed
 it to 0:19. These checks do not establish audio playback or physical-device
 behavior.
 
+## Transport controls and meters
+
+The transport bar panel map controls Cue Toolbar, Active Cues, Inspector, and
+the Clip Editor dock. Its layout visibility is saved separately from the
+available Preview/Live/Slice tabs, so hiding the dock does not change its tab
+set. The Inspector also owns the Media Dock. Master volume runs from −60 to
++6 dB; pointer input snaps to unity near 0 dB, while keyboard steps remain
+0.5 dB. Meter scale and peak decay remain on the −60 to 0 dBFS range.
+
+Verification passed: 570 frontend tests, `pnpm build`, and `pnpm tauri:check`.
+The local browser harness checked panel toggles and FTB wiring with mocked
+outputs and fixed meter samples. It showed no overflow at 1280 px; the 1920 px
+check inspected DOM layout because the browser surface limited the screenshot.
+It did not test live audio or device output.
+
 ## Troubleshooting
 
 | Symptom | Check |

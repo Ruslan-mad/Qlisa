@@ -1,7 +1,7 @@
 // Bottom transport bar: GO / STOP + running cue info + horizontal VU-meter + volume slider.
 
 import { useEffect, useRef, useState } from "react";
-import { Pause, Play, SpeakerHigh, Stop } from "@phosphor-icons/react";
+import { Pause, Play, Stop } from "@phosphor-icons/react";
 import { stopCue, pauseCue, resumeCue, setMasterVolume, getPreferences, openMixerWindow } from "../../lib/commands";
 import { goAndFollowSelection } from "../../lib/goWithSelection";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
@@ -17,190 +17,31 @@ import { MediaConversionStatus } from "./MediaConversionStatus";
 import { flattenCatalogActiveCues, getSelectedPauseTargets } from "../ActiveCues/activeCueModel";
 import { toggleSelectedPauseTargets } from "../ActiveCues/selectedPauseToggle";
 import { stopSelectedCueSet } from "../CueList/cueListKeyboard";
+import { TransportPanelControls, type TransportPanelName } from "./TransportPanelControls";
+import type { TransportPanelVisibility } from "../Workbench/uiLayoutModel";
+import { METER_MAX_DB, METER_MIN_DB, TransportAudioMeters, peakToFillPct } from "./TransportMeters";
 
 interface Props {
   onRefresh: () => void;
+  panelVisibility: TransportPanelVisibility;
+  onTogglePanel: (panel: TransportPanelName) => void;
 }
 
 // ---------------------------------------------------------------------------
 // dB helpers
 // ---------------------------------------------------------------------------
 
-const MIN_DB = -60;
-const MAX_DB = 0;
-const DB_RANGE = MAX_DB - MIN_DB; // 60
-
-function linearToDb(linear: number): number {
-  return linear > 0 ? 20 * Math.log10(linear) : -Infinity;
-}
-
-/** Map a dB value to a 0–1 fill ratio for the meter bar. */
-function dbToRatio(db: number): number {
-  return Math.max(0, Math.min(1, (db - MIN_DB) / DB_RANGE));
-}
-
-/** Convert a linear peak (0.0–1.0) to a meter fill percentage (0–100). */
-function peakToFillPct(linear: number): number {
-  return dbToRatio(linearToDb(linear)) * 100;
-}
-
 // Decay / hold constants
 /** Bar falls at this many dB per second. */
 const BAR_DECAY_DB_PER_SEC = 20;
 /** Converted to fill-% per animation frame (assuming ~60 fps). */
-const BAR_DECAY_PCT_PER_FRAME = (BAR_DECAY_DB_PER_SEC / DB_RANGE) * 100 / 60;
+const BAR_DECAY_PCT_PER_FRAME = (BAR_DECAY_DB_PER_SEC / (METER_MAX_DB - METER_MIN_DB)) * 100 / 60;
 
 /** Peak-hold needle stays pinned for this long (ms). */
 const PEAK_HOLD_MS = 1500;
 /** After hold expires, needle falls at this many dB per second. */
 const HOLD_DECAY_DB_PER_SEC = 8;
-const HOLD_DECAY_PCT_PER_FRAME = (HOLD_DECAY_DB_PER_SEC / DB_RANGE) * 100 / 60;
-
-const DB_TICKS = [0, -6, -12, -18, -24, -36];
-
-// ---------------------------------------------------------------------------
-// Meter + slider section — all rows share the same layout grid
-// ---------------------------------------------------------------------------
-
-const BAR_H = 9;
-const LABEL_W = 10;
-const GAP = 5;
-const METER_WIDTH = "clamp(150px, 16vw, 220px)";
-
-const METER_GRADIENT =
-  "linear-gradient(to right, #4ade80 0%, #84cc16 55%, #facc15 72%, #f97316 85%, #ef4444 100%)";
-
-interface MeterRowProps {
-  label: string;
-  /** 0–100 fill percentage for the bar. */
-  fillPct: number;
-  /** 0–100 position of the peak-hold needle (0 = hidden). */
-  holdPct: number;
-}
-
-function MeterRow({ label, fillPct, holdPct }: MeterRowProps) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: GAP }}>
-      <span
-        style={{
-          width: LABEL_W,
-          fontSize: 9,
-          color: "var(--wc-text-faint)",
-          textAlign: "right",
-          flexShrink: 0,
-        }}
-      >
-        {label}
-      </span>
-      <div
-        style={{
-          width: METER_WIDTH,
-          height: BAR_H,
-          background: "var(--wc-bg-app)",
-          borderRadius: 2,
-          border: "1px solid var(--wc-border)",
-          position: "relative",
-          overflow: "hidden",
-          flexShrink: 0,
-        }}
-      >
-        {/* Decaying fill bar — driven by rAF, no CSS transition */}
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            right: `${100 - fillPct}%`,
-            background: METER_GRADIENT,
-            backgroundSize: `${METER_WIDTH} ${BAR_H}px`,
-          }}
-        />
-        {/* Peak-hold needle */}
-        {holdPct > 0 && (
-          <div
-            style={{
-              position: "absolute",
-              top: 0,
-              bottom: 0,
-              left: `${holdPct}%`,
-              width: 2,
-              // Red needle when near clipping (>90% ≈ above -6 dB)
-              background: holdPct > 90 ? "#ef4444" : "#facc15",
-            }}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function TickRow() {
-  return (
-    <div style={{ display: "flex", alignItems: "flex-end", gap: GAP }}>
-      <div style={{ width: LABEL_W, flexShrink: 0 }} />
-      <div style={{ width: METER_WIDTH, position: "relative", height: 14, flexShrink: 1, minWidth: 120 }}>
-        {DB_TICKS.map((db) => (
-          <div
-            key={db}
-            style={{
-              position: "absolute",
-              left: `${dbToRatio(db) * 100}%`,
-              transform: "translateX(-50%)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 1,
-            }}
-          >
-            <span style={{ fontSize: 9, color: "var(--wc-text-faint)", lineHeight: 1 }}>{db}</span>
-            <div style={{ width: 1, height: 3, background: "var(--wc-border-strong)" }} />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function VolumeRow({
-  valueDb,
-  onChange,
-}: {
-  valueDb: number;
-  onChange: (db: number) => void;
-}) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: GAP }}>
-      <div style={{ width: LABEL_W, flexShrink: 0 }} />
-      <input
-        type="range"
-        min={MIN_DB}
-        max={MAX_DB}
-        step={0.5}
-        value={valueDb}
-        onChange={(e) => onChange(Number(e.target.value))}
-        style={{
-          width: METER_WIDTH,
-          margin: 0,
-          padding: 0,
-          flexShrink: 0,
-          cursor: "pointer",
-          accentColor: "var(--wc-text-faint)",
-        }}
-      />
-      <span
-        style={{
-          fontSize: 10,
-          color: "var(--wc-text-muted)",
-          fontFamily: "monospace",
-          width: 58,
-          flexShrink: 0,
-          display: "inline-block",
-        }}
-      >
-        {valueDb >= 0 ? `+${valueDb.toFixed(1)}` : valueDb.toFixed(1)} dB
-      </span>
-    </div>
-  );
-}
+const HOLD_DECAY_PCT_PER_FRAME = (HOLD_DECAY_DB_PER_SEC / (METER_MAX_DB - METER_MIN_DB)) * 100 / 60;
 
 // ---------------------------------------------------------------------------
 // TransportBar
@@ -208,7 +49,7 @@ function VolumeRow({
 
 const OSC_ACTIVITY_MS = 300;
 
-export function TransportBar({ onRefresh }: Props) {
+export function TransportBar({ onRefresh, panelVisibility, onTogglePanel }: Props) {
   const { t } = useLocale();
   const cueCatalog = useWorkspaceStore((state) => state.cueCatalog);
   const activeCueListId = useWorkspaceStore((state) => state.activeCueListId);
@@ -336,6 +177,7 @@ export function TransportBar({ onRefresh }: Props) {
   return (
     <div
       className="stage-transport"
+      data-ui="transport"
       style={{
         display: "flex",
         alignItems: "center",
@@ -343,7 +185,7 @@ export function TransportBar({ onRefresh }: Props) {
         padding: "8px 14px",
         background: "var(--wc-bg-deepest)",
         borderTop: "2px solid var(--wc-border)",
-        height: 96,
+        height: 104,
         flexShrink: 0,
       }}
     >
@@ -550,21 +392,15 @@ export function TransportBar({ onRefresh }: Props) {
       </div>
 
       {/* Meter + slider block */}
-      <div className="stage-master-area"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "center",
-          gap: 2,
-          minWidth: 150,
-          flexShrink: 1,
-        }}
-      >
-        <TickRow />
-        <MeterRow label="L" fillPct={meterL.fill} holdPct={meterL.hold} />
-        <MeterRow label="R" fillPct={meterR.fill} holdPct={meterR.hold} />
-        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 9, color: "var(--wc-text-muted)", whiteSpace: "nowrap" }}><SpeakerHigh size={13} weight="bold" aria-hidden="true" /><span>{t("transport.masterVolume")}</span></div>
-        <VolumeRow valueDb={volumeDb} onChange={handleVolumeChange} />
+      <div className="transport-master-controls">
+        <TransportAudioMeters
+          left={meterL}
+          right={meterR}
+          volumeDb={volumeDb}
+          volumeLabel={t("transport.masterVolume")}
+          onVolumeChange={handleVolumeChange}
+        />
+        <TransportPanelControls visibility={panelVisibility} onToggle={onTogglePanel} />
       </div>
     </div>
   );

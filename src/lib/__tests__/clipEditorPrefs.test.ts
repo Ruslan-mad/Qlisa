@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, createManualLiveMediaSelection, normalizeClipEditorVisibility, previewPlayheadForCue, resolveClipEditorCueId, resolveClipEditorTargetCueId, resolveLiveMediaSelection, shouldFollowLatestLiveMedia, toggleClipEditorPanel } from "../clipEditorPrefs";
+import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, createManualLiveMediaSelection, normalizeClipEditorVisibility, previewPlayheadForCue, resolveClipEditorCueId, resolveClipEditorTargetCueId, resolveLiveMediaSelection, shouldFollowLatestLiveMedia, toggleClipEditorDock, toggleClipEditorPanel } from "../clipEditorPrefs";
 
 describe("Clip Editor workspace visibility", () => {
   it("migrates old projects to both panels visible with Preview active", () => {
@@ -45,6 +45,33 @@ describe("Clip Editor workspace visibility", () => {
     expect(resolveClipEditorCueId("clicked-cue", "inspector-cue")).toBe("clicked-cue");
     expect(resolveClipEditorCueId(null, "inspector-cue")).toBe("inspector-cue");
     expect(resolveClipEditorCueId(null, null)).toBeNull();
+  });
+
+
+  it("toggles the dock container without changing available panels or the selected tab", () => {
+    const state = normalizeClipEditorVisibility({ clip_editor_active_tab_v2: "Slice" });
+    const hidden = toggleClipEditorDock(true, state);
+    expect(hidden.showDock).toBe(false);
+    expect(hidden.visibility).toBe(state);
+    expect(hidden.visibility).toEqual(state);
+
+    const restored = toggleClipEditorDock(false, hidden.visibility);
+    expect(restored.showDock).toBe(true);
+    expect(restored.visibility).toBe(state);
+    expect(restored.visibility).toEqual(state);
+  });
+
+  it("restores a usable Preview panel when both tabs were disabled in the View menu", () => {
+    const noPanels = normalizeClipEditorVisibility({
+      show_live_panel: false,
+      show_slice_panel: false,
+      clip_editor_active_tab_v2: "Slice",
+    });
+    const opened = toggleClipEditorDock(false, noPanels);
+    expect(opened.showDock).toBe(true);
+    expect(opened.visibility.show_live_panel).toBe(true);
+    expect(opened.visibility.show_slice_panel).toBe(false);
+    expect(clipEditorDockVisible(opened.visibility.show_live_panel, opened.visibility.show_slice_panel)).toBe(true);
   });
 
   it("keeps the Number timeline for Number selection but targets a child cue directly", () => {

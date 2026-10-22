@@ -4,6 +4,8 @@ export interface UiLayout {
   showCueListTabs: boolean;
   rightPanel: RightPanelMode;
   activeCuesOpen: boolean;
+  showCueToolbar: boolean;
+  showClipEditorDock: boolean;
   showSearchBar: boolean;
   inspectorWidth: number;
   showLivePanel: boolean;
@@ -19,6 +21,8 @@ export const DEFAULT_UI_LAYOUT: UiLayout = {
   showCueListTabs: true,
   rightPanel: "inspector",
   activeCuesOpen: true,
+  showCueToolbar: true,
+  showClipEditorDock: true,
   showSearchBar: true,
   inspectorWidth: INSPECTOR_DEFAULT_WIDTH,
   showLivePanel: true,
@@ -43,6 +47,8 @@ export function normalizeUiLayout(value: unknown): UiLayout {
     showCueListTabs: typeof parsed.showCueListTabs === "boolean" ? parsed.showCueListTabs : true,
     rightPanel: inspectorOpen ? "inspector" : "closed",
     activeCuesOpen,
+    showCueToolbar: typeof parsed.showCueToolbar === "boolean" ? parsed.showCueToolbar : true,
+    showClipEditorDock: typeof parsed.showClipEditorDock === "boolean" ? parsed.showClipEditorDock : true,
     showSearchBar: typeof parsed.showSearchBar === "boolean" ? parsed.showSearchBar : true,
     inspectorWidth: clampInspectorWidth(typeof parsed.inspectorWidth === "number" ? parsed.inspectorWidth : INSPECTOR_DEFAULT_WIDTH),
     showLivePanel: typeof parsed.showLivePanel === "boolean" ? parsed.showLivePanel : true,
@@ -52,5 +58,25 @@ export function normalizeUiLayout(value: unknown): UiLayout {
       ? parsed.activeClipTab
       : parsed.activeClipTab === "Slice" ? "Slice" : "Preview",
     clipEditorTabVersion: 2,
+  };
+}
+
+export interface TransportPanelVisibility {
+  toolbar: boolean;
+  activeCues: boolean;
+  inspector: boolean;
+  clipEditorDock: boolean;
+}
+
+/** Resolve the panel map from actual workbench visibility, including Show Mode. */
+export function resolveTransportPanelVisibility(layout: Pick<UiLayout,
+  "showCueToolbar" | "activeCuesOpen" | "rightPanel" | "showClipEditorDock" | "showLivePanel" | "showSlicePanel"
+> & { showMode: boolean }): TransportPanelVisibility {
+  return {
+    toolbar: !layout.showMode && layout.showCueToolbar,
+    activeCues: !layout.showMode && layout.activeCuesOpen,
+    inspector: !layout.showMode && layout.rightPanel === "inspector",
+    clipEditorDock: !layout.showMode && layout.showClipEditorDock
+      && (layout.showLivePanel || layout.showSlicePanel),
   };
 }

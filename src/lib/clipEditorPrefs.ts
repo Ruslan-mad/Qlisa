@@ -198,3 +198,22 @@ export function toggleClipEditorPanel(
   next.clip_editor_active_tab = next.clip_editor_active_tab_v2 === "Slice" ? "Slice" : "Live";
   return next;
 }
+
+export interface ClipEditorDockToggleResult {
+  showDock: boolean;
+  visibility: NormalizedClipEditorVisibility;
+}
+
+/** Toggle the dock container without changing its tab set or active tab. If the
+ * menu disabled every tab, opening the dock restores Preview through the same
+ * panel helper used by the View menu. */
+export function toggleClipEditorDock(
+  currentlyVisible: boolean,
+  visibility: NormalizedClipEditorVisibility,
+): ClipEditorDockToggleResult {
+  if (currentlyVisible) return { showDock: false, visibility };
+  const nextVisibility = clipEditorDockVisible(visibility.show_live_panel, visibility.show_slice_panel)
+    ? visibility
+    : toggleClipEditorPanel(visibility, "Preview");
+  return { showDock: true, visibility: nextVisibility };
+}

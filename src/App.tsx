@@ -36,7 +36,9 @@ import type { CollectReport, ImportReport, RecoveryInfo, CueType, NumberCueData 
 import { QlabImportDialog } from "./components/Import/QlabImportDialog";
 import type { CueSummary } from "./lib/types";
 import { useLocale } from "./i18n";
-import { clipEditorDockVisible, normalizeClipEditorVisibility, resolveClipEditorTargetCueId, toggleClipEditorPanel } from "./lib/clipEditorPrefs";
+import { clipEditorDockVisible, normalizeClipEditorVisibility, resolveClipEditorTargetCueId, toggleClipEditorDock, toggleClipEditorPanel } from "./lib/clipEditorPrefs";
+import { resolveTransportPanelVisibility } from "./components/Workbench/uiLayoutModel";
+import type { TransportPanelName } from "./components/Transport/TransportPanelControls";
 import { CLIP_EDITOR_DOCK_HEIGHT } from "./components/Editor/clipEditorLayout";
 import { hasActivePlayback } from "./lib/closeGuard";
 import { normalizeNumberCueData } from "./components/Inspector/numberModel";
@@ -808,6 +810,8 @@ export default function App() {
   const [showSearchBar, setShowSearchBar]         = useState(() => loadUiLayout().showSearchBar);
   const [showLivePanel, setShowLivePanel]         = useState(() => loadUiLayout().showLivePanel);
   const [showSlicePanel, setShowSlicePanel]       = useState(() => loadUiLayout().showSlicePanel);
+  const [showCueToolbar, setShowCueToolbar]       = useState(() => loadUiLayout().showCueToolbar);
+  const [showClipEditorDock, setShowClipEditorDock] = useState(() => loadUiLayout().showClipEditorDock);
   const [activeClipTab, setActiveClipTab]         = useState<"Preview" | "Live" | "Slice">(() => loadUiLayout().activeClipTab);
   const [inspectorWidth, setInspectorWidth]       = useState(() => loadUiLayout().inspectorWidth);
   const [editorCueId, setEditorCueId]             = useState<string | null>(null);
@@ -843,8 +847,8 @@ export default function App() {
 
   // Persist panel visibility + inspector width across launches.
   useEffect(() => {
-    saveUiLayout({ showCueListTabs, rightPanel, activeCuesOpen, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab, clipEditorTabVersion: 2 });
-  }, [showCueListTabs, rightPanel, activeCuesOpen, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab]);
+    saveUiLayout({ showCueListTabs, rightPanel, activeCuesOpen, showCueToolbar, showClipEditorDock, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab, clipEditorTabVersion: 2 });
+  }, [showCueListTabs, rightPanel, activeCuesOpen, showCueToolbar, showClipEditorDock, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab]);
 
   useEffect(() => {
     useUpdateStore.getState().setInstallGuard(() => {
@@ -1418,6 +1422,7 @@ export default function App() {
   };
 
   const toggleClipPanel = (panel: "Preview" | "Slice") => {
+    const isEnablingPanel = panel === "Preview" ? !showLivePanel : !showSlicePanel;
     const next = toggleClipEditorPanel({
       show_live_panel: showLivePanel,
       show_slice_panel: showSlicePanel,
@@ -1426,6 +1431,7 @@ export default function App() {
     }, panel);
     setShowLivePanel(next.show_live_panel);
     setShowSlicePanel(next.show_slice_panel);
+    if (isEnablingPanel) setShowClipEditorDock(true);
     setActiveClipTab(next.clip_editor_active_tab_v2);
     persistClipEditorPrefs(next);
   };
@@ -1524,6 +1530,41 @@ export default function App() {
       : t("stageUi.savedAt", { time: new Date(confirmedSavedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) });
 
   const clipEditorVisible = clipEditorDockVisible(showLivePanel, showSlicePanel);
+  const clipEditorDockShown = showClipEditorDock && clipEditorVisible;
+  const transportPanelVisibility = resolveTransportPanelVisibility({
+    showCueToolbar, activeCuesOpen, rightPanel, showClipEditorDock,
+    showLivePanel, showSlicePanel, showMode,
+  });
+
+  const handleTransportPanelToggle = (panel: TransportPanelName) => {
+    if (showMode) setShowMode(false);
+    switch (panel) {
+      case "toolbar":
+        setShowCueToolbar((visible) => showMode || !visible);
+        break;
+      case "activeCues":
+        setActiveCuesOpen((visible) => showMode || !visible);
+        break;
+      case "inspector":
+        setRightPanel((visible) => showMode || visible === "closed" ? "inspector" : "closed");
+        break;
+      case "clipEditorDock": {
+        const currentVisibility = {
+          show_live_panel: showLivePanel,
+          show_slice_panel: showSlicePanel,
+          clip_editor_active_tab: activeClipTab === "Slice" ? "Slice" as const : "Live" as const,
+          clip_editor_active_tab_v2: activeClipTab,
+        };
+        const next = toggleClipEditorDock(showMode ? false : clipEditorDockShown, currentVisibility);
+        setShowClipEditorDock(next.showDock);
+        setShowLivePanel(next.visibility.show_live_panel);
+        setShowSlicePanel(next.visibility.show_slice_panel);
+        setActiveClipTab(next.visibility.clip_editor_active_tab_v2);
+        if (next.visibility !== currentVisibility) persistClipEditorPrefs(next.visibility);
+        break;
+      }
+    }
+  };
 
   useEffect(() => {
     const title = workspaceInfo?.name
@@ -1716,7 +1757,9 @@ export default function App() {
           <ViewMenu
             items={[
               { label: t("menus.showMode"), checked: showMode, onClick: () => setShowMode((v) => !v), shortcut: "F5" },
+              { label: t("transport.panelToolbar"), checked: transportPanelVisibility.toolbar, onClick: () => handleTransportPanelToggle("toolbar") },
               { label: t("menus.cueListTabs"), checked: showCueListTabs, onClick: () => setShowCueListTabs((v) => !v) },
+              { label: t("transport.panelClipEditor"), checked: clipEditorDockShown, onClick: () => handleTransportPanelToggle("clipEditorDock") },
               { label: t("menus.livePanel"), checked: showLivePanel, onClick: () => toggleClipPanel("Preview") },
               { label: t("menus.slicePanel"), checked: showSlicePanel, onClick: () => toggleClipPanel("Slice") },
               { label: t("menus.searchBar"), checked: showSearchBar, onClick: handleToggleSearch, shortcut: "Ctrl+F" },
@@ -1731,7 +1774,7 @@ export default function App() {
 
         {/* Row 2 — one-line cue toolbar. The fixed right controls keep their
             width while the left cue actions move into More as space shrinks. */}
-        {showMode ? null : <CueToolbar
+        {showMode || !showCueToolbar ? null : <CueToolbar
           activeCueCount={activeCueCount}
           rightPanel={rightPanel}
           activeCuesOpen={activeCuesOpen}
@@ -1772,13 +1815,13 @@ export default function App() {
             )}
             <div style={{
               flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden", display: "grid",
-              gridTemplateColumns: `minmax(0, 1fr) ${inspectorWidth}px`,
-              gridTemplateRows: `minmax(0, 1fr) ${CLIP_EDITOR_DOCK_HEIGHT}px`,
+              gridTemplateColumns: rightPanel === "closed" ? "minmax(0, 1fr)" : `minmax(0, 1fr) ${inspectorWidth}px`,
+              gridTemplateRows: clipEditorDockShown || rightPanel !== "closed" ? `minmax(0, 1fr) ${CLIP_EDITOR_DOCK_HEIGHT}px` : "minmax(0, 1fr)",
               position: "relative",
             }}>
               <div style={{
                 gridColumn: rightPanel === "closed" ? "1 / -1" : "1",
-                gridRow: clipEditorVisible || rightPanel === "closed" ? "1" : "1 / -1",
+                gridRow: clipEditorDockShown ? "1" : "1 / -1",
                 minWidth: 0, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative",
               }}>
               {(showCueListTabs || showSearchBar) && <CueListTabs
@@ -1836,7 +1879,7 @@ export default function App() {
                 />
               )}
             </div>
-            {clipEditorVisible && <div style={{ gridColumn: "1", gridRow: "2", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+            {clipEditorDockShown && <div style={{ gridColumn: rightPanel === "closed" ? "1 / -1" : "1", gridRow: "2", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
               <ClipEditorDock
                 cueId={resolveClipEditorTargetCueId(selectedCueId, editorCueId, selectedCue?.cue_type, numberTimelineCueId)}
                 showLivePanel={showLivePanel}
@@ -1863,6 +1906,7 @@ export default function App() {
                     onRefresh={handleRefresh}
                     onOpenEditor={(id) => {
                       setEditorCueId(id);
+                      setShowClipEditorDock(true);
                       setShowSlicePanel(true);
                       setActiveClipTab("Slice");
                       persistClipEditorPrefs({ show_slice_panel: true, clip_editor_active_tab: "Slice", clip_editor_active_tab_v2: "Slice" });
@@ -1878,7 +1922,7 @@ export default function App() {
                 </div>
               </div>
             )}
-            <div style={{ gridColumn: "2", gridRow: "2", minWidth: 0, minHeight: 0, borderLeft: "1px solid var(--wc-border)", overflow: "hidden" }}>
+            {rightPanel !== "closed" && <div style={{ gridColumn: "2", gridRow: "2", minWidth: 0, minHeight: 0, borderLeft: "1px solid var(--wc-border)", overflow: "hidden" }}>
               <MediaDock
                 cue={selectedCue ?? null}
                 selectedCueCount={selectedCueIds.length}
@@ -1889,13 +1933,13 @@ export default function App() {
                   setEditorReload((n) => n + 1);
                 }}
               />
-            </div>
+            </div>}
             </div>
           </>
         )}
       </div>
 
-      <TransportBar onRefresh={handleRefresh} />
+      <TransportBar onRefresh={handleRefresh} panelVisibility={transportPanelVisibility} onTogglePanel={handleTransportPanelToggle} />
       <StatusBar />
     </div>
   );

@@ -4,6 +4,7 @@ import { getOutputControlStatuses, listOutputDestinations, toggleOutputFtb } fro
 import type { OutputControlStatus } from "../../lib/types";
 import { useLocale } from "../../i18n";
 import { orderOutputStatuses, outputFtbLedColor, outputFtbVisualState } from "./outputFtbModel";
+import { animateButtonPress } from "../common/buttonPressAnimation";
 
 /** Compact per-destination operator FTB controls. Audio is not involved. */
 export function OutputFtbControls() {
@@ -64,6 +65,7 @@ export function OutputFtbControls() {
             key={output.output_id}
             type="button"
             disabled={!usable}
+            onClickCapture={(event) => animateButtonPress(event.currentTarget)}
             title={title}
             aria-label={`${output.name} ${stateText}`}
             onClick={() => {
