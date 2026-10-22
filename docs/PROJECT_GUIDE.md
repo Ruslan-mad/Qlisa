@@ -18,10 +18,10 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. Qlisa 1.5.14 is the latest published release. This checkout describes
-it; see the [release notes](RELEASE_NOTES_1.5.14.md), the previous
-[1.5.13 notes](RELEASE_NOTES_1.5.13.md), and the
-[1.5.14 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.14) for
+1.5.8. Qlisa 1.5.15 is the latest published release. See the
+[1.5.15 release notes](RELEASE_NOTES_1.5.15.md), the previous
+[1.5.14 notes](RELEASE_NOTES_1.5.14.md), and the
+[1.5.15 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.15) for
 the current installer. This is not an official
 upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
@@ -124,11 +124,40 @@ FPS/audio drop rates and NDI/SRT receiver behavior remain unverified. See the
 [release notes](RELEASE_NOTES_1.5.14.md), [status bar guide](status-bar.md), and
 [window state note](window-state.md).
 
-## Current local editor and GO changes (unreleased)
+## Qlisa 1.5.15 publication
 
-This section describes local working-tree changes. They are not part of the
-published Qlisa 1.5.14 release. The 1.5.12 and 1.5.14 release records above
-remain historical facts.
+Published on 2026-10-22 at 07:02 UTC as GitHub release `420398853`:
+[Qlisa 1.5.15](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.15).
+The annotated tag and build commit are
+`7d624e2818f5f43fa5ffa927a16952e4ac55d330`. The release adds fixes for short
+audio packet reads, centered stereo levels, PNG alpha, background Number
+screensavers and ordinary stops, queued GO selection, and the Preview and Live
+views. See the [release notes](RELEASE_NOTES_1.5.15.md).
+
+The installer `Qlisa_1.5.15_x64-setup.exe` is 9,595,944 bytes, SHA-256
+`7f0ef6c7152373dd0cf05b394c387fc53107295dbbe9b1df38914bb2a3dbbb78`. Its
+416-byte updater signature has SHA-256
+`7ff8912ac3d5f670dde2da3129c7c24bb8a55de2a9857437e7f7e839d48a703a` and
+verified against the configured public key. `latest.json` is 4,215 bytes with
+SHA-256
+`4cbd3e4326d227b02164c0a45c2f9b6cb73c443a6e15b032060ad7f2968678c4`. It
+contains version 1.5.15, the exact installer URL and signature, and the release
+notes. The latest-release endpoint reports 1.5.15. Anonymous downloads of all
+three assets matched their GitHub SHA-256 digests; the public installer
+signature and updater feed were verified again.
+
+The release checks recorded 543 frontend tests in 75 files, a passing frontend
+build, 1,047 Rust tests with 12 ignored, `cargo check`, Clippy, and a production
+ASIO-enabled Tauri NSIS build. `scripts/publish.ps1` exited 1 only during its
+final hash-print step because `Get-FileHash` was unavailable in that PowerShell
+process. The hashes above were recomputed and verified separately. No updater
+end-to-end or physical hardware test was performed.
+
+## Current implementation notes
+
+This section records implementation details represented in this checkout.
+Release checks and publication facts appear above; hardware and updater test
+limits remain in the relevant focused guides.
 
 The editor tab formerly named **Timeline** is now **Preview**. Preview keeps
 audition and editing controls. It does not show a runtime cursor or seek

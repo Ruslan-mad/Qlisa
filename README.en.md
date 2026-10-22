@@ -67,9 +67,11 @@ Available Cue types include Audio, Video, Image, Text, Memo, Wait, Fade, Stop, G
 
 Configurable automatic transitions complement manual control through the Playhead, GO, STOP, and Active Cues panel. Waveform and media preview caches are stored alongside the project.
 
-Qlisa 1.5.13 adds UUID-based commands between Cue Lists. Goto moves the target list's Playhead while the visible tab stays unchanged. The version also updates the Media Dock, search field, and per-list timecode settings. It was the previous release; see the [release notes](docs/RELEASE_NOTES_1.5.13.md) and [cross-list command guide](docs/cross-list-commands.md).
+Qlisa 1.5.13 added UUID-based commands between Cue Lists. Goto moves the target list's Playhead while the visible tab stays unchanged. The version also updated the Media Dock, search field, and per-list timecode settings. See the [release notes](docs/RELEASE_NOTES_1.5.13.md) and [cross-list command guide](docs/cross-list-commands.md).
 
-Qlisa 1.5.14 is the current release. It adds a configurable status bar under Settings → Personalization, saves its preferences, and restores the main window's position, size, and maximized state. [Download Qlisa 1.5.14](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.14); see the [release notes](docs/RELEASE_NOTES_1.5.14.md), [status bar guide](docs/status-bar.md), and [window state note](docs/window-state.md).
+Qlisa 1.5.14 added a configurable status bar and restoration of the main window's position, size, and maximized state. See the [1.5.14 release notes](docs/RELEASE_NOTES_1.5.14.md), [status bar guide](docs/status-bar.md), and [window state note](docs/window-state.md).
+
+Qlisa 1.5.15 is the current release. It fixes short audio packet reads, preserves centered stereo levels and PNG alpha, protects background Number screensavers from ordinary stops, and improves GO, Active Cues, Preview, and Live. [Download Qlisa 1.5.15](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.15); see the [1.5.15 release notes](docs/RELEASE_NOTES_1.5.15.md).
 
 Qlisa 1.5.12 also introduced the Stage theme for live operation, with a
 compact Cue List, independently collapsible panels, and large transport
