@@ -15,6 +15,7 @@ describe("GroupExpander", () => {
     const html = renderToStaticMarkup(createElement(GroupExpander, {
       expanded: true,
       playhead: true,
+      running: true,
       label: "Collapse group Intro",
       onToggle: () => {},
     }));
@@ -27,6 +28,9 @@ describe("GroupExpander", () => {
     expect(html).toContain('title="Collapse group Intro"');
     expect(html).toContain("width:30px");
     expect(html).toContain("height:28px");
+    expect(html.match(/role="img"/g)).toHaveLength(2);
+    expect(html).toContain("width:14px");
+    expect(html).toContain("height:24px");
   });
 
   it("stops row propagation for pointer, click, and Enter/Space while preserving native activation", () => {

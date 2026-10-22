@@ -21,7 +21,7 @@ vi.mock("../../stores/workspaceStore", () => ({
 
 const columns: ColumnDef[] = [
   { id: "playhead", label: "↳", defaultWidth: 28, minWidth: 24, fixed: true, resizable: false },
-  { id: "led", label: "", defaultWidth: 30, minWidth: 28, fixed: true, resizable: false },
+  { id: "led", label: "", defaultWidth: 20, minWidth: 16, fixed: true, resizable: false },
   { id: "continue", label: "C", defaultWidth: 40, minWidth: 28, fixed: false, resizable: true },
   { id: "pre_wait", label: "Pre-W", defaultWidth: 64, minWidth: 48, fixed: false, resizable: true },
   { id: "post_wait", label: "Post-W", defaultWidth: 49, minWidth: 48, fixed: false, resizable: true },
@@ -54,7 +54,7 @@ type RowOptions = {
 function renderRow(state: CueSummary["state"] = "standby", options: RowOptions = {}) {
   workspaceState.theme = options.theme ?? "dark";
   return renderToStaticMarkup(createElement(CueRow, {
-    cue: { ...cue, cue_type: options.cueType ?? cue.cue_type, state, color: options.color ?? cue.color, is_disabled: options.isDisabled ?? false }, cueIndex: 0, gridStyle: { display: "grid", gridTemplateColumns: "28px 30px 40px 64px 49px" },
+    cue: { ...cue, cue_type: options.cueType ?? cue.cue_type, state, color: options.color ?? cue.color, is_disabled: options.isDisabled ?? false }, cueIndex: 0, gridStyle: { display: "grid", gridTemplateColumns: "28px 20px 40px 64px 49px" },
     visibleDefs: options.stickyRight ? [...columns.slice(0, 2), { ...columns[2], stickyRight: true }] : columns,
     isSelected: options.isSelected ?? false, isAtPlayhead: options.atPlayhead ?? false,
     isDragOver: options.isDragOver, isDragSource: options.isDragSource,
@@ -88,6 +88,7 @@ describe("CueRow transport markers", () => {
     expect(running).toContain('role="img" aria-label="Running"');
     expect(runningNext).toContain('aria-label="Next Cue"');
     expect(runningNext).toContain('role="img" aria-label="Running"');
+    expect(runningNext.indexOf('aria-label="Running"')).toBeLessThan(runningNext.indexOf('aria-label="Next Cue"'));
     const runningNumber = renderRow("running", { cueType: "number" });
     expect(runningNumber).toContain('role="img" aria-label="Running"');
     for (const state of ["paused", "standby"] as const) {

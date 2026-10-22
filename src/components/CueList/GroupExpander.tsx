@@ -22,11 +22,13 @@ export function handleGroupExpanderClick(event: PropagationEvent, onToggle: () =
 export function GroupExpander({
   expanded,
   playhead,
+  running = false,
   label,
   onToggle,
 }: {
   expanded: boolean;
   playhead: boolean;
+  running?: boolean;
   label: string;
   onToggle: () => void;
 }) {
@@ -67,7 +69,7 @@ export function GroupExpander({
         zIndex: 4,
       }}
     >
-      <PlayheadIndicator visible={playhead} />
+      <PlayheadIndicator visible={playhead} running={running} stack />
       <span aria-hidden="true" style={{ fontSize: 13, lineHeight: 1, width: 13, textAlign: "center" }}>
         {expanded ? "▼" : "▶"}
       </span>
