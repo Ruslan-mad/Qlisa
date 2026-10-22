@@ -904,7 +904,10 @@ impl Cue for CameraCue {
         if let Some(overrides) = patch.geometry_by_output {
             self.geometry_by_output = overrides;
         }
-        if let Some(layer_style) = patch.layer_style {
+        if let Some(mut layer_style) = patch.layer_style {
+            if !patch.layer_style_black_bars_explicit {
+                layer_style.black_bars = self.layer_style.black_bars;
+            }
             self.layer_style = layer_style;
         }
     }
@@ -1099,7 +1102,8 @@ impl CueFactory for CameraCueFactory {
             }
         }
         if let Some(ls) = value.get("layer_style") {
-            if let Ok(style) = serde_json::from_value::<LayerStyle>(ls.clone()) {
+            if let Ok(mut style) = serde_json::from_value::<LayerStyle>(ls.clone()) {
+                style.black_bars = ls.get("black_bars").and_then(Value::as_bool).unwrap_or(false);
                 cue.layer_style = style;
             }
         }

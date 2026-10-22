@@ -800,6 +800,19 @@ fn push_ab_loop_options(opts: &mut Vec<String>, start_secs: f64, end_secs: f64, 
     opts.push(format!("ab-loop-count={loop_count}"));
 }
 
+/// Set only the mpv canvas background. `background=none` remains enabled so
+/// the decoded source alpha follows the existing premultiplied-alpha path.
+fn set_background_color(lib: &MpvLib, ctx: *mut c_void, black_bars: bool) {
+    let value = if black_bars { "0/0/0/1" } else { "0/0/0/0" };
+    unsafe {
+        (lib.mpv_set_property_string)(
+            ctx,
+            cs("options/background-color").as_ptr(),
+            cs(value).as_ptr(),
+        );
+    }
+}
+
 /// Load content into an (idle) slot.
 pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) {
     if !slot.accepts_mpv_calls() {
@@ -812,6 +825,8 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) {
         .upgrade()
         .map(|r| r.next_layer_seq())
         .unwrap_or(1);
+
+    set_background_color(lib, ctx, load.layer_style.black_bars);
 
     {
         let Ok(mut st) = slot.state.lock() else {
@@ -1212,6 +1227,7 @@ pub(super) fn tick_slot(slot: &Arc<VideoSlot>) -> (f32, bool) {
                 let stop = cs("stop");
                 let args: [*const c_char; 2] = [stop.as_ptr(), std::ptr::null()];
                 (slot.lib.mpv_command)(slot.mpv_ctx.0, args.as_ptr());
+                set_background_color(&slot.lib, slot.mpv_ctx.0, false);
             }
         }
         return (0.0, false);
@@ -1278,6 +1294,9 @@ fn reveal(slot: &Arc<VideoSlot>) {
 /// Live-apply a cue's LayerStyle edit (opacity edits retarget the animation
 /// so a running fade is not fought).
 pub(super) fn set_layer_style(slot: &Arc<VideoSlot>, style: &LayerStyle) {
+    if slot.accepts_mpv_calls() {
+        set_background_color(&slot.lib, slot.mpv_ctx.0, style.black_bars);
+    }
     if let Ok(mut st) = slot.state.lock() {
         st.blend_mode = style.blend_mode;
         let new_base = style.opacity.clamp(0.0, 1.0) as f32;

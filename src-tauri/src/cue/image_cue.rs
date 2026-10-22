@@ -549,7 +549,10 @@ impl Cue for ImageCue {
         if let Some(overrides) = patch.geometry_by_output {
             self.geometry_by_output = overrides;
         }
-        if let Some(layer_style) = patch.layer_style {
+        if let Some(mut layer_style) = patch.layer_style {
+            if !patch.layer_style_black_bars_explicit {
+                layer_style.black_bars = self.layer_style.black_bars;
+            }
             self.layer_style = layer_style;
         }
     }
@@ -710,7 +713,8 @@ impl CueFactory for ImageCueFactory {
         cue.output_ids = value.get("output_ids").and_then(|v| v.as_array()).map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
         if cue.output_ids.is_empty() { if let Some(id) = cue.output_id.clone() { cue.output_ids.push(id); } }
         if let Some(ls) = value.get("layer_style") {
-            if let Ok(style) = serde_json::from_value::<LayerStyle>(ls.clone()) {
+            if let Ok(mut style) = serde_json::from_value::<LayerStyle>(ls.clone()) {
+                style.black_bars = ls.get("black_bars").and_then(Value::as_bool).unwrap_or(false);
                 cue.layer_style = style;
             }
         }
@@ -740,6 +744,20 @@ mod tests {
     #[test]
     fn duration_method_always_none() {
         assert!(ImageCue::new().duration().is_none());
+    }
+
+    #[test]
+    fn image_black_bars_default_off_and_roundtrip() {
+        let legacy = ImageCueFactory.from_json(serde_json::json!({
+            "type": "image",
+            "layer_style": {"opacity": 0.5}
+        })).expect("legacy layer style");
+        assert!(!legacy.layer_style().unwrap().black_bars);
+
+        let mut cue = ImageCue::new();
+        cue.layer_style.black_bars = true;
+        let rebuilt = ImageCueFactory.from_json(cue.serialize()).expect("roundtrip");
+        assert!(rebuilt.layer_style().unwrap().black_bars);
     }
 
     #[test]

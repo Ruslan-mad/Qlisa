@@ -190,7 +190,7 @@ impl VideoCue {
             hold_last_frame: false,
             geometry: VideoGeometry::default(),
             geometry_by_output: HashMap::new(),
-            layer_style: LayerStyle::default(),
+            layer_style: LayerStyle { black_bars: true, ..LayerStyle::default() },
             slices: crate::cue::types::SliceList::default(),
             is_disabled: false,
             active_voice_id: None,
@@ -1264,7 +1264,10 @@ impl Cue for VideoCue {
         if let Some(overrides) = patch.geometry_by_output {
             self.geometry_by_output = overrides;
         }
-        if let Some(layer_style) = patch.layer_style {
+        if let Some(mut layer_style) = patch.layer_style {
+            if !patch.layer_style_black_bars_explicit {
+                layer_style.black_bars = self.layer_style.black_bars;
+            }
             self.layer_style = layer_style;
         }
     }
@@ -1450,7 +1453,8 @@ impl CueFactory for VideoCueFactory {
             }
         }
         if let Some(ls) = value.get("layer_style") {
-            if let Ok(style) = serde_json::from_value::<LayerStyle>(ls.clone()) {
+            if let Ok(mut style) = serde_json::from_value::<LayerStyle>(ls.clone()) {
+                style.black_bars = ls.get("black_bars").and_then(Value::as_bool).unwrap_or(true);
                 cue.layer_style = style;
             }
         }
@@ -1563,7 +1567,7 @@ mod tests {
     fn layer_style_roundtrip() {
         use crate::engine::output_engine::BlendMode;
         let mut cue = VideoCue::new();
-        assert!(cue.layer_style().unwrap().is_default());
+        assert!(cue.layer_style().unwrap().black_bars);
         // Visual cues never auto-stop each other: launching a visual cue
         // stacks it as a new layer, only Stop/Fade cues remove one.
         assert!(!cue.stop_on_next_go());
@@ -1572,10 +1576,12 @@ mod tests {
             layer: Some(3),
             opacity: 0.5,
             blend_mode: BlendMode::Multiply,
+            black_bars: false,
         };
 
         let json = cue.serialize();
         assert_eq!(json["layer_style"]["blend_mode"], "multiply");
+        assert_eq!(json["layer_style"]["black_bars"], false);
 
         let rebuilt = VideoCueFactory.from_json(json).expect("roundtrip");
         assert_eq!(rebuilt.layer_style().unwrap(), cue.layer_style);
@@ -1589,7 +1595,12 @@ mod tests {
             serde_json::json!({ "type": "video", "name": "Old", "stop_on_next_visual": true });
         let cue = VideoCueFactory.from_json(json).expect("legacy load");
         assert!(!cue.stop_on_next_go());
-        assert!(cue.layer_style().unwrap().is_default());
+        assert!(cue.layer_style().unwrap().black_bars);
+        let style_legacy = VideoCueFactory.from_json(serde_json::json!({
+            "type": "video",
+            "layer_style": {"opacity": 0.5}
+        })).expect("legacy layer style");
+        assert!(style_legacy.layer_style().unwrap().black_bars);
     }
 
     #[test]

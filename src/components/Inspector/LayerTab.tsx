@@ -36,6 +36,8 @@ export function LayerEditor({
   layer,
   opacity,
   blendMode,
+  blackBars,
+  showBlackBars = false,
   disabled = false,
   mixedLabel,
   commitSlidersOnRelease = false,
@@ -45,6 +47,8 @@ export function LayerEditor({
   layer: ValueState<number | null>;
   opacity: ValueState<number>;
   blendMode: ValueState<BlendMode>;
+  blackBars?: ValueState<boolean>;
+  showBlackBars?: boolean;
   disabled?: boolean;
   mixedLabel?: string;
   commitSlidersOnRelease?: boolean;
@@ -71,6 +75,18 @@ export function LayerEditor({
         disabled={disabled}
         onToggle={(value) => onPatch({ layer: value ? null : 500 })}
       />
+      {showBlackBars && blackBars && <>
+        <ToggleRow
+          label={t("inspector.blackBars")}
+          checked={blackBars.kind === "uniform" ? blackBars.value : null}
+          mixedLabel={mixedLabel}
+          disabled={disabled}
+          onToggle={(value) => onPatch({ black_bars: value })}
+        />
+        <div style={{ margin: "-4px 0 10px 23px", fontSize: 11, color: "var(--wc-text-muted)" }}>
+          {locale === "ru" ? "Влияет на поля вне изображения, не на чёрные пиксели файла." : "Affects areas outside the image, not black pixels in the file."}
+        </div>
+      </>}
       {automaticValue !== true && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, paddingLeft: 23 }}>
           <span style={{ fontSize: 12, color: "var(--wc-text-secondary)" }}>{t("inspector.layerHint")}</span>
@@ -125,7 +141,10 @@ export function LayerTab({
   cue: VideoCueData | ImageCueData | CameraCueData;
   onSave: (p: Partial<VideoCueData | ImageCueData | CameraCueData>) => void;
 }) {
-  const layerStyle: LayerStyle = cue.layer_style ?? DEFAULT_LAYER_STYLE;
+  const layerStyle: LayerStyle = cue.layer_style ?? {
+    ...DEFAULT_LAYER_STYLE,
+    black_bars: cue.cue_type === "video",
+  };
   const patch = (partial: Partial<LayerStyle>) =>
     onSave({ layer_style: { ...layerStyle, ...partial } });
 
@@ -134,6 +153,8 @@ export function LayerTab({
     layer={uniform(layerStyle.layer)}
     opacity={uniform(layerStyle.opacity)}
     blendMode={uniform(layerStyle.blend_mode)}
+    blackBars={uniform(layerStyle.black_bars ?? cue.cue_type === "video")}
+    showBlackBars={cue.cue_type === "video" || cue.cue_type === "image"}
     onPatch={patch}
   />;
 }

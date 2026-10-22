@@ -1648,10 +1648,12 @@ fn classify_live_in_place_patch(
             "layer_style"
                 if matches!(cue_type, CueType::Video | CueType::Image | CueType::Camera) =>
             {
-                patch
-                    .visual
-                    .get_or_insert_with(Default::default)
-                    .layer_style = Some(
+                let visual = patch.visual.get_or_insert_with(Default::default);
+                visual.layer_style_black_bars_explicit = value
+                    .get("black_bars")
+                    .and_then(serde_json::Value::as_bool)
+                    .is_some();
+                visual.layer_style = Some(
                     serde_json::from_value(value.clone())
                         .map_err(|_| "layer_style must be valid".to_string())?,
                 );
@@ -2953,6 +2955,22 @@ mod bulk_update_tests {
         assert_eq!(video.serialize()["geometry"]["pan_x"], 0.2);
         assert_eq!(video.serialize()["geometry_by_output"]["led"]["fit_mode"], "fill");
         assert_eq!(video.serialize()["layer_style"]["layer"], 4);
+        assert_eq!(video.serialize()["layer_style"]["black_bars"], true);
+
+        video.layer_style.black_bars = false;
+        let no_black_bar_field = classify_live_in_place_patch(
+            &serde_json::json!({ "layer_style": { "opacity": 0.25 } }),
+            CueType::Video,
+        ).unwrap().unwrap();
+        apply_single_in_place_patch(&mut video, no_black_bar_field);
+        assert_eq!(video.serialize()["layer_style"]["black_bars"], false);
+
+        let explicit_black_bars = classify_live_in_place_patch(
+            &serde_json::json!({ "layer_style": { "black_bars": true } }),
+            CueType::Video,
+        ).unwrap().unwrap();
+        apply_single_in_place_patch(&mut video, explicit_black_bars);
+        assert_eq!(video.serialize()["layer_style"]["black_bars"], true);
 
         let mut mic = MicCue::new();
         let mic_patch = classify_live_in_place_patch(

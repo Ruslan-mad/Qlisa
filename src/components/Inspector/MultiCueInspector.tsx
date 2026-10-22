@@ -655,6 +655,11 @@ export function MultiCueInspector({ cueIds }: { cueIds: string[] }) {
       layer={layer}
       opacity={nestedState(cues, "layer_style", DEFAULT_LAYER_STYLE, "opacity")}
       blendMode={nestedState(cues, "layer_style", DEFAULT_LAYER_STYLE, "blend_mode")}
+      blackBars={deepState(cues.map((cue) => {
+        const style = cue.layer_style as (typeof DEFAULT_LAYER_STYLE | undefined);
+        return style?.black_bars ?? cue.cue_type === "video";
+      }))}
+      showBlackBars={types.every((type) => type === "video" || type === "image")}
       disabled={saving}
       mixedLabel={mixedLabel}
       commitSlidersOnRelease

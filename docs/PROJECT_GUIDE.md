@@ -491,10 +491,14 @@ network destinations are distinct destination kinds. The default destination
 must remain an enabled physical display; network output is selected explicitly.
 
 Video/image editing includes media thumbnails/metadata, scrub/seek, trims,
-geometry, layer properties, and local preview audition. Preview audio is an
-operator-local session, held in `AppState::preview_session`, outside the show
-workspace/playhead. There is at most one active preview session. Its
-monotonically increasing generation token prevents a slow/stale start or late
+geometry, layer properties, and local preview audition. The unreleased Layer
+inspector adds `layer_style.black_bars` for Video and Image cues. It defaults on
+for Video and off for Image, including legacy layer-style objects without this
+field; explicit choices persist and apply to active slots live. It affects only
+areas outside the image, preserves PNG source alpha and black pixels, and is not
+shown for Camera cues. Preview audio is an operator-local session, held in
+`AppState::preview_session`, outside the show workspace/playhead. There is at
+most one active preview session. Its monotonically increasing generation token prevents a slow/stale start or late
 completion event from replacing/clearing a newer preview. In the current
 unreleased editor changes, Live runtime seek targets the selected active file's
 program voice; Preview does not seek program playback. Media metadata probes

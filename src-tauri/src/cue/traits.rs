@@ -254,6 +254,8 @@ pub struct LiveVisualPatch {
     pub geometry: Option<crate::engine::output_engine::VideoGeometry>,
     pub geometry_by_output: Option<std::collections::HashMap<String, crate::engine::output_engine::VideoGeometry>>,
     pub layer_style: Option<crate::engine::output_engine::LayerStyle>,
+    /// Whether the patch explicitly set `layer_style.black_bars`.
+    pub layer_style_black_bars_explicit: bool,
 }
 
 // ---------------------------------------------------------------------------

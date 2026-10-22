@@ -502,6 +502,8 @@ export interface LayerStyle {
   /** Base opacity 0.0–1.0. */
   opacity: number;
   blend_mode: BlendMode;
+  /** Fill areas outside the media frame with opaque black. */
+  black_bars: boolean;
 }
 
 /** Default compositing (automatic layer, fully opaque, normal blending). */
@@ -509,6 +511,7 @@ export const DEFAULT_LAYER_STYLE: LayerStyle = {
   layer: null,
   opacity: 1,
   blend_mode: "normal",
+  black_bars: false,
 };
 
 /** Full cue data returned by get_cue for a Video Cue. */

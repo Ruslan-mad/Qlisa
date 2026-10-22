@@ -183,6 +183,10 @@ pub struct LayerStyle {
     /// How the cue's pixels combine with the layers below.
     #[serde(default)]
     pub blend_mode: super::blend::BlendMode,
+    /// Whether mpv fills areas outside the image with opaque black.
+    /// Cue deserializers supply a type-specific default when this is absent.
+    #[serde(default)]
+    pub black_bars: bool,
 }
 
 impl Default for LayerStyle {
@@ -191,6 +195,7 @@ impl Default for LayerStyle {
             layer: None,
             opacity: 1.0,
             blend_mode: super::blend::BlendMode::Normal,
+            black_bars: false,
         }
     }
 }
@@ -619,15 +624,19 @@ mod tests {
             layer: Some(42),
             opacity: 0.35,
             blend_mode: super::super::blend::BlendMode::Screen,
+            black_bars: true,
         };
         let json = serde_json::to_value(s).unwrap();
         assert_eq!(json["blend_mode"], "screen");
+        assert_eq!(json["black_bars"], true);
         let back: LayerStyle = serde_json::from_value(json).unwrap();
         assert_eq!(s, back);
 
         // Pre-1.3 workspaces have no layer_style: empty object = defaults.
         let empty: LayerStyle = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(empty.is_default());
+        let explicit_false: LayerStyle = serde_json::from_value(serde_json::json!({"black_bars": false})).unwrap();
+        assert_eq!(serde_json::to_value(explicit_false).unwrap()["black_bars"], false);
     }
 
     #[test]

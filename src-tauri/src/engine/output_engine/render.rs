@@ -2882,7 +2882,7 @@ mod tests {
     fn external_source_keeps_geometry_style_and_layer_order() {
         let runtime = RenderRuntime::new(); let a = Uuid::new_v4(); let b = Uuid::new_v4();
         let geometry = VideoGeometry { pan_x: 0.2, ..Default::default() };
-        let style = LayerStyle { layer: Some(2), opacity: 0.4, blend_mode: crate::engine::output_engine::BlendMode::Screen };
+        let style = LayerStyle { layer: Some(2), opacity: 0.4, blend_mode: crate::engine::output_engine::BlendMode::Screen, ..LayerStyle::default() };
         runtime.add_external_source(a, Arc::new(BgraFrameMailbox::default()), geometry, style, crate::engine::output_engine::slot::resolve_layer_key(Some(2), 2), 0);
         runtime.add_external_source(b, Arc::new(BgraFrameMailbox::default()), VideoGeometry::default(), LayerStyle::default(), crate::engine::output_engine::slot::resolve_layer_key(None, 3), 0);
         let (draws, _, _) = runtime.tick_external_sources();
