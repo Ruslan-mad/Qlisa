@@ -20,7 +20,7 @@ use crate::{
         MediaMetadataReservation,
     },
     engine::voice::Voice,
-    preferences::GeneralPreferences,
+    preferences::{DefaultBlackBarsPreferences, GeneralPreferences},
     show::Workspace,
     state::{AppState, PreviewSession, PreviewTransport},
 };
@@ -3209,6 +3209,8 @@ pub fn add_cue(
     let cue = registry.create(&cue_type).map_err(|e| e.to_string())?;
     let cue = apply_new_cue_output_defaults(cue, &preferences.display, &registry)
         .map_err(|error| error.to_string())?;
+    let cue = apply_new_video_black_bars_default(cue, &preferences.general, &registry)
+        .map_err(|error| error.to_string())?;
     let id = cue.id().to_string();
     drop(registry);
 
@@ -3251,6 +3253,22 @@ fn apply_new_cue_output_defaults(
     let mut serialized = cue.serialize();
     serialized["output_id"] = serde_json::Value::String(output_ids[0].clone());
     serialized["output_ids"] = serde_json::json!(output_ids);
+    registry.from_json(serialized)
+}
+
+/// Video's file-independent black-bars default is known when the cue is
+/// created. Image defaults wait for the first assigned path to reveal format.
+fn apply_new_video_black_bars_default(
+    cue: Box<dyn Cue>,
+    preferences: &GeneralPreferences,
+    registry: &crate::cue::registry::CueRegistry,
+) -> anyhow::Result<Box<dyn Cue>> {
+    if cue.cue_type() != CueType::Video {
+        return Ok(cue);
+    }
+    let mut serialized = cue.serialize();
+    serialized["layer_style"]["black_bars"] =
+        serde_json::Value::Bool(preferences.default_black_bars.video);
     registry.from_json(serialized)
 }
 
@@ -4565,6 +4583,7 @@ fn replace_file_backed_cue_path(
     id: &Uuid,
     cue_type: CueType,
     file_path: &str,
+    image_black_bars_defaults: Option<&DefaultBlackBarsPreferences>,
 ) -> Result<(), String> {
     let cue = cue_list.get_mut_recursive(id).ok_or("Cue not found")?;
     if cue.cue_type() != cue_type {
@@ -4575,6 +4594,11 @@ fn replace_file_backed_cue_path(
         }.to_string());
     }
     let mut json = cue.serialize();
+    if cue_type == CueType::Image {
+        if let Some(defaults) = image_black_bars_defaults {
+            apply_initial_image_black_bars_default(&mut json, file_path, defaults);
+        }
+    }
     update_auto_media_name(&mut json, &cue_type, file_path);
     if cue_type == CueType::Video {
         set_file_path_resetting_clip(&mut json, file_path);
@@ -4586,6 +4610,29 @@ fn replace_file_backed_cue_path(
         return Err("Cue not found".to_string());
     }
     Ok(())
+}
+
+/// Apply an image format default only to an unassigned image cue whose
+/// black-bars value still matches the cue type's built-in default.
+fn apply_initial_image_black_bars_default(
+    json: &mut serde_json::Value,
+    file_path: &str,
+    defaults: &DefaultBlackBarsPreferences,
+) {
+    let has_existing_path = json
+        .get("file_path")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|path| !path.is_empty());
+    if has_existing_path || json["layer_style"]["black_bars"].as_bool().unwrap_or(false) {
+        return;
+    }
+    let extension = std::path::Path::new(file_path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default();
+    if let Some(value) = defaults.for_image_extension(extension) {
+        json["layer_style"]["black_bars"] = serde_json::Value::Bool(value);
+    }
 }
 
 fn video_preload_matches_current_path(cue: &dyn Cue, path: &std::path::Path) -> bool {
@@ -5744,7 +5791,7 @@ pub fn set_video_file(
     } else {
         return Err("Cue not found".to_string());
     }
-    replace_file_backed_cue_path(cue_list, &registry, &id, CueType::Video, &file_path)?;
+    replace_file_backed_cue_path(cue_list, &registry, &id, CueType::Video, &file_path, None)?;
     drop(registry);
 
     // Mark as loading — the audio track is decoded off-thread (the indicator
@@ -5926,6 +5973,7 @@ pub fn set_image_file(
 ) -> Result<(), String> {
     super::undo_cmds::push_current_snapshot(&state)?;
     let id: Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+    let black_bars_defaults = state.global_preferences_snapshot()?.general.default_black_bars;
 
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
@@ -5945,7 +5993,14 @@ pub fn set_image_file(
     } else {
         return Err("Cue not found".to_string());
     }
-    replace_file_backed_cue_path(cue_list, &registry, &id, CueType::Image, &file_path)?;
+    replace_file_backed_cue_path(
+        cue_list,
+        &registry,
+        &id,
+        CueType::Image,
+        &file_path,
+        Some(&black_bars_defaults),
+    )?;
     drop(registry);
 
     drop(ws);
@@ -6200,6 +6255,8 @@ pub fn add_number_action(
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let child = registry.create(&cue_type).map_err(|e| e.to_string())?;
     let child = apply_new_cue_output_defaults(child, &preferences.display, &registry)
+        .map_err(|error| error.to_string())?;
+    let child = apply_new_video_black_bars_default(child, &preferences.general, &registry)
         .map_err(|error| error.to_string())?;
     let child_id = child.id();
     drop(registry);
@@ -6457,7 +6514,8 @@ mod tests {
     use std::sync::{mpsc, Arc, Mutex};
 
     use super::{
-        apply_default_cue_color, build_preview_voice, can_reuse_cached_media_metadata,
+        apply_default_cue_color, apply_initial_image_black_bars_default,
+        apply_new_video_black_bars_default, build_preview_voice, can_reuse_cached_media_metadata,
         compute_waveform_bins,
         finish_context_target,
         generated_media_cue_name, index_cue_targets, number_audio_should_be_master,
@@ -6496,7 +6554,7 @@ mod tests {
     };
     use crate::show::cue_list::CueList;
     use crate::show::Workspace;
-    use crate::preferences::{DisplayPreferences, GeneralPreferences, OutputSinkKind};
+    use crate::preferences::{DefaultBlackBarsPreferences, DisplayPreferences, GeneralPreferences, OutputSinkKind};
     use uuid::Uuid;
 
     fn targeted_test_registry() -> CueRegistry {
@@ -6624,6 +6682,7 @@ mod tests {
                 &cue_id,
                 cue_type.clone(),
                 &output_path.to_string_lossy(),
+                None,
             )
             .unwrap();
             assert_eq!(
@@ -6637,6 +6696,7 @@ mod tests {
                 &cue_id,
                 cue_type.clone(),
                 &source.to_string_lossy(),
+                None,
             )
             .unwrap();
             assert_eq!(
@@ -6722,6 +6782,95 @@ mod tests {
         let cue = apply_new_cue_output_defaults(Box::new(VideoCue::new()), &display, &registry).unwrap();
         assert_eq!(cue.serialize()["output_ids"], serde_json::json!([]));
         assert!(cue.serialize()["output_id"].is_null());
+    }
+
+    #[test]
+    fn new_video_cue_uses_the_global_black_bars_default() {
+        let mut registry = CueRegistry::new();
+        registry.register(CueType::Video, Box::new(VideoCueFactory));
+        let preferences = GeneralPreferences {
+            default_black_bars: DefaultBlackBarsPreferences { video: false, ..DefaultBlackBarsPreferences::default() },
+            ..GeneralPreferences::default()
+        };
+
+        let cue = apply_new_video_black_bars_default(Box::new(VideoCue::new()), &preferences, &registry).unwrap();
+        assert!(!cue.serialize()["layer_style"]["black_bars"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn first_image_assignment_uses_format_default_but_preserves_manual_or_existing_values() {
+        let defaults = DefaultBlackBarsPreferences::default();
+
+        let mut jpg = serde_json::json!({
+            "file_path": null,
+            "layer_style": { "black_bars": false }
+        });
+        apply_initial_image_black_bars_default(&mut jpg, "poster.JPEG", &defaults);
+        assert_eq!(jpg["layer_style"]["black_bars"], true);
+
+        let mut png = serde_json::json!({
+            "file_path": null,
+            "layer_style": { "black_bars": false }
+        });
+        apply_initial_image_black_bars_default(&mut png, "title.png", &defaults);
+        assert_eq!(png["layer_style"]["black_bars"], false);
+
+        let disabled_photos = DefaultBlackBarsPreferences { photos: false, ..defaults.clone() };
+        let mut photo_override = serde_json::json!({
+            "file_path": null,
+            "layer_style": { "black_bars": false }
+        });
+        apply_initial_image_black_bars_default(&mut photo_override, "poster.jpg", &disabled_photos);
+        assert_eq!(photo_override["layer_style"]["black_bars"], false);
+
+        let mut manually_enabled = serde_json::json!({
+            "file_path": null,
+            "layer_style": { "black_bars": true }
+        });
+        apply_initial_image_black_bars_default(&mut manually_enabled, "poster.png", &defaults);
+        assert_eq!(manually_enabled["layer_style"]["black_bars"], true);
+
+        let mut assigned = serde_json::json!({
+            "file_path": "first.png",
+            "layer_style": { "black_bars": true }
+        });
+        apply_initial_image_black_bars_default(&mut assigned, "replacement.jpg", &defaults);
+        assert_eq!(assigned["layer_style"]["black_bars"], true);
+    }
+
+    #[test]
+    fn image_file_assignment_applies_default_once_and_keeps_replacement_value() {
+        use crate::cue::traits::CueFactory;
+
+        let mut registry = CueRegistry::new();
+        registry.register(CueType::Image, Box::new(ImageCueFactory));
+        let mut list = CueList::new("image defaults");
+        let image = ImageCueFactory.create();
+        let id = image.id();
+        list.push(image);
+        let defaults = DefaultBlackBarsPreferences::default();
+
+        replace_file_backed_cue_path(
+            &mut list, &registry, &id, CueType::Image, "poster.jpg", Some(&defaults),
+        ).unwrap();
+        assert!(list.get_recursive(&id).unwrap().serialize()["layer_style"]["black_bars"].as_bool().unwrap());
+
+        replace_file_backed_cue_path(
+            &mut list, &registry, &id, CueType::Image, "title.png", Some(&defaults),
+        ).unwrap();
+        assert!(list.get_recursive(&id).unwrap().serialize()["layer_style"]["black_bars"].as_bool().unwrap());
+
+        let image = ImageCueFactory.create();
+        let reverse_id = image.id();
+        list.push(image);
+        replace_file_backed_cue_path(
+            &mut list, &registry, &reverse_id, CueType::Image, "title.png", Some(&defaults),
+        ).unwrap();
+        assert!(!list.get_recursive(&reverse_id).unwrap().serialize()["layer_style"]["black_bars"].as_bool().unwrap());
+        replace_file_backed_cue_path(
+            &mut list, &registry, &reverse_id, CueType::Image, "poster.jpg", Some(&defaults),
+        ).unwrap();
+        assert!(!list.get_recursive(&reverse_id).unwrap().serialize()["layer_style"]["black_bars"].as_bool().unwrap());
     }
 
     #[test]

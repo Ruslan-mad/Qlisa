@@ -637,6 +637,19 @@ function GeneralContent({ prefs, onChange }: {
     onChange({ ...prefs, default_cue_colors: defaultCueColors });
   };
 
+  const setDefaultBlackBars = (format: keyof GeneralPreferences["default_black_bars"], value: boolean) => {
+    onChange({ ...prefs, default_black_bars: { ...prefs.default_black_bars, [format]: value } });
+  };
+
+  const blackBarsFormats: { key: keyof GeneralPreferences["default_black_bars"]; label: string }[] = [
+    { key: "video", label: "preferencesUi.blackBarsVideo" },
+    { key: "photos", label: "preferencesUi.blackBarsPhotos" },
+    { key: "png", label: "preferencesUi.blackBarsPng" },
+    { key: "webp", label: "preferencesUi.blackBarsWebp" },
+    { key: "gif", label: "preferencesUi.blackBarsGif" },
+    { key: "svg", label: "preferencesUi.blackBarsSvg" },
+  ];
+
   return (
     <>
       <Section title={t("preferences.transport")}>
@@ -688,6 +701,21 @@ function GeneralContent({ prefs, onChange }: {
             <option value="tall">{t("preferencesUi.tall")}</option>
           </Select>
         </Row>
+      </Section>
+      <Section title={t("preferencesUi.blackBarsDefaults")}>
+        <p style={{ margin: "-2px 0 12px", fontSize: 11, color: "var(--wc-text-faint)", lineHeight: 1.5 }}>
+          {t("preferencesUi.blackBarsDefaultsHint")}
+        </p>
+        {blackBarsFormats.map(({ key, label }) => (
+          <Row key={key} label={t(label)}>
+            <input
+              type="checkbox"
+              checked={prefs.default_black_bars[key]}
+              onChange={(e) => setDefaultBlackBars(key, e.target.checked)}
+              style={{ accentColor: "var(--wc-accent)", width: 14, height: 14 }}
+            />
+          </Row>
+        ))}
       </Section>
       <Section title={t("cueColorDefaultsUi.title")}>
         <p style={{ margin: "-2px 0 12px", fontSize: 11, color: "var(--wc-text-faint)", lineHeight: 1.5 }}>

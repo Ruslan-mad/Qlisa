@@ -263,6 +263,48 @@ pub enum CueRowHeight {
     Tall,
 }
 
+/// Initial black-bar defaults for newly created visual cues.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefaultBlackBarsPreferences {
+    #[serde(default = "default_black_bars_true")]
+    pub video: bool,
+    #[serde(default = "default_black_bars_true")]
+    pub photos: bool,
+    #[serde(default)]
+    pub png: bool,
+    #[serde(default)]
+    pub webp: bool,
+    #[serde(default)]
+    pub gif: bool,
+    #[serde(default)]
+    pub svg: bool,
+}
+
+fn default_black_bars_true() -> bool {
+    true
+}
+
+impl Default for DefaultBlackBarsPreferences {
+    fn default() -> Self {
+        Self { video: true, photos: true, png: false, webp: false, gif: false, svg: false }
+    }
+}
+
+impl DefaultBlackBarsPreferences {
+    /// Return a still-image default for a supported extension, or `None` for
+    /// formats outside the application's image file filters.
+    pub fn for_image_extension(&self, extension: &str) -> Option<bool> {
+        match extension.trim_start_matches('.').to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" | "bmp" => Some(self.photos),
+            "png" => Some(self.png),
+            "webp" => Some(self.webp),
+            "gif" => Some(self.gif),
+            "svg" => Some(self.svg),
+            _ => None,
+        }
+    }
+}
+
 /// General app-behaviour preferences.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralPreferences {
@@ -297,6 +339,10 @@ pub struct GeneralPreferences {
     /// map (including an empty one) is preserved without merging defaults.
     #[serde(default = "GeneralPreferences::default_cue_colors")]
     pub default_cue_colors: HashMap<CueType, CueColor>,
+
+    /// Initial black-bar rendering state for newly created visual cues.
+    #[serde(default)]
+    pub default_black_bars: DefaultBlackBarsPreferences,
 }
 
 impl GeneralPreferences {
@@ -343,6 +389,7 @@ impl Default for GeneralPreferences {
             cue_row_height: CueRowHeight::default(),
             auto_renumber_on_reorder: Self::default_auto_renumber_on_reorder(),
             default_cue_colors: Self::default_cue_colors(),
+            default_black_bars: DefaultBlackBarsPreferences::default(),
         }
     }
 }
@@ -1027,6 +1074,40 @@ mod tests {
         assert_eq!(prefs.default_cue_color(&CueType::Stop), CueColor::Red);
         assert_eq!(prefs.default_cue_color(&CueType::Text), CueColor::None);
         assert_eq!(prefs.default_cue_color(&CueType::Audio), CueColor::None);
+        assert_eq!(prefs.default_black_bars.video, true);
+        assert_eq!(prefs.default_black_bars.photos, true);
+        assert_eq!(prefs.default_black_bars.png, false);
+        assert_eq!(prefs.default_black_bars.webp, false);
+        assert_eq!(prefs.default_black_bars.gif, false);
+        assert_eq!(prefs.default_black_bars.svg, false);
+    }
+
+    #[test]
+    fn black_bars_defaults_migrate_partially_and_resolve_supported_extensions() {
+        let prefs: GeneralPreferences = serde_json::from_value(serde_json::json!({
+            "default_black_bars": { "video": false, "png": true }
+        })).unwrap();
+        let defaults = prefs.default_black_bars;
+        assert!(!defaults.video);
+        assert!(defaults.photos);
+        assert!(defaults.png);
+        assert!(!defaults.webp);
+        assert!(!defaults.gif);
+        assert!(!defaults.svg);
+        assert_eq!(defaults.for_image_extension("JPG"), Some(true));
+        assert_eq!(defaults.for_image_extension(".jpeg"), Some(true));
+        assert_eq!(defaults.for_image_extension("bmp"), Some(true));
+        assert_eq!(defaults.for_image_extension("PNG"), Some(true));
+        assert_eq!(defaults.for_image_extension("webp"), Some(false));
+        assert_eq!(defaults.for_image_extension("gif"), Some(false));
+        assert_eq!(defaults.for_image_extension("svg"), Some(false));
+        assert_eq!(defaults.for_image_extension("tiff"), None);
+
+        let restored: GeneralPreferences = serde_json::from_value(
+            serde_json::to_value(GeneralPreferences { default_black_bars: defaults, ..GeneralPreferences::default() }).unwrap(),
+        ).unwrap();
+        assert!(!restored.default_black_bars.video);
+        assert!(restored.default_black_bars.png);
     }
 
     #[test]

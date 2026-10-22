@@ -1271,6 +1271,15 @@ export interface AudioPreferences {
 
 export type CueRowHeight = "compact" | "normal" | "tall";
 
+export interface DefaultBlackBarsPreferences {
+  video: boolean;
+  photos: boolean;
+  png: boolean;
+  webp: boolean;
+  gif: boolean;
+  svg: boolean;
+}
+
 export interface GeneralPreferences {
   double_go_protection_ms: number;
   confirm_before_delete: boolean;
@@ -1281,6 +1290,8 @@ export interface GeneralPreferences {
   /** Colour assigned only when a new cue of this type is created. Missing
    * field uses the built-in palette; a saved map is preserved as-is. */
   default_cue_colors: Partial<Record<CueType, CueColor>>;
+  /** Initial black-bars setting for new visual cues and first image assignment. */
+  default_black_bars: DefaultBlackBarsPreferences;
 }
 
 export const DEFAULT_GENERAL_PREFS: GeneralPreferences = {
@@ -1298,6 +1309,14 @@ export const DEFAULT_GENERAL_PREFS: GeneralPreferences = {
     resume: "green",
     start: "green",
     stop: "red",
+  },
+  default_black_bars: {
+    video: true,
+    photos: true,
+    png: false,
+    webp: false,
+    gif: false,
+    svg: false,
   },
 };
 
