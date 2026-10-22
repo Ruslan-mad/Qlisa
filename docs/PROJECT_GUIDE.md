@@ -18,10 +18,10 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. Qlisa 1.5.16 is the latest published release. See the
-[1.5.16 release notes](RELEASE_NOTES_1.5.16.md), the previous
-[1.5.15 notes](RELEASE_NOTES_1.5.15.md), and the
-[1.5.16 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.16) for
+1.5.8. Qlisa 1.5.17 is the latest published release. See the
+[1.5.17 release notes](RELEASE_NOTES_1.5.17.md), the previous
+[1.5.16 notes](RELEASE_NOTES_1.5.16.md), and the
+[1.5.17 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.17) for
 the current installer. This is not an official
 upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
@@ -179,6 +179,36 @@ production ASIO-enabled Tauri NSIS build. The independent signature and
 manifest checks passed. The configured bundle resource map excludes media
 binaries; 7-Zip was unavailable, so the installer payload listing was skipped.
 No updater end-to-end, native GUI, or physical hardware test was performed.
+
+## Qlisa 1.5.17 publication
+
+Published on 2026-10-22 at 18:14:48 UTC as GitHub release `421048553`:
+[Qlisa 1.5.17](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.17).
+The annotated tag and build commit resolve to
+`2ba78af4b2db612ffbfa126523d96b917a79f2d3`. The release fixes cue-list state
+after saved-project startup and workspace replacement. The selected-cue
+PAUSE/RESUME action is available from the transport button and P key. See the
+[release notes](RELEASE_NOTES_1.5.17.md).
+
+The installer `Qlisa_1.5.17_x64-setup.exe` is 9,602,777 bytes, SHA-256
+`b27fc3af84055313215ee71022609a3946196675d93687ee1c031400b9df06cd`. Its
+416-byte updater signature has SHA-256
+`8a23026c13bd10aca819fe34a34794524f381f0cb1cd471dbe8f47910ff8601e` and
+verified with the configured public key. `latest.json` is 1,934 bytes with
+SHA-256
+`ede7e1340f97aa8b4736251bc03cc16375e575c9b7799b75f2baf342c82e2196`. It
+contains version 1.5.17, the exact installer URL and signature, and the release
+notes. GitHub reports 1.5.17 as latest stable. Anonymous downloads of all
+three assets matched their GitHub SHA-256 digests; the downloaded installer
+signature and public updater feed were verified.
+
+The release checks passed: 563 frontend tests in 77 files, a passing frontend
+build, 1,048 Rust tests with 12 ignored, `cargo check`, Clippy, and a production
+ASIO-enabled Tauri NSIS build. Native cold-start tests covered both supplied
+projects and GO/PAUSE on identical silent-video mirrors. Native P Pause/Resume
+also passed. No updater end-to-end, audio playback, or physical-device test
+was performed. 7-Zip was unavailable, so the installer payload listing was
+skipped; the bundle resource configuration check passed.
 
 ## Current implementation notes
 
