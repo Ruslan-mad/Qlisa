@@ -33,8 +33,8 @@ export interface ColumnDef {
 }
 
 export const DEFAULT_COLUMNS: ColumnDef[] = [
-  { id: "playhead",  label: "▶",      defaultWidth: 28,  minWidth: 24, fixed: true,  resizable: false },
-  { id: "led",       label: "",        defaultWidth: 20,  minWidth: 16, fixed: true,  resizable: false },
+  { id: "playhead",  label: "↳",      defaultWidth: 28,  minWidth: 24, fixed: true,  resizable: false },
+  { id: "led",       label: "",        defaultWidth: 30,  minWidth: 28, fixed: true,  resizable: false },
   { id: "type",      label: "T",       defaultWidth: 28,  minWidth: 28, fixed: false, resizable: true  },
   { id: "number",    label: "#",       defaultWidth: 36,  minWidth: 36, fixed: false, resizable: true  },
   { id: "name",      label: "Name",    defaultWidth: 97,  minWidth: 80, fixed: true,  resizable: true  },
@@ -205,7 +205,8 @@ export function getVisibleDefs(config: ColumnConfig): ColumnDef[] {
 export function buildGridCols(visibleDefs: ColumnDef[], config: ColumnConfig): string {
   return visibleDefs
     .map((d) => {
-      const px = config.widths[d.id] ?? d.defaultWidth;
+      const savedOrDefault = config.widths[d.id] ?? d.defaultWidth;
+      const px = d.id === "led" ? Math.max(d.minWidth, savedOrDefault) : savedOrDefault;
       return `${px}px`;
     })
     .join(" ");

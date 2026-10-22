@@ -1472,7 +1472,8 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
             <div
               key={def.id}
               data-col-id={def.id}
-              title={def.fixed ? undefined : t("sweepUi.dragReorder")}
+              title={def.id === "playhead" ? t("transport.nextCue") : def.fixed ? undefined : t("sweepUi.dragReorder")}
+              aria-label={def.id === "playhead" ? t("transport.nextCue") : undefined}
               style={{
                 position: def.stickyRight ? "sticky" : "relative",
                 right: def.stickyRight ? 0 : undefined,
@@ -1504,7 +1505,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
                   pointerEvents: "none",
                 }}
               >
-                {def.id === "name" ? t("common.name") : def.id === "notes" ? t("cueList.notes") : def.id === "file" ? t("cueList.file") : def.id === "target" ? t("inspector.target") : def.id === "file_size" ? t("cueList.fileSize") : def.id === "resolution" ? t("cueList.resolution") : def.id === "outputs" ? t("output.outputs") : def.id === "pre_wait" ? t("transport.preWait") : def.id === "post_wait" ? t("transport.postWait") : def.label}
+                {def.id === "playhead" ? <span role="img" aria-label={t("transport.nextCue")}>{def.label}</span> : def.id === "name" ? t("common.name") : def.id === "notes" ? t("cueList.notes") : def.id === "file" ? t("cueList.file") : def.id === "target" ? t("inspector.target") : def.id === "file_size" ? t("cueList.fileSize") : def.id === "resolution" ? t("cueList.resolution") : def.id === "outputs" ? t("output.outputs") : def.id === "pre_wait" ? t("transport.preWait") : def.id === "post_wait" ? t("transport.postWait") : def.label}
               </span>
 
               {/* Resize handle — 8 px wide, centred on the right border.

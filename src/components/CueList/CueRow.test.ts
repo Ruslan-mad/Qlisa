@@ -1,6 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CueSummary } from "../../lib/types";
 import { setLocale } from "../../i18n";
 import { CueRow } from "./CueRow";
@@ -20,6 +20,8 @@ vi.mock("../../stores/workspaceStore", () => ({
 }));
 
 const columns: ColumnDef[] = [
+  { id: "playhead", label: "↳", defaultWidth: 28, minWidth: 24, fixed: true, resizable: false },
+  { id: "led", label: "", defaultWidth: 30, minWidth: 28, fixed: true, resizable: false },
   { id: "continue", label: "C", defaultWidth: 40, minWidth: 28, fixed: false, resizable: true },
   { id: "pre_wait", label: "Pre-W", defaultWidth: 64, minWidth: 48, fixed: false, resizable: true },
   { id: "post_wait", label: "Post-W", defaultWidth: 49, minWidth: 48, fixed: false, resizable: true },
@@ -45,16 +47,20 @@ type RowOptions = {
   isDragSource?: boolean;
   isDisabled?: boolean;
   stickyRight?: boolean;
+  atPlayhead?: boolean;
+  groupExpanded?: boolean;
 };
 
 function renderRow(state: CueSummary["state"] = "standby", options: RowOptions = {}) {
   workspaceState.theme = options.theme ?? "dark";
   return renderToStaticMarkup(createElement(CueRow, {
-    cue: { ...cue, cue_type: options.cueType ?? cue.cue_type, state, color: options.color ?? cue.color, is_disabled: options.isDisabled ?? false }, cueIndex: 0, gridStyle: { display: "grid", gridTemplateColumns: "40px 64px 49px" },
+    cue: { ...cue, cue_type: options.cueType ?? cue.cue_type, state, color: options.color ?? cue.color, is_disabled: options.isDisabled ?? false }, cueIndex: 0, gridStyle: { display: "grid", gridTemplateColumns: "28px 30px 40px 64px 49px" },
     visibleDefs: options.stickyRight ? [...columns.slice(0, 2), { ...columns[2], stickyRight: true }] : columns,
-    isSelected: options.isSelected ?? false, isAtPlayhead: false,
+    isSelected: options.isSelected ?? false, isAtPlayhead: options.atPlayhead ?? false,
     isDragOver: options.isDragOver, isDragSource: options.isDragSource,
     isGroup: options.isGroup,
+    isGroupExpanded: options.groupExpanded,
+    onToggleExpand: () => {},
     cueColorStyle: options.cueColorStyle,
     onCueDragStart: () => {}, onClick: () => {},
     onDoubleClick: () => {}, onContextMenu: () => {}, onContinueContextMenu: () => {},
@@ -65,6 +71,37 @@ afterEach(() => {
   timingState.current = null;
   setLocale("en");
   workspaceState.theme = "stage";
+});
+
+describe("CueRow transport markers", () => {
+  beforeEach(() => setLocale("en"));
+
+  it("shows the next arrow only on the playhead row with an accessible name", () => {
+    const next = renderRow("standby", { atPlayhead: true });
+    expect(next).toContain('aria-label="Next Cue"');
+    expect(renderRow("standby")).not.toContain('aria-label="Next Cue"');
+  });
+
+  it("shows the running play marker for running cues and keeps it separate from next", () => {
+    const running = renderRow("running");
+    const runningNext = renderRow("running", { atPlayhead: true });
+    expect(running).toContain('role="img" aria-label="Running"');
+    expect(runningNext).toContain('aria-label="Next Cue"');
+    expect(runningNext).toContain('role="img" aria-label="Running"');
+    const runningNumber = renderRow("running", { cueType: "number" });
+    expect(runningNumber).toContain('role="img" aria-label="Running"');
+    for (const state of ["paused", "standby"] as const) {
+      const html = renderRow(state);
+      expect(html).not.toContain('role="img" aria-label="Running"');
+    }
+  });
+
+  it("keeps the next marker in the fixed group expander target", () => {
+    const html = renderRow("running", { atPlayhead: true, cueType: "group", isGroup: true, groupExpanded: false });
+    expect(html).toContain('aria-label="Next Cue"');
+    expect(html).toContain("width:30px");
+    expect(html).toContain("height:28px");
+  });
 });
 
 describe("CueRow transport wait display", () => {

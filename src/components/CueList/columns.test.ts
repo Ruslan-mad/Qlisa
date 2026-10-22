@@ -30,7 +30,7 @@ describe("cue-list column configuration", () => {
       "duration", "post_wait", "continue", "outputs", "file_size", "resolution", "target",
     ]);
     expect(buildGridCols(visible, DEFAULT_COLUMN_CONFIG)).toBe(
-      "28px 20px 28px 36px 97px 118px 64px 59px 49px 40px 82px 82px 100px 180px",
+      "28px 30px 28px 36px 97px 118px 64px 59px 49px 40px 82px 82px 100px 180px",
     );
     expect(DEFAULT_COLUMN_CONFIG.hidden).toEqual({ file: true });
   });
@@ -41,7 +41,7 @@ describe("cue-list column configuration", () => {
       "playhead", "led", "type", "number", "name", "notes", "pre_wait", "duration", "post_wait", "continue", "outputs", "file_size", "resolution",
     ]);
     expect(buildGridCols(visible, STAGE_DEFAULT_COLUMN_CONFIG)).toBe(
-      "28px 20px 28px 44px 300px 130px 64px 72px 49px 40px 82px 72px 94px",
+      "28px 30px 28px 44px 300px 130px 64px 72px 49px 40px 82px 72px 94px",
     );
     expect(STAGE_DEFAULT_COLUMN_CONFIG.order).toEqual(DEFAULT_COLUMN_CONFIG.order);
     expect(STAGE_DEFAULT_COLUMN_CONFIG.hidden).toEqual({ file: true, target: true });
@@ -149,6 +149,12 @@ describe("cue-list column configuration", () => {
     const mediaDefs = getVisibleDefs(config)
       .filter((column) => column.id === "file_size" || column.id === "resolution");
     expect(buildGridCols(mediaDefs, config)).toBe("123px 145px");
+  });
+
+  it("clamps a legacy saved LED width to fit the running and played indicators", () => {
+    const legacyConfig = { ...DEFAULT_COLUMN_CONFIG, widths: { led: 16 } };
+    const led = getVisibleDefs(DEFAULT_COLUMN_CONFIG).filter((column) => column.id === "led");
+    expect(buildGridCols(led, legacyConfig)).toBe("28px");
   });
 
   it("migrates saved Stage defaults once and keeps later visibility choices", () => {

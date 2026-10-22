@@ -509,7 +509,13 @@ function CueRowImpl({
 
       case "led":
         return (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, height: "100%" }}>
+            {isRunning && <span
+              role="img"
+              aria-label={t("activeCues.running")}
+              title={t("activeCues.running")}
+              style={{ width: 0, height: 0, borderTop: "6px solid transparent", borderBottom: "6px solid transparent", borderLeft: "10px solid #4ade80", flexShrink: 0 }}
+            />}
             {isRunning
               ? <RunningLed />
               : played && (
