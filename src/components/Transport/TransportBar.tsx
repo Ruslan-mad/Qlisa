@@ -15,6 +15,7 @@ import { useLocale } from "../../i18n";
 import { transportErrorFromEvent } from "./transportErrorModel";
 import { MediaConversionStatus } from "./MediaConversionStatus";
 import { flattenCatalogActiveCues, getSelectedPauseTargets } from "../ActiveCues/activeCueModel";
+import { toggleSelectedPauseTargets } from "../ActiveCues/selectedPauseToggle";
 import { stopSelectedCueSet } from "../CueList/cueListKeyboard";
 
 interface Props {
@@ -325,11 +326,7 @@ export function TransportBar({ onRefresh }: Props) {
 
   const handlePauseToggle = async () => {
     try {
-      if (hasRunning) {
-        for (const c of pauseTargets) await pauseCue(c.id);
-      } else if (hasPaused) {
-        for (const c of pauseTargets) await resumeCue(c.id);
-      }
+      await toggleSelectedPauseTargets(pauseTargets, pauseCue, resumeCue);
     } catch (err) {
       console.error(err);
     }

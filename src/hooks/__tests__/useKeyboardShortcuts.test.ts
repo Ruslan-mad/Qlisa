@@ -3,6 +3,7 @@ import {
   isEditableKeyboardTarget,
   getKeyboardShortcutKey,
   isSelectedCueStopShortcut,
+  isSelectedCuePauseShortcut,
   isNewWorkspaceShortcut,
   isSaveAsShortcut,
   isSaveShortcut,
@@ -60,6 +61,21 @@ describe("selected cue stop shortcut", () => {
     expect(getKeyboardShortcutKey(key("х", { code: "BracketLeft" }))).toBe("[");
     expect(getKeyboardShortcutKey(key("ъ", { code: "BracketRight" }))).toBe("]");
     expect(getKeyboardShortcutKey(key("б", { code: "Comma" }))).toBe(",");
+  });
+});
+
+describe("selected cue pause shortcut", () => {
+  it("accepts unmodified P on either keyboard layout", () => {
+    expect(isSelectedCuePauseShortcut(key("p"))).toBe(true);
+    expect(isSelectedCuePauseShortcut(key("P"))).toBe(true);
+    expect(isSelectedCuePauseShortcut(key("з", { code: "KeyP" }))).toBe(true);
+  });
+
+  it("rejects modified P shortcuts", () => {
+    expect(isSelectedCuePauseShortcut(key("p", { ctrlKey: true }))).toBe(false);
+    expect(isSelectedCuePauseShortcut(key("p", { metaKey: true }))).toBe(false);
+    expect(isSelectedCuePauseShortcut(key("p", { altKey: true }))).toBe(false);
+    expect(isSelectedCuePauseShortcut(key("p", { shiftKey: true }))).toBe(false);
   });
 });
 

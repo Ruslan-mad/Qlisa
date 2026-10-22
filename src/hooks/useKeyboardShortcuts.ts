@@ -3,6 +3,8 @@
 import { useEffect, useRef } from "react";
 import { queueCueListPlayheadUpdate } from "../lib/cueListGoQueue";
 import { stopSelectedCueSet } from "../components/CueList/cueListKeyboard";
+import { getSelectedPauseTargets } from "../components/ActiveCues/activeCueModel";
+import { toggleSelectedPauseTargets } from "../components/ActiveCues/selectedPauseToggle";
 
 const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
 const cmdOrCtrl = (e: KeyboardEvent) => isMac ? e.metaKey : e.ctrlKey;
@@ -89,6 +91,13 @@ export function isSelectedCueStopShortcut(
   e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey"> & Partial<Pick<KeyboardEvent, "code">>,
 ): boolean {
   return getKeyboardShortcutKey(e) === "s" && !e.ctrlKey && !e.metaKey && !e.altKey;
+}
+
+/** The unmodified P shortcut toggles only the selected active cues. */
+export function isSelectedCuePauseShortcut(
+  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey"> & Partial<Pick<KeyboardEvent, "code">>,
+): boolean {
+  return getKeyboardShortcutKey(e) === "p" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
 }
 
 /** Ctrl+N / Cmd+N creates a project, matching the File menu. */
@@ -231,7 +240,17 @@ export function useKeyboardShortcuts(
           }
           break;
         }
-        case "p":
+        case "p": {
+          if (e.repeat || !isSelectedCuePauseShortcut(e)) break;
+          const state = useWorkspaceStore.getState();
+          const activeList = state.cueCatalog.find((list) => list.id === state.activeCueListId);
+          const targets = getSelectedPauseTargets(activeList, state.selectedCueIds);
+          if (targets.length > 0) {
+            await toggleSelectedPauseTargets(targets, pauseCue, resumeCue, e.repeat).catch(console.error);
+            onRefresh();
+          }
+          break;
+        }
         case "[": {
           if (!cmdOrCtrl(e) && selectedCueId) {
             await pauseCue(selectedCueId).catch(console.error);
