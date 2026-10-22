@@ -174,3 +174,10 @@
   width: 0;
   height: 0;
 }
+
+.stop-all-button:hover,
+.stop-all-button:focus-visible {
+  color: #fff !important;
+  background: #c62828 !important;
+  border-color: #ef4444 !important;
+}

@@ -50,7 +50,7 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
   useEffect(() => {
     const container = leftRef.current;
     if (!container) return;
-    const update = () => setAvailableWidth(container.clientWidth);
+    const update = () => setAvailableWidth(Math.max(0, container.clientWidth - 190 - 48));
     update();
     const observer = new ResizeObserver(update);
     observer.observe(container);
@@ -114,8 +114,9 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
   });
 
   return (
-    <div className="stage-toolbar-row" style={{ display: "flex", flexWrap: "nowrap", gap: 8, padding: "0 12px 8px", alignItems: "center", minWidth: 0, position: "relative", zIndex: 0 }} onClick={(event) => animateButtonPress((event.target as HTMLElement).closest("button"))}>
-      <div ref={leftRef} className="stage-cue-actions" style={{ display: "flex", flex: "1 1 0", minWidth: 0, flexWrap: "nowrap", alignItems: "center", gap: 8, overflow: "visible" }}>
+    <div className="stage-toolbar-row" style={{ display: "flex", flexWrap: "nowrap", gap: 0, padding: "0 12px 8px", alignItems: "center", minWidth: 0, position: "relative", zIndex: 0 }} onClick={(event) => animateButtonPress((event.target as HTMLElement).closest("button"))}>
+      <div ref={leftRef} className="stage-cue-actions" style={{ display: "flex", flex: "1 1 0", minWidth: 0, flexWrap: "nowrap", alignItems: "center", gap: 0, overflow: "visible" }}>
+        <div style={{ display: "flex", flex: "0 0 auto", minWidth: 0, flexWrap: "nowrap", alignItems: "center", gap: 8, overflow: "visible" }}>
         {layout.visible.map((type) => mainButton(type))}
         {layout.showMore && <div ref={moreRef} style={{ position: "relative", flexShrink: 0, zIndex: open ? 10002 : undefined }}>
           {open && <div style={{ position: "fixed", inset: 0, zIndex: 10000 }} onClick={() => setOpen(false)} />}
@@ -129,15 +130,17 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
           {descriptors.filter((item) => item.primary).map(({ type }) => mainButton(type, true))}
           <button ref={moreMeasureRef} style={{ ...buttonStyle, width: "max-content", minWidth: 72, minHeight: 62, padding: "6px 10px", display: "inline-flex", flexDirection: "column", justifyContent: "center", alignItems: "center", gap: 3, fontSize: 13 }}><SquaresFour size={24} />{t("toolbar.other")}</button>
         </div>
-      </div>
+        </div>
+        <div aria-hidden="true" style={{ flex: "1 1 0", minWidth: 24 }} />
       <button
-        className="stage-action-button"
+        className="stage-action-button stop-all-button"
         type="button"
-        aria-label={t("toolbar.panicButtonHint")}
+        aria-label="STOP ALL"
         style={{
-          ...buttonStyle, minWidth: 190, height: 62, marginLeft: 8, padding: "3px 10px", borderRadius: 6,
+          ...buttonStyle, width: 190, minWidth: 190, boxSizing: "border-box", height: 62, marginLeft: 0, padding: "3px 10px", borderRadius: 6,
           flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1,
-          color: "#fff", background: "#c62828", borderColor: "#ef4444", fontSize: 12.5, fontWeight: 700, lineHeight: 1.05,
+          color: "var(--wc-text)", background: "var(--wc-bg-surface)", borderColor: "var(--wc-border-strong)", fontSize: 12.5, fontWeight: 700, lineHeight: 1.05,
+          transition: "color 0.12s, border-color 0.12s, background 0.12s",
         }}
         onClick={() => {
           const now = Date.now();
@@ -147,11 +150,13 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
         }}
         title={t("toolbar.panicButtonHint")}
       >
-        <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", lineHeight: 1 }}>{t("toolbar.panicButtonLabel")}</span>
+        <span style={{ fontSize: 19, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", lineHeight: 1 }}>STOP ALL</span>
         <span style={{ whiteSpace: "nowrap", fontSize: 10.5, fontWeight: 500, letterSpacing: 0, lineHeight: 1 }}>{t("toolbar.panicEscLine")}</span>
         <span style={{ whiteSpace: "nowrap", fontSize: 10.5, fontWeight: 500, letterSpacing: 0, lineHeight: 1 }}>{t("toolbar.panicEscDoubleLine")}</span>
       </button>
-      <div className="stage-toolbar-tools" style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto", marginLeft: 40, whiteSpace: "nowrap" }}>
+      <div aria-hidden="true" style={{ flex: "1 1 0", minWidth: 24 }} />
+      </div>
+      <div className="stage-toolbar-tools" style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto", marginLeft: 0, whiteSpace: "nowrap" }}>
         <button className="stage-action-button" style={{ ...buttonStyle, minHeight: 60, padding: "7px 12px", borderRadius: 6, flexShrink: 0, fontSize: 12, fontWeight: 600 }} onClick={() => onToggleRightPanel("active-cues")} title={t("toolbar.activeCuesToggle")} aria-pressed={activeCuesOpen ?? rightPanel === "active-cues"}>
           <Activity size={17} weight="bold" style={{ verticalAlign: "-3px", marginRight: 7 }} />{t("menus.activeCues")}
           <span
