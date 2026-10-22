@@ -949,6 +949,23 @@ Mic, and MIDI File cues. Other types show a disabled pause control. Pause,
 Resume, and Stop address cues by ID, including nested Group children. Command
 state events report the actual lifecycle state.
 
+Workspace replacement waits for startup Tauri event listeners, then reconciles
+the UI from one backend snapshot containing the active list ID, active cues,
+playhead, and workspace cue catalog. Context guards reject replies from an old
+workspace or list. Replacement clears selection, timing, and played history;
+ordinary refresh keeps a valid manual selection. The P shortcut and transport
+button share the selected-cue Pause/Resume action. Repeated P keydowns are
+ignored, and editable fields keep their normal keyboard behavior.
+
+Cold-start checks on 2026-10-22 opened both supplied projects and verified
+selection. Their media files were absent. Silent-video mirrors verified GO
+advance, Pause freeze, and Resume on both projects; the QA profile used floating
+Display outputs. Frontend tests passed (563); ASIO Rust tests passed (1,048,
+12 ignored). Native P Pause/Resume passed on the second silent-video mirror:
+with playing Video 3 selected, P froze the clock at 0:14 and the next P resumed
+it to 0:19. These checks do not establish audio playback or physical-device
+behavior.
+
 ## Troubleshooting
 
 | Symptom | Check |
