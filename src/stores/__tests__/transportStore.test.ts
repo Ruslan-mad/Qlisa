@@ -12,6 +12,7 @@ function reset() {
     runningCues: new Map(),
     masterPeakL: 0,
     masterPeakR: 0,
+    masterLevelSequence: 0,
     masterVolume: 1.0,
     oscActivityAt: null,
     oscLog: [],
@@ -52,6 +53,16 @@ describe("transportStore", () => {
     expect(s().masterVolume).toBe(0.42);
     expect(s().masterPeakL).toBe(0.8);
     expect(s().masterPeakR).toBe(0.6);
+    expect(s().masterLevelSequence).toBe(1);
+  });
+
+  it("increments the master-level sequence when equal samples repeat", () => {
+    const s = () => useTransportStore.getState();
+    s().updateMasterLevels(1, 0.5);
+    s().updateMasterLevels(1, 0.5);
+    expect(s().masterPeakL).toBe(1);
+    expect(s().masterPeakR).toBe(0.5);
+    expect(s().masterLevelSequence).toBe(2);
   });
 
   it("addOscLog assigns monotonically increasing ids and caps the log at 100", () => {

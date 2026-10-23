@@ -20,11 +20,14 @@ import { stopSelectedCueSet } from "../CueList/cueListKeyboard";
 import { TransportPanelControls, type TransportPanelName } from "./TransportPanelControls";
 import type { TransportPanelVisibility } from "../Workbench/uiLayoutModel";
 import { METER_MAX_DB, METER_MIN_DB, TransportAudioMeters, peakToFillPct } from "./TransportMeters";
+import { EMPTY_MASTER_PEAK_READOUT, observeMasterPeaks, resetMasterPeakChannel, type MasterPeakReadout } from "./masterPeakReadoutModel";
 
 interface Props {
   onRefresh: () => void;
   panelVisibility: TransportPanelVisibility;
   onTogglePanel: (panel: TransportPanelName) => void;
+  outputMonitorVisible: boolean;
+  onToggleOutputMonitor: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,13 +52,13 @@ const HOLD_DECAY_PCT_PER_FRAME = (HOLD_DECAY_DB_PER_SEC / (METER_MAX_DB - METER_
 
 const OSC_ACTIVITY_MS = 300;
 
-export function TransportBar({ onRefresh, panelVisibility, onTogglePanel }: Props) {
+export function TransportBar({ onRefresh, panelVisibility, onTogglePanel, outputMonitorVisible, onToggleOutputMonitor }: Props) {
   const { t } = useLocale();
   const cueCatalog = useWorkspaceStore((state) => state.cueCatalog);
   const activeCueListId = useWorkspaceStore((state) => state.activeCueListId);
   const selectedCueIds = useWorkspaceStore((state) => state.selectedCueIds);
   const cues = useWorkspaceStore((state) => state.cues);
-  const { masterPeakL, masterPeakR, oscActivityAt } = useTransportStore();
+  const { masterPeakL, masterPeakR, masterLevelSequence, oscActivityAt } = useTransportStore();
 
   const [volumeDb, setVolumeDb] = useState(0);
   const [oscActive, setOscActive] = useState(false);
@@ -71,6 +74,8 @@ export function TransportBar({ onRefresh, panelVisibility, onTogglePanel }: Prop
   // ---- VU meter animation state (rendered via rAF) ----
   const [meterL, setMeterL] = useState({ fill: 0, hold: 0 });
   const [meterR, setMeterR] = useState({ fill: 0, hold: 0 });
+  const [peakReadout, setPeakReadout] = useState<MasterPeakReadout>(EMPTY_MASTER_PEAK_READOUT);
+  const peakReadoutRef = useRef<MasterPeakReadout>(EMPTY_MASTER_PEAK_READOUT);
 
   // Mutable refs shared between the Zustand effect and the rAF loop.
   // Using refs avoids stale closure issues inside requestAnimationFrame.
@@ -84,6 +89,17 @@ export function TransportBar({ onRefresh, panelVisibility, onTogglePanel }: Prop
 
   // When the backend emits a new peak, update fill and hold refs immediately.
   useEffect(() => {
+    const next = observeMasterPeaks(peakReadoutRef.current, masterPeakL, masterPeakR);
+    if (
+      next.left !== peakReadoutRef.current.left ||
+      next.right !== peakReadoutRef.current.right ||
+      next.overloadLeft !== peakReadoutRef.current.overloadLeft ||
+      next.overloadRight !== peakReadoutRef.current.overloadRight
+    ) {
+      peakReadoutRef.current = next;
+      setPeakReadout(next);
+    }
+
     const fL = peakToFillPct(masterPeakL);
     const fR = peakToFillPct(masterPeakR);
 
@@ -101,7 +117,13 @@ export function TransportBar({ onRefresh, panelVisibility, onTogglePanel }: Prop
       holdR.current = fR;
       holdExpiryR.current = now + PEAK_HOLD_MS;
     }
-  }, [masterPeakL, masterPeakR]);
+  }, [masterPeakL, masterPeakR, masterLevelSequence]);
+
+  const resetPeakReadout = (channel: "left" | "right") => {
+    const next = resetMasterPeakChannel(peakReadoutRef.current, channel);
+    peakReadoutRef.current = next;
+    setPeakReadout(next);
+  };
 
   // rAF decay loop — runs independently of Tauri events.
   useEffect(() => {
@@ -396,11 +418,18 @@ export function TransportBar({ onRefresh, panelVisibility, onTogglePanel }: Prop
         <TransportAudioMeters
           left={meterL}
           right={meterR}
+          peakReadout={peakReadout}
+          onResetPeak={resetPeakReadout}
           volumeDb={volumeDb}
           volumeLabel={t("transport.masterVolume")}
           onVolumeChange={handleVolumeChange}
         />
-        <TransportPanelControls visibility={panelVisibility} onToggle={onTogglePanel} />
+        <TransportPanelControls
+          visibility={panelVisibility}
+          onToggle={onTogglePanel}
+          outputMonitorVisible={outputMonitorVisible}
+          onToggleOutputMonitor={onToggleOutputMonitor}
+        />
       </div>
     </div>
   );

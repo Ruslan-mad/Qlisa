@@ -1939,7 +1939,13 @@ export default function App() {
         )}
       </div>
 
-      <TransportBar onRefresh={handleRefresh} panelVisibility={transportPanelVisibility} onTogglePanel={handleTransportPanelToggle} />
+      <TransportBar
+        onRefresh={handleRefresh}
+        panelVisibility={transportPanelVisibility}
+        onTogglePanel={handleTransportPanelToggle}
+        outputMonitorVisible={outputMonitorVisible}
+        onToggleOutputMonitor={() => void handleToggleOutputMonitor().catch(console.error)}
+      />
       <StatusBar />
     </div>
   );

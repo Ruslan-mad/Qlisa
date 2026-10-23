@@ -6,9 +6,13 @@ export type TransportPanelName = keyof TransportPanelVisibility;
 export function TransportPanelControls({
   visibility,
   onToggle,
+  outputMonitorVisible,
+  onToggleOutputMonitor,
 }: {
   visibility: TransportPanelVisibility;
   onToggle: (panel: TransportPanelName) => void;
+  outputMonitorVisible: boolean;
+  onToggleOutputMonitor: () => void;
 }) {
   const { t } = useLocale();
   const panels: { name: TransportPanelName; label: string; position: string }[] = [
@@ -32,9 +36,17 @@ export function TransportPanelControls({
           onClick={() => onToggle(name)}
         />
       ))}
-      <span className="transport-panel-map__center" aria-hidden="true">
+      <button
+        className="transport-panel-map__center"
+        type="button"
+        title={t("transport.panelOutputMonitor")}
+        aria-label={t("transport.panelOutputMonitor")}
+        aria-pressed={outputMonitorVisible}
+        data-active={outputMonitorVisible ? "true" : "false"}
+        onClick={onToggleOutputMonitor}
+      >
         <i /><i /><i /><i />
-      </span>
+      </button>
     </div>
   );
 }

@@ -1,6 +1,8 @@
 import { SpeakerHigh } from "@phosphor-icons/react";
 import { useRef, type CSSProperties, type KeyboardEvent } from "react";
+import { useLocale } from "../../i18n";
 import { MASTER_VOLUME_MAX_DB, MASTER_VOLUME_MIN_DB, MASTER_VOLUME_STEP_DB, masterVolumeDbToRatio, normalizeMasterVolumeInput, stepMasterVolume } from "./masterVolumeModel";
+import { formatMasterPeakDbfs, type MasterPeakReadout } from "./masterPeakReadoutModel";
 
 export const METER_MIN_DB = -60;
 export const METER_MAX_DB = 0;
@@ -22,7 +24,12 @@ interface MeterRowProps {
   holdPct: number;
 }
 
-function MeterRow({ label, fillPct, holdPct }: MeterRowProps) {
+function MeterRow({ label, fillPct, holdPct, peak, overload, onResetPeak }: MeterRowProps & {
+  peak: number | null;
+  overload: boolean;
+  onResetPeak: () => void;
+}) {
+  const { t } = useLocale();
   return (
     <div className="transport-meter-row">
       <span className="transport-meter-row__channel">{label}</span>
@@ -32,11 +39,22 @@ function MeterRow({ label, fillPct, holdPct }: MeterRowProps) {
         {holdPct > 0 && (
           <div
             className="transport-meter-rail__peak"
-            data-clipping={holdPct > 90}
+            data-clipping={holdPct >= 95}
             style={{ left: `calc(${Math.min(holdPct, 100)}% - 2px)` }}
           />
         )}
       </div>
+      <button
+        type="button"
+        className="transport-meter-readout"
+        data-overload={overload ? "true" : "false"}
+        title={t("transport.clearPeakReadout", { channel: label })}
+        aria-label={t("transport.clearPeakReadout", { channel: label })}
+        onClick={onResetPeak}
+      >
+        <span>{formatMasterPeakDbfs(peak)}</span>
+        {overload && <strong>CLIP</strong>}
+      </button>
     </div>
   );
 }
@@ -44,7 +62,7 @@ function MeterRow({ label, fillPct, holdPct }: MeterRowProps) {
 function TickRow() {
   return (
     <div className="transport-meter-scale">
-      <span className="transport-meter-scale__unit">dB</span>
+      <span className="transport-meter-scale__unit">dBFS</span>
       <div className="transport-meter-scale__rail">
         {DB_TICKS.map((db) => (
           <div key={db} className="transport-meter-scale__tick" style={{ left: `${dbToRatio(db) * 100}%` }}>
@@ -53,6 +71,7 @@ function TickRow() {
           </div>
         ))}
       </div>
+      <span className="transport-meter-readout-spacer" aria-hidden="true" />
     </div>
   );
 }
@@ -95,12 +114,16 @@ function VolumeRow({ label, valueDb, onChange }: { label: string; valueDb: numbe
 export function TransportAudioMeters({
   left,
   right,
+  peakReadout,
+  onResetPeak,
   volumeDb,
   volumeLabel,
   onVolumeChange,
 }: {
   left: { fill: number; hold: number };
   right: { fill: number; hold: number };
+  peakReadout: MasterPeakReadout;
+  onResetPeak: (channel: "left" | "right") => void;
   volumeDb: number;
   volumeLabel: string;
   onVolumeChange: (db: number) => void;
@@ -108,8 +131,8 @@ export function TransportAudioMeters({
   return (
     <div className="stage-master-area">
       <TickRow />
-      <MeterRow label="L" fillPct={left.fill} holdPct={left.hold} />
-      <MeterRow label="R" fillPct={right.fill} holdPct={right.hold} />
+      <MeterRow label="L" fillPct={left.fill} holdPct={left.hold} peak={peakReadout.left} overload={peakReadout.overloadLeft} onResetPeak={() => onResetPeak("left")} />
+      <MeterRow label="R" fillPct={right.fill} holdPct={right.hold} peak={peakReadout.right} overload={peakReadout.overloadRight} onResetPeak={() => onResetPeak("right")} />
       <div className="transport-master-row">
         <div className="transport-master-row__label"><SpeakerHigh size={14} weight="bold" aria-hidden="true" /><span>{volumeLabel}</span></div>
         <VolumeRow label={volumeLabel} valueDb={volumeDb} onChange={onVolumeChange} />

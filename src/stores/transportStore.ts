@@ -24,6 +24,7 @@ interface TransportState {
   runningCues: Map<CueId, RunningCueTime>;
   masterPeakL: number;
   masterPeakR: number;
+  masterLevelSequence: number;
   masterVolume: number; // 0.0–1.0
   /** performance.now() timestamp of the last OSC activity, or null. */
   oscActivityAt: number | null;
@@ -44,6 +45,7 @@ export const useTransportStore = create<TransportState>((set) => ({
   runningCues: new Map(),
   masterPeakL: 0,
   masterPeakR: 0,
+  masterLevelSequence: 0,
   masterVolume: 1.0,
   oscActivityAt: null,
   oscLog: [],
@@ -63,7 +65,7 @@ export const useTransportStore = create<TransportState>((set) => ({
     }),
 
   updateMasterLevels: (peakL, peakR) =>
-    set({ masterPeakL: peakL, masterPeakR: peakR }),
+    set((prev) => ({ masterPeakL: peakL, masterPeakR: peakR, masterLevelSequence: prev.masterLevelSequence + 1 })),
 
   setMasterVolume: (vol) => set({ masterVolume: vol }),
 

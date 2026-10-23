@@ -1008,17 +1008,26 @@ behavior.
 ## Transport controls and meters
 
 The transport bar panel map controls Cue Toolbar, Active Cues, Inspector, and
-the Clip Editor dock. Its layout visibility is saved separately from the
-available Preview/Live/Slice tabs, so hiding the dock does not change its tab
-set. The Inspector also owns the Media Dock. Master volume runs from −60 to
+the Clip Editor dock; its center toggles the existing Output Monitor window.
+Dock visibility is saved separately from the available Preview/Live/Slice
+tabs. The Inspector also owns the Media Dock. Master volume runs from −60 to
 +6 dB; pointer input snaps to unity near 0 dB, while keyboard steps remain
-0.5 dB. Meter scale and peak decay remain on the −60 to 0 dBFS range.
+0.5 dB.
 
-Verification passed: 570 frontend tests, `pnpm build`, and `pnpm tauri:check`.
-The local browser harness checked panel toggles and FTB wiring with mocked
-outputs and fixed meter samples. It showed no overflow at 1280 px; the 1920 px
-check inspected DOM layout because the browser surface limited the screenshot.
-It did not test live audio or device output.
+The master meter reports the post-master sample peak of summed program output
+per physical channel on the main device. It excludes preview voices and does
+not aggregate auxiliary outputs. Its preallocated meter path does not change
+real-time audio samples or their routing order. The display uses −60 to 0
+dBFS, retains each channel's highest numeric peak, and latches CLIP at or above
+0 dBFS until reset. This is sample peak, not dBTP/true peak; values above 0
+dBFS remain visible.
+
+Verification passed: 574 frontend tests, `pnpm build`, `pnpm tauri:check`, and
+88 `audio_engine` tests (1 ignored). The local browser harness checked panel
+and Output Monitor toggles, peak latch/reset/rearm, and FTB wiring with mocked
+outputs. It showed no overflow at 1280 px. The 1920 px check inspected DOM
+layout because the browser surface limited the screenshot. It did not test
+live audio or physical output.
 
 ## Troubleshooting
 

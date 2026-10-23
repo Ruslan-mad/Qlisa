@@ -2540,6 +2540,7 @@ fn open_stream_inner(
             // callback and chunk an unexpectedly large device block so no
             // frame is dropped and the callback never allocates.
             let mut program_scratch = vec![0.0_f32; callback_scratch_frames * 2].into_boxed_slice();
+            let mut meter_scratch = vec![0.0_f32; callback_scratch_frames * total_ch].into_boxed_slice();
             device.build_output_stream(
                 stream_cfg,
                 move |data: &mut [f32], _| {
@@ -2548,9 +2549,10 @@ fn open_stream_inner(
                     cb_period.store(frames as u32, std::sync::atomic::Ordering::Relaxed);
                     for output in data.chunks_mut(callback_scratch_frames * total_ch) {
                         let chunk_frames = output.len() / total_ch;
-                        fill_buffer(
+                        fill_buffer_with_meter(
                             output,
                             &mut program_scratch[..chunk_frames * 2],
+                            &mut meter_scratch[..chunk_frames * total_ch],
                             total_ch,
                             sample_rate,
                             &cb_voices,
@@ -2573,6 +2575,7 @@ fn open_stream_inner(
             let scratch_len = callback_scratch_frames * total_ch;
             let mut scratch = vec![0.0f32; scratch_len].into_boxed_slice();
             let mut program_scratch = vec![0.0_f32; callback_scratch_frames * 2].into_boxed_slice();
+            let mut meter_scratch = vec![0.0_f32; scratch_len].into_boxed_slice();
             device.build_output_stream(
                 stream_cfg,
                 move |data: &mut [i32], _| {
@@ -2582,9 +2585,10 @@ fn open_stream_inner(
                     for destination in data.chunks_mut(scratch_len) {
                         let n = destination.len();
                         let chunk_frames = n / total_ch;
-                        fill_buffer(
+                        fill_buffer_with_meter(
                             &mut scratch[..n],
                             &mut program_scratch[..chunk_frames * 2],
+                            &mut meter_scratch[..n],
                             total_ch,
                             sample_rate,
                             &cb_voices,
@@ -2712,7 +2716,42 @@ fn open_aux_stream(
 // Audio callback — real-time safe
 // ---------------------------------------------------------------------------
 
+#[inline(always)]
+fn add_routed_sample(
+    output: &mut [f32],
+    meter_output: &mut Option<&mut [f32]>,
+    index: usize,
+    sample: f32,
+) {
+    output[index] += sample;
+    if let Some(meter) = meter_output.as_deref_mut() {
+        meter[index] += sample;
+    }
+}
+
+fn master_sample_peaks(meter_output: &[f32], channels: usize, master_gain: f32) -> (f32, f32) {
+    let channels = channels.max(1);
+    let frames = meter_output.len() / channels;
+    let mut peak_l = 0.0_f32;
+    let mut peak_r = 0.0_f32;
+    for frame in 0..frames {
+        for channel in 0..channels {
+            let level = (meter_output[frame * channels + channel] * master_gain).abs();
+            if channel % 2 == 0 {
+                peak_l = peak_l.max(level);
+            } else {
+                peak_r = peak_r.max(level);
+            }
+        }
+    }
+    if channels == 1 {
+        peak_r = peak_l;
+    }
+    (peak_l, peak_r)
+}
+
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn fill_buffer(
     output: &mut [f32],
     program_stereo: &mut [f32],
@@ -2726,11 +2765,45 @@ fn fill_buffer(
     master_gain: &Arc<std::sync::atomic::AtomicU32>,
     output_period: &Arc<std::sync::atomic::AtomicU32>,
 ) {
+    let mut meter_output = vec![0.0; output.len()];
+    fill_buffer_with_meter(
+        output,
+        program_stereo,
+        &mut meter_output,
+        channels,
+        output_sample_rate,
+        voices,
+        input_feeds,
+        program_audio_taps,
+        cmd_cons,
+        status_prod,
+        master_gain,
+        output_period,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_buffer_with_meter(
+    output: &mut [f32],
+    program_stereo: &mut [f32],
+    meter_output: &mut [f32],
+    channels: usize,
+    output_sample_rate: u32,
+    voices: &ArcSwap<Vec<Arc<Voice>>>,
+    input_feeds: &Arc<Mutex<Vec<InputFeed>>>,
+    program_audio_taps: &ArcSwap<Vec<Arc<ProgramAudioTap>>>,
+    cmd_cons: &mut ringbuf::HeapCons<AudioCommand>,
+    status_prod: &mut ringbuf::HeapProd<AudioStatus>,
+    master_gain: &Arc<std::sync::atomic::AtomicU32>,
+    output_period: &Arc<std::sync::atomic::AtomicU32>,
+) {
     output.fill(0.0);
     program_stereo.fill(0.0);
+    meter_output.fill(0.0);
 
     let frames = output.len() / channels;
     debug_assert_eq!(program_stereo.len(), frames * 2);
+    debug_assert_eq!(meter_output.len(), output.len());
 
     // A main-device callback is the single clock domain for this canonical
     // stereo bus. Output-Patch voices rendered by an aux callback and operator
@@ -2763,8 +2836,6 @@ fn fill_buffer(
 
     let master = f32::from_bits(master_gain.load(std::sync::atomic::Ordering::Relaxed));
 
-    let mut peak_l = 0.0_f32;
-    let mut peak_r = 0.0_f32;
     // Per-Output-Patch peaks, indexed by Voice::patch_slot (fixed-size — no
     // allocation in the RT callback).
     let mut patch_peaks = [0.0_f32; PATCH_VU_SLOTS * 2];
@@ -2784,9 +2855,11 @@ fn fill_buffer(
         // Live (Mic Cue) voice — resample from its input feed instead of samples.
         if voice.live.is_some() {
             if let Some(feeds) = feeds_guard.as_deref() {
-                mix_live(
+                let mut voice_meter_output = (!voice.preview_only).then_some(&mut meter_output[..]);
+                mix_live_with_meter(
                     output,
                     (!voice.preview_only && capture_program).then_some(&mut *program_stereo),
+                    &mut voice_meter_output,
                     channels,
                     output_sample_rate,
                     voice,
@@ -2802,8 +2875,6 @@ fn fill_buffer(
                     voice,
                     voice_peak_l,
                     voice_peak_r,
-                    &mut peak_l,
-                    &mut peak_r,
                     &mut patch_peaks,
                 );
             }
@@ -2814,9 +2885,11 @@ fn fill_buffer(
         // The callback only performs atomic reads and ring pops here; decoder
         // I/O, allocation, and seek work stay on the worker pool.
         if voice.stream.is_some() {
-            mix_stream(
+            let mut voice_meter_output = (!voice.preview_only).then_some(&mut meter_output[..]);
+            mix_stream_with_meter(
                 output,
                 (!voice.preview_only && capture_program).then_some(&mut *program_stereo),
+                &mut voice_meter_output,
                 channels,
                 output_sample_rate,
                 voice,
@@ -2825,7 +2898,7 @@ fn fill_buffer(
                 &mut voice_peak_r,
             );
             if !voice.preview_only {
-                accumulate_peaks(voice, voice_peak_l, voice_peak_r, &mut peak_l, &mut peak_r, &mut patch_peaks);
+                accumulate_peaks(voice, voice_peak_l, voice_peak_r, &mut patch_peaks);
             }
             continue;
         }
@@ -3002,6 +3075,7 @@ fn fill_buffer(
                 program_stereo[frame * 2] += program_l;
                 program_stereo[frame * 2 + 1] += program_r;
             }
+            let mut voice_meter_output = (!voice.preview_only).then_some(&mut meter_output[..]);
 
             // SAFETY: `level_matrix` is written once before submission and only
             // read here.
@@ -3012,7 +3086,7 @@ fn fill_buffer(
                 for out in 0..matrix.width.min(channels) {
                     let mixed =
                         (sample_l * matrix.gains[0][out] + sample_r * matrix.gains[1][out]) * level;
-                    output[out_base + out] += mixed;
+                    add_routed_sample(output, &mut voice_meter_output, out_base + out, mixed);
                     // Even outputs feed the left meter, odd the right, so the
                     // VU stays meaningful whatever the channel count.
                     if out % 2 == 0 {
@@ -3027,15 +3101,19 @@ fn fill_buffer(
                 // if the patch references a channel the device does not have.
                 if voice.out_l == voice.out_r {
                     if voice.out_l < channels {
-                        output[out_base + voice.out_l] +=
-                            (program_l + program_r) * std::f32::consts::FRAC_1_SQRT_2;
+                        add_routed_sample(
+                            output,
+                            &mut voice_meter_output,
+                            out_base + voice.out_l,
+                            (program_l + program_r) * std::f32::consts::FRAC_1_SQRT_2,
+                        );
                     }
                 } else {
                     if voice.out_l < channels {
-                        output[out_base + voice.out_l] += program_l;
+                        add_routed_sample(output, &mut voice_meter_output, out_base + voice.out_l, program_l);
                     }
                     if voice.out_r < channels {
-                        output[out_base + voice.out_r] += program_r;
+                        add_routed_sample(output, &mut voice_meter_output, out_base + voice.out_r, program_r);
                     }
                 }
 
@@ -3056,8 +3134,6 @@ fn fill_buffer(
                 voice,
                 voice_peak_l,
                 voice_peak_r,
-                &mut peak_l,
-                &mut peak_r,
                 &mut patch_peaks,
             );
         }
@@ -3079,10 +3155,8 @@ fn fill_buffer(
         tap.push_stereo(program_stereo, 2);
     }
 
-    let _ = status_prod.try_push(AudioStatus::MasterLevels {
-        peak_l: peak_l * master,
-        peak_r: peak_r * master,
-    });
+    let (peak_l, peak_r) = master_sample_peaks(meter_output, channels, master);
+    let _ = status_prod.try_push(AudioStatus::MasterLevels { peak_l, peak_r });
     for slot in 0..PATCH_VU_SLOTS {
         let (l, r) = (patch_peaks[slot * 2], patch_peaks[slot * 2 + 1]);
         if l > 0.0 || r > 0.0 {
@@ -3135,9 +3209,10 @@ fn flush_control_seek_report(
     }
 }
 
-fn mix_stream(
+fn mix_stream_with_meter(
     output: &mut [f32],
     mut program_stereo: Option<&mut [f32]>,
+    meter_output: &mut Option<&mut [f32]>,
     channels: usize,
     output_sample_rate: u32,
     voice: &Arc<Voice>,
@@ -3398,14 +3473,14 @@ fn mix_stream(
             let level = matrix_gain * fade_gain;
             for out in 0..matrix.width.min(channels) {
                 let mixed = (sample[0] * matrix.gains[0][out] + sample[1] * matrix.gains[1][out]) * level;
-                output[out_base + out] += mixed;
+                add_routed_sample(output, meter_output, out_base + out, mixed);
                 if out % 2 == 0 { *peak_l = (*peak_l).max(mixed.abs()); } else { *peak_r = (*peak_r).max(mixed.abs()); }
             }
         } else if voice.out_l == voice.out_r {
-            if voice.out_l < channels { output[out_base + voice.out_l] += (program_l + program_r) * std::f32::consts::FRAC_1_SQRT_2; }
+            if voice.out_l < channels { add_routed_sample(output, meter_output, out_base + voice.out_l, (program_l + program_r) * std::f32::consts::FRAC_1_SQRT_2); }
         } else {
-            if voice.out_l < channels { output[out_base + voice.out_l] += program_l; }
-            if voice.out_r < channels { output[out_base + voice.out_r] += program_r; }
+            if voice.out_l < channels { add_routed_sample(output, meter_output, out_base + voice.out_l, program_l); }
+            if voice.out_r < channels { add_routed_sample(output, meter_output, out_base + voice.out_r, program_r); }
         }
         *peak_l = (*peak_l).max(program_l.abs());
         *peak_r = (*peak_r).max(program_r.abs());
@@ -3502,18 +3577,13 @@ fn mix_stream(
 /// simply unmetered in the mixer).
 pub const PATCH_VU_SLOTS: usize = 16;
 
-/// Fold one voice's block peaks into the master meters and, when the voice is
-/// routed through a metered Output Patch, into that patch's VU slot.
+/// Fold one voice's block peaks into its metered Output Patch VU slot.
 fn accumulate_peaks(
     voice: &Arc<Voice>,
     voice_peak_l: f32,
     voice_peak_r: f32,
-    peak_l: &mut f32,
-    peak_r: &mut f32,
     patch_peaks: &mut [f32; PATCH_VU_SLOTS * 2],
 ) {
-    *peak_l = (*peak_l).max(voice_peak_l);
-    *peak_r = (*peak_r).max(voice_peak_r);
     if let Some(slot) = voice.patch_slot {
         let slot = slot as usize;
         if slot < PATCH_VU_SLOTS {
@@ -3532,9 +3602,40 @@ fn accumulate_peaks(
 /// voice's pan/gain, soft fade, and Output-Patch channel routing exactly like
 /// the file path.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn mix_live(
     output: &mut [f32],
+    program_stereo: Option<&mut [f32]>,
+    channels: usize,
+    output_sample_rate: u32,
+    voice: &Arc<Voice>,
+    feeds: &[InputFeed],
+    status_prod: &mut ringbuf::HeapProd<AudioStatus>,
+    peak_l: &mut f32,
+    peak_r: &mut f32,
+    output_period: &Arc<std::sync::atomic::AtomicU32>,
+) {
+    let mut meter_output = None;
+    mix_live_with_meter(
+        output,
+        program_stereo,
+        &mut meter_output,
+        channels,
+        output_sample_rate,
+        voice,
+        feeds,
+        status_prod,
+        peak_l,
+        peak_r,
+        output_period,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mix_live_with_meter(
+    output: &mut [f32],
     mut program_stereo: Option<&mut [f32]>,
+    meter_output: &mut Option<&mut [f32]>,
     channels: usize,
     output_sample_rate: u32,
     voice: &Arc<Voice>,
@@ -3657,14 +3758,14 @@ fn mix_live(
         let base = frame * channels;
         if voice.out_l == voice.out_r {
             if voice.out_l < channels {
-                output[base + voice.out_l] += (out_l + out_r) * std::f32::consts::FRAC_1_SQRT_2;
+                add_routed_sample(output, meter_output, base + voice.out_l, (out_l + out_r) * std::f32::consts::FRAC_1_SQRT_2);
             }
         } else {
             if voice.out_l < channels {
-                output[base + voice.out_l] += out_l;
+                add_routed_sample(output, meter_output, base + voice.out_l, out_l);
             }
             if voice.out_r < channels {
-                output[base + voice.out_r] += out_r;
+                add_routed_sample(output, meter_output, base + voice.out_r, out_r);
             }
         }
 
@@ -5681,6 +5782,149 @@ mod tests {
         let voice = Arc::new(Voice::new_stream(Arc::clone(&source), 1.0, 0.0));
         voice.set_playing();
         (voice, source)
+    }
+
+    fn render_master_levels(
+        voices: Vec<Arc<Voice>>,
+        channels: usize,
+        master_gain: f32,
+        feeds: Vec<InputFeed>,
+    ) -> (Vec<f32>, (f32, f32)) {
+        let frames = 256;
+        let pool = rt_pool(voices);
+        let feeds = Arc::new(Mutex::new(feeds));
+        let taps = Arc::new(ArcSwap::from_pointee(Vec::new()));
+        let (_, mut cmd_cons) = HeapRb::<AudioCommand>::new(16).split();
+        let (mut status_prod, mut status_cons) = HeapRb::<AudioStatus>::new(64).split();
+        let master = Arc::new(AtomicU32::new(f32::to_bits(master_gain)));
+        let period = Arc::new(AtomicU32::new(frames as u32));
+        let mut output = vec![0.0_f32; frames * channels];
+        let mut program = vec![0.0_f32; frames * 2];
+        let mut meter = vec![0.0_f32; frames * channels];
+
+        fill_buffer_with_meter(
+            &mut output,
+            &mut program,
+            &mut meter,
+            channels,
+            48_000,
+            &pool,
+            &feeds,
+            &taps,
+            &mut cmd_cons,
+            &mut status_prod,
+            &master,
+            &period,
+        );
+        let levels = std::iter::from_fn(|| status_cons.try_pop())
+            .find_map(|status| match status {
+                AudioStatus::MasterLevels { peak_l, peak_r } => Some((peak_l, peak_r)),
+                _ => None,
+            })
+            .expect("one master-level status per callback");
+        (output, levels)
+    }
+
+    fn pcm_voice(samples: &[f32]) -> Arc<Voice> {
+        let voice = Arc::new(Voice::new(Arc::new(samples.to_vec()), 2, 48_000, 1.0, 0.0));
+        voice.set_playing();
+        voice
+    }
+
+    #[test]
+    fn master_sample_meter_sums_only_program_output_and_applies_master_once() {
+        let (output, levels) = render_master_levels(
+            vec![pcm_voice(&[0.3, 0.4]), pcm_voice(&[0.3, 0.4])],
+            2,
+            0.5,
+            vec![],
+        );
+        assert!((output[0] - 0.3).abs() < 1e-6);
+        assert!((output[1] - 0.4).abs() < 1e-6);
+        assert!((levels.0 - 0.3).abs() < 1e-6);
+        assert!((levels.1 - 0.4).abs() < 1e-6);
+
+        let (output, levels) = render_master_levels(
+            vec![pcm_voice(&[0.3, 0.4]), pcm_voice(&[-0.3, -0.4])],
+            2,
+            1.0,
+            vec![],
+        );
+        assert!(output.iter().all(|sample| sample.abs() < 1e-6));
+        assert_eq!(levels, (0.0, 0.0));
+    }
+
+    #[test]
+    fn master_sample_meter_excludes_preview_and_retains_over_full_scale_values() {
+        let mut preview = pcm_voice(&[0.9, 0.9]);
+        Arc::get_mut(&mut preview).unwrap().preview_only = true;
+        let (output, levels) = render_master_levels(vec![pcm_voice(&[0.2, 0.3]), preview], 2, 1.0, vec![]);
+        assert_eq!(levels, (0.2, 0.3));
+        assert!((output[0] - 1.1).abs() < 1e-6, "preview remains audible but is excluded from the program meter");
+
+        let (output, levels) = render_master_levels(
+            vec![pcm_voice(&[0.75, 0.8]), pcm_voice(&[0.75, 0.8])],
+            2,
+            1.0,
+            vec![],
+        );
+        assert_eq!(levels, (1.5, 1.6));
+        assert!((output[0] - 1.5).abs() < 1e-6, "master peak status must retain over-full-scale samples");
+    }
+
+    #[test]
+    fn master_sample_meter_uses_physical_channel_parity_without_cross_output_sum() {
+        let mut first = pcm_voice(&[0.3, 0.4]);
+        Arc::get_mut(&mut first).unwrap().out_l = 4;
+        Arc::get_mut(&mut first).unwrap().out_r = 5;
+        let mut second = pcm_voice(&[0.4, 0.3]);
+        Arc::get_mut(&mut second).unwrap().out_l = 4;
+        Arc::get_mut(&mut second).unwrap().out_r = 5;
+        let mut other = pcm_voice(&[0.8, 0.7]);
+        Arc::get_mut(&mut other).unwrap().out_l = 6;
+        Arc::get_mut(&mut other).unwrap().out_r = 7;
+        let (_, levels) = render_master_levels(
+            vec![first, second, other],
+            8,
+            1.0,
+            vec![],
+        );
+        assert!((levels.0 - 0.8).abs() < 1e-6);
+        assert!((levels.1 - 0.7).abs() < 1e-6);
+
+        let mut matrix_voice = pcm_voice(&[0.3, 0.4]);
+        let mut matrix_gains = vec![vec![0.0_f32; 8]; 2];
+        matrix_gains[0][2] = 1.0;
+        matrix_gains[1][3] = 1.0;
+        unsafe {
+            *Arc::get_mut(&mut matrix_voice).unwrap().inner.level_matrix.get() =
+                crate::engine::voice::LevelMatrix::new(&matrix_gains);
+        }
+        let (_, matrix_levels) = render_master_levels(vec![matrix_voice], 8, 1.0, vec![]);
+        assert_eq!(matrix_levels, (0.3, 0.4));
+
+        let (_, mono_levels) = render_master_levels(vec![pcm_voice(&[0.25, 0.5])], 1, 1.0, vec![]);
+        assert_eq!(mono_levels, (0.25, 0.25));
+    }
+
+    #[test]
+    fn master_sample_meter_includes_streamed_and_live_program_routes() {
+        let (stream, _) = make_stream_voice(&[[0.25, 0.5]], true, true);
+        let (_, stream_levels) = render_master_levels(vec![stream], 2, 1.0, vec![]);
+        assert_eq!(stream_levels, (0.25, 0.5));
+
+        let (mut feed, mut producer) = make_feed(2);
+        for _ in 0..1024 {
+            producer.try_push(0.25).unwrap();
+            producer.try_push(0.5).unwrap();
+        }
+        feed.drain();
+        let live = LiveSource::new(feed.id, 0, 1, 48_000);
+        let live_voice = Arc::new(Voice::new_live(live, 48_000, 1.0, 0.0));
+        live_voice.set_playing();
+        let (_, live_levels) = render_master_levels(vec![live_voice], 2, 1.0, vec![feed]);
+        let center_pan = std::f32::consts::FRAC_1_SQRT_2;
+        assert_eq!(live_levels, (0.25 * center_pan, 0.5 * center_pan));
     }
 
     fn completed_count(statuses: &[AudioStatus], voice_id: VoiceId) -> usize {
