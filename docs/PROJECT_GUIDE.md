@@ -18,10 +18,10 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. Qlisa 1.5.17 is the latest published release. See the
-[1.5.17 release notes](RELEASE_NOTES_1.5.17.md), the previous
-[1.5.16 notes](RELEASE_NOTES_1.5.16.md), and the
-[1.5.17 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.17) for
+1.5.8. Qlisa 1.5.18 is the latest published release. See the
+[1.5.18 release notes](RELEASE_NOTES_1.5.18.md), the previous
+[1.5.17 notes](RELEASE_NOTES_1.5.17.md), and the
+[1.5.18 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.18) for
 the current installer. This is not an official
 upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
@@ -209,6 +209,34 @@ projects and GO/PAUSE on identical silent-video mirrors. Native P Pause/Resume
 also passed. No updater end-to-end, audio playback, or physical-device test
 was performed. 7-Zip was unavailable, so the installer payload listing was
 skipped; the bundle resource configuration check passed.
+
+## Qlisa 1.5.18 publication
+
+Published on 2026-10-23 at 11:22:03 UTC as GitHub release `421757596`:
+[Qlisa 1.5.18](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.18).
+The lightweight tag points directly to build commit
+`8c0c4f85326b79b45ce2ce7898ad28b88aad4761`. See the
+[release notes](RELEASE_NOTES_1.5.18.md).
+
+The installer `Qlisa_1.5.18_x64-setup.exe` is 9,603,158 bytes, SHA-256
+`24622358e5d5d6156fb33f466ff547000e9d73253ad4971909847736414599a8`. Its
+416-byte updater signature has SHA-256
+`7b139081154c36723eef554f376744f6de7905059e88cb180af030800ecb4027` and
+verified against the configured public key. `latest.json` is 2,962 bytes with
+SHA-256
+`00140a2cacd1fb7ab4bc90fba9b8350bd050e2991226c7c5a40ebd3c9be9617b`. It
+contains version 1.5.18, the exact installer URL and signature, and the release
+notes. GitHub reports 1.5.18 as the latest stable release. Anonymous downloads
+of all three assets matched the local and GitHub SHA-256 digests. The downloaded
+installer signature and public updater feed were verified.
+
+Release checks passed: 574 frontend tests, 1,056 Rust tests with 12 ignored,
+`cargo check`, Clippy, and a production ASIO-enabled Tauri NSIS build. The first
+production build attempt ended with a transient Rust compiler access violation;
+the retry succeeded with the same compiler. The peak meter sums post-master
+program audio on the main device, excludes preview audio, and does not measure
+auxiliary outputs or true peak. No native GUI, updater end-to-end, or physical
+hardware test was performed.
 
 ## Current implementation notes
 
