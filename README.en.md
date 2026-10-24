@@ -71,7 +71,7 @@ Qlisa 1.5.13 added UUID-based commands between Cue Lists. Goto moves the target 
 
 Qlisa 1.5.14 added a configurable status bar and restoration of the main window's position, size, and maximized state. See the [1.5.14 release notes](docs/RELEASE_NOTES_1.5.14.md), [status bar guide](docs/status-bar.md), and [window state note](docs/window-state.md).
 
-Qlisa 1.5.18 is the current release. It adds per-media-type Black Bars defaults, a transport panel switcher, and numeric peak readouts for the main audio output. [Download Qlisa 1.5.18](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.18); see the [1.5.18 release notes](docs/RELEASE_NOTES_1.5.18.md).
+Qlisa 1.5.19 is the current release. It fixes first-run Windows Media Runtime downloads by switching FFmpeg and ffprobe to a pinned Gyan release. [Download Qlisa 1.5.19](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.19); see the [1.5.19 release notes](docs/RELEASE_NOTES_1.5.19.md). The [1.5.18 release notes](docs/RELEASE_NOTES_1.5.18.md) describe the previous release.
 
 Qlisa 1.5.12 also introduced the Stage theme for live operation, with a
 compact Cue List, independently collapsible panels, and large transport

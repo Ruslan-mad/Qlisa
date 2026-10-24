@@ -18,10 +18,10 @@ suffix. Collect and Save writes `.qlisa`. Windows file association is for
 `.qlisa` only. Both extensions use the existing JSON workspace schema;
 internal `inkue` keys and IPC names remain for compatibility. These project
 extension changes and the `.qlisa` Windows file association shipped in Qlisa
-1.5.8. Qlisa 1.5.18 is the latest published release. See the
-[1.5.18 release notes](RELEASE_NOTES_1.5.18.md), the previous
-[1.5.17 notes](RELEASE_NOTES_1.5.17.md), and the
-[1.5.18 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.18) for
+1.5.8. Qlisa 1.5.19 is the latest published release. See the
+[1.5.19 release notes](RELEASE_NOTES_1.5.19.md), the previous
+[1.5.18 notes](RELEASE_NOTES_1.5.18.md), and the
+[1.5.19 release](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.19) for
 the current installer. This is not an official
 upstream Inkue release checkout. The source repository is public at
 <https://github.com/Ruslan-mad/Qlisa>. Check its Releases page for binary
@@ -209,6 +209,35 @@ projects and GO/PAUSE on identical silent-video mirrors. Native P Pause/Resume
 also passed. No updater end-to-end, audio playback, or physical-device test
 was performed. 7-Zip was unavailable, so the installer payload listing was
 skipped; the bundle resource configuration check passed.
+
+## Qlisa 1.5.19 publication
+
+Published on 2026-10-24 at 18:13:30 UTC as GitHub release `422900602`:
+[Qlisa 1.5.19](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.19).
+The annotated tag `v1.5.19` points to build commit
+`ab60e2a7de0b5092a551d36286808edc9366fd57`. The source hotfix is commit
+`ee37c02ce138aa6660c6c436407e2e2904148c2b`. See the
+[release notes](RELEASE_NOTES_1.5.19.md).
+
+The installer `Qlisa_1.5.19_x64-setup.exe` is 9,598,943 bytes, SHA-256
+`be22bf6743cef8b6bb9f2e5f3d3e671e84e99659ca53c118a5eb90a18c102cdf`. Its
+416-byte updater signature has SHA-256
+`fc1db4b51c4c342ad0ce6a03672021ad47bcdb9422fb1caed0eb319160c3f925` and was
+verified with the configured public key. `latest.json` is 1,459 bytes with
+SHA-256
+`879c4c7ad1ff2c452eb593be9319da58d955b9263f520cc9fb2b0c8c98ec37dc`. It
+contains version 1.5.19 and the exact installer URL and signature. GitHub
+reports 1.5.19 as latest stable. Anonymous downloads of all three assets
+returned HTTP 200 and matched their local and GitHub SHA-256 digests. The
+public updater feed and trusted-comment signature also verified.
+
+Release checks passed: 574 frontend tests, `cargo check`, `cargo test`,
+Clippy, and a signed production ASIO-enabled Tauri NSIS build. The Rust unit
+suite passed 913 tests; 11 tests were ignored. A fresh production profile
+downloaded all three runtime files and opened the main UI after its automatic
+restart. A warm start with a failed `HTTPS_PROXY` also opened the UI without
+downloading runtime files. 7-Zip was unavailable, so the installer payload
+listing was skipped; the Tauri resource configuration check passed.
 
 ## Qlisa 1.5.18 publication
 
