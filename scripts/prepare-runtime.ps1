@@ -3,7 +3,7 @@
 Stage the pinned Windows FFmpeg runtime outside Git.
 
 .DESCRIPTION
-Downloads or accepts the pinned BtbN FFmpeg archive, verifies its checksum,
+Downloads or accepts the pinned Gyan FFmpeg archive, verifies its checksum,
 runtime files, license, and tracked provenance notice, then stages ffmpeg.exe
 and ffprobe.exe under src-tauri/vendor/ffmpeg. Runtime binaries are ignored by Git.
 #>
@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $runtimeManifestPath = Join-Path $PSScriptRoot 'runtime-manifest.json'
 $runtimeManifest = Get-Content -Raw -LiteralPath $runtimeManifestPath | ConvertFrom-Json
-$ffmpeg = $runtimeManifest.components | Where-Object { $_.id -eq 'ffmpeg-btbn-gpl-n9.0' } | Select-Object -First 1
+$ffmpeg = $runtimeManifest.components | Where-Object { $_.id -eq 'ffmpeg-gyan-full-9.0.2' } | Select-Object -First 1
 if ($null -eq $ffmpeg -or $runtimeManifest.schemaVersion -ne 1) {
     throw "Runtime manifest is missing schemaVersion=1 or the ffmpeg component: $runtimeManifestPath"
 }
@@ -98,7 +98,7 @@ try {
     foreach ($record in @($ffmpeg.runtimeFiles)) {
         $versionOutput = (& (Join-Path $buildRoot (Join-Path 'bin' $record.fileName)) -hide_banner -version 2>&1) -join "`n"
         if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch [regex]::Escape($record.versionText)) {
-            throw "The selected $($record.fileName) does not report the pinned BtbN version."
+            throw "The selected $($record.fileName) does not report the pinned Gyan version."
         }
     }
     $protocolOutput = (& (Join-Path $buildRoot 'bin\ffmpeg.exe') -hide_banner -protocols 2>&1) -join "`n"
@@ -126,7 +126,7 @@ try {
             Copy-Item -LiteralPath $source -Destination $destinationNotice -Force
         }
     }
-    Remove-Item -LiteralPath (Join-Path $destination 'README-Gyan-build.txt') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $destination 'README-BtbN-build.txt') -Force -ErrorAction SilentlyContinue
 
     foreach ($name in $requiredNames) {
         $stagedPath = Join-Path $destination $name
@@ -135,7 +135,7 @@ try {
         if ($stagedHash -ne $expected.sha256.ToLowerInvariant()) { throw "Staged $name failed its SHA-256 check." }
     }
 
-    Write-Host "Staged BtbN FFmpeg $($ffmpeg.version) and ffprobe in $destination"
+    Write-Host "Staged Gyan FFmpeg $($ffmpeg.version) and ffprobe in $destination"
     Write-Host "Archive SHA-256: $archiveHash"
     Write-Host 'SRT protocol: present. NDI Runtime remains installed separately by the user.'
 } finally {

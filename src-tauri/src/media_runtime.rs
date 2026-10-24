@@ -123,13 +123,13 @@ pub fn status() -> MediaRuntimeStatus {
     let ffmpeg = !pending
         && verified_file(
             &root.join("ffmpeg.exe"),
-            "ffmpeg-btbn-gpl-n9.0",
+            "ffmpeg-gyan-full-9.0.2",
             "ffmpeg.exe",
         );
     let ffprobe = !pending
         && verified_file(
             &root.join("ffprobe.exe"),
-            "ffmpeg-btbn-gpl-n9.0",
+            "ffmpeg-gyan-full-9.0.2",
             "ffprobe.exe",
         );
     let libmpv = !pending && verified_file(&root.join("libmpv-2.dll"), "libmpv", "libmpv-2.dll");
@@ -278,7 +278,7 @@ fn prepare_sync(app: &AppHandle, force: bool) -> Result<MediaRuntimeStatus, Stri
         force,
         reinstall_pending(),
     );
-    let ff = component("ffmpeg-btbn-gpl-n9.0")?;
+    let ff = component("ffmpeg-gyan-full-9.0.2")?;
     let mpv = component("libmpv")?;
     let base = runtime_dir();
     fs::create_dir_all(&base).map_err(|e| format!("Не удалось создать {}: {e}", base.display()))?;
@@ -313,7 +313,7 @@ fn prepare_sync(app: &AppHandle, force: bool) -> Result<MediaRuntimeStatus, Stri
             progress(app, "extract", Some(96 + i as u8), &format!("Подготовка {n}…"));
             let member = ffmpeg_member(ff_root, n)?;
             extract_member(&ff_archive, &member, &temp_ff[i])?;
-            verify_hash(&temp_ff[i], &expected_hash("ffmpeg-btbn-gpl-n9.0", n)?, n)?;
+            verify_hash(&temp_ff[i], &expected_hash("ffmpeg-gyan-full-9.0.2", n)?, n)?;
         }
         let temp_mpv = work.join("libmpv-2.dll");
         progress(app, "extract", Some(98), "Подготовка libmpv…");
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn manifest_pins_hashes_and_urls() {
         assert_eq!(expected_hash("libmpv", "libmpv-2.dll").unwrap().len(), 64);
-        assert!(component("ffmpeg-btbn-gpl-n9.0").unwrap()["archive"]["url"]
+        assert!(component("ffmpeg-gyan-full-9.0.2").unwrap()["archive"]["url"]
             .as_str()
             .unwrap()
             .starts_with("https://"));

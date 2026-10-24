@@ -31,9 +31,9 @@ The review is based on lockfile versions and registry metadata, not the package 
 
 ### FFmpeg and libsrt
 
-The selected payload is BtbN FFmpeg **9.0 GPL static**, archive [`ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip`](https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-23-14-55/ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip), SHA-256 `fdea132b8059ba9dfd6c1ce05bd831a85e665705f03e50162ae2fe599223b5ae`. The archive contains both executables; their hashes are recorded in [`README-BtbN-build.txt`](../src-tauri/vendor/ffmpeg/README-BtbN-build.txt). The archive's `LICENSE.txt` is GPL version 3 and matches the staged `src-tauri/vendor/ffmpeg/LICENSE`. Its build configuration enables `libsrt`. The pinned BtbN recipe identifies libsrt source commit [`ff8ab25c57aece5b7351defe36dacc94fc28527f`](https://github.com/Haivision/srt/commit/ff8ab25c57aece5b7351defe36dacc94fc28527f); this is a recipe pin, not independent binary attestation.
+The selected payload is Gyan FFmpeg **9.0.2 full, GPLv3 static**, archive [`ffmpeg-9.0.2-full_build.zip`](https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build.zip), SHA-256 `759d0a9831c436a0eb331ad36f236c06cb04aaa0005da46571f0e9d3d9206f6b`. The archive contains both executables; their hashes are recorded in [`README-Gyan-build.txt`](../src-tauri/vendor/ffmpeg/README-Gyan-build.txt). The archive README identifies GPL v3, its `LICENSE` matches the tracked license, and its build configuration enables GPLv3 and static linking. The verified binaries expose SRT, x264, x265, AAC, and Qlisa's required filters. They report FFmpeg source commit [`946fcce07b6dcd0331c8cc609192aeff5e1924f8`](https://github.com/FFmpeg/FFmpeg/commit/946fcce07b6dcd0331c8cc609192aeff5e1924f8).
 
-The confirmed remaining FFmpeg source gap is in BtbN `scripts.d/50-onevpl.sh`: it downloads and applies libvpl PR 198 from a mutable `pull/198.patch` URL, and the exact patch content used for this artifact build is unconfirmed. **Binary release blocker.** See [FFmpeg source offer](THIRD_PARTY_SOURCE_OFFER.md).
+The exact source revisions and patches for every statically linked dependency in this Gyan binary have not been independently verified. Qlisa downloads the versioned binary archive directly from upstream and does not include it in the installer or updater. Do not describe this record as a corresponding-source offer or compliance attestation. See [runtime provenance](THIRD_PARTY_SOURCE_OFFER.md).
 
 ### libmpv
 
@@ -42,5 +42,5 @@ The staged `libmpv-2.dll` is version `v0.41.0-1055-g6fd80b200` from the generic 
 ## Decision
 
 - **Source repository:** no dependency-license blocker found. Locked MPL crates and development tooling have public source; the repository does not include compiled third-party binaries as part of this license audit.
-- **Binary release:** not ready until corresponding source and notices for the exact BtbN FFmpeg build and libmpv payloads are gathered and matched to the final binaries.
+- **Binary release:** corresponding source and notices for the exact FFmpeg and libmpv payloads still require review. This audit does not certify the final binary distribution.
 - **Updater:** this audit does not determine updater signing-key readiness.

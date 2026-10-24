@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkRuntimeDownloads } from "./runtime-download-check.mjs";
 import {
   artifactChanged,
   buildCommandArgs,
@@ -270,7 +271,7 @@ function rollbackVersionFiles(originals, written, staged, initialHead) {
   }
 }
 
-function release(releaseOptions) {
+async function release(releaseOptions) {
   validateReleasePreparationOptions(releaseOptions);
   ensureCleanTree();
   const initialHead = git(["rev-parse", "HEAD"]);
@@ -283,6 +284,8 @@ function release(releaseOptions) {
     printDryRun(state.version, releaseOptions);
     return;
   }
+
+  await checkRuntimeDownloads(join(ROOT, "scripts", "runtime-manifest.json"));
 
   ensureWindowsAsioPrerequisites();
 
@@ -361,7 +364,7 @@ function release(releaseOptions) {
   }
 }
 
-function main() {
+async function main() {
   if (process.platform !== "win32") throw new Error("Qlisa release builds are Windows-only and must include asio-support.");
   const args = process.argv.slice(2);
   if (args[0] === "--write-updater-metadata") {
@@ -379,12 +382,12 @@ function main() {
   if (!options.prepareRelease && !options.dryRun) {
     throw new Error("Use scripts/publish.ps1 for release preparation, or pass --dry-run to inspect version/build arguments.");
   }
-  release(options);
+  await release(options);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    main();
+    await main();
   } catch (error) {
     console.error(`Release failed: ${error.message}`);
     process.exitCode = 1;

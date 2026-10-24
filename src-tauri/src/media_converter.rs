@@ -1203,7 +1203,7 @@ fn ffprobe_path() -> Option<PathBuf> {
     if cfg!(debug_assertions) {
         if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") { candidates.push(PathBuf::from(manifest).join("vendor").join("ffmpeg").join(name)); }
     }
-    candidates.into_iter().find(|p| crate::media_runtime::verified_file(p, "ffmpeg-btbn-gpl-n9.0", name))
+    candidates.into_iter().find(|p| crate::media_runtime::verified_file(p, "ffmpeg-gyan-full-9.0.2", name))
 }
 
 #[cfg(not(windows))]

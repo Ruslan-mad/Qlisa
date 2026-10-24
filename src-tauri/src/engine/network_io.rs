@@ -3098,7 +3098,7 @@ pub fn find_ffmpeg_runtime() -> Option<PathBuf> {
             candidates.push(PathBuf::from(manifest).join("vendor").join("ffmpeg").join(executable));
         }
     }
-    candidates.into_iter().find(|path| crate::media_runtime::verified_file(path, "ffmpeg-btbn-gpl-n9.0", executable))
+    candidates.into_iter().find(|path| crate::media_runtime::verified_file(path, "ffmpeg-gyan-full-9.0.2", executable))
 }
 
 #[cfg(not(windows))]

@@ -3,75 +3,73 @@
   "purpose": "Pinned Windows runtime configuration and acquisition provenance. The application embeds this manifest to locate and verify runtime downloads; this file also records provenance evidence and is not a compliance attestation.",
   "components": [
     {
-      "id": "ffmpeg-btbn-gpl-n9.0",
+      "id": "ffmpeg-gyan-full-9.0.2",
       "kind": "static-runtime-build",
-      "version": "9.0.2",
-      "provider": "BtbN/FFmpeg-Builds",
-      "releaseTag": "autobuild-2026-09-23-14-55",
-      "variant": "win64-gpl-9.0",
+      "version": "9.0.2-full_build-www.gyan.dev",
+      "provider": "GyanD/codexffmpeg",
+      "releaseTag": "9.0.2",
+      "variant": "win64-full-build-static",
       "architecture": "windows-x86_64",
       "stagingDirectory": "src-tauri/vendor/ffmpeg",
       "archive": {
-        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-23-14-55/ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip",
-        "sha256": "fdea132b8059ba9dfd6c1ce05bd831a85e665705f03e50162ae2fe599223b5ae",
+        "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build.zip",
+        "sha256": "759d0a9831c436a0eb331ad36f236c06cb04aaa0005da46571f0e9d3d9206f6b",
         "format": "zip",
-        "rootDirectory": "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0"
+        "rootDirectory": "ffmpeg-9.0.2-full_build"
       },
       "license": {
         "identifier": "GPL-3.0-or-later",
         "url": "https://www.gnu.org/licenses/gpl-3.0.html",
-        "evidence": "The archive contains LICENSE.txt; ffmpeg.exe -version reports --enable-gpl --enable-version3."
+        "evidence": "The archive README identifies GPL v3; LICENSE is byte-identical to the tracked GPL-3.0-or-later text; ffmpeg.exe -version reports --enable-gpl --enable-version3."
       },
       "buildReference": {
-        "sourceCommit": "https://github.com/FFmpeg/FFmpeg/commit/a5923073bfd8f25b7300d93af3f8e690174ebd30",
-        "buildSystemRepository": "https://github.com/BtbN/FFmpeg-Builds",
-        "buildSystemCommit": "ccbffa4f85d0e8de5c135c69ebb10e4c14911fa9",
-        "buildSystemCommitUrl": "https://github.com/BtbN/FFmpeg-Builds/commit/ccbffa4f85d0e8de5c135c69ebb10e4c14911fa9",
-        "configurationEvidence": "ffmpeg.exe -version output from the pinned archive",
+        "sourceCommit": "https://github.com/FFmpeg/FFmpeg/commit/946fcce07b6dcd0331c8cc609192aeff5e1924f8",
+        "buildSystemRepository": "https://github.com/GyanD/codexffmpeg",
+        "configurationEvidence": "The archive README records the build configuration; ffmpeg.exe -version confirms static GPLv3 build and enabled SRT, x264, x265, AAC, and required filters.",
         "fullBuildInputsVerified": false
       },
       "runtimeFiles": [
         {
           "fileName": "ffmpeg.exe",
-          "archiveMember": "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0/bin/ffmpeg.exe",
+          "archiveMember": "ffmpeg-9.0.2-full_build/bin/ffmpeg.exe",
           "path": "src-tauri/vendor/ffmpeg/ffmpeg.exe",
-          "sha256": "288ef71027b17e4d83d5d95777f14495fc59cc53e7b4c35637d0d68269c6d151",
-          "versionText": "ffmpeg version n9.0.2-3-ga5923073bf-20260923"
+          "sha256": "589e50b766d251afdf181dd664d40bd94407e200b019989fd7468c7d118a28d0",
+          "versionText": "ffmpeg version 9.0.2-full_build-www.gyan.dev"
         },
         {
           "fileName": "ffprobe.exe",
-          "archiveMember": "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0/bin/ffprobe.exe",
+          "archiveMember": "ffmpeg-9.0.2-full_build/bin/ffprobe.exe",
           "path": "src-tauri/vendor/ffmpeg/ffprobe.exe",
-          "sha256": "8603cd025c0fa317091ea5e3f6b3a4181bf21c71a2dc30ac049789459265db7a",
-          "versionText": "ffprobe version n9.0.2-3-ga5923073bf-20260923"
+          "sha256": "02264dfa4f56baaa31e443ece8aa16d397f6b008200e7fd184d22b9009e75fd3",
+          "versionText": "ffprobe version 9.0.2-full_build-www.gyan.dev"
         }
       ],
       "notices": [
         {
-          "archivePath": "LICENSE.txt",
-          "archiveMember": "ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0/LICENSE.txt",
+          "archivePath": "LICENSE",
+          "archiveMember": "ffmpeg-9.0.2-full_build/LICENSE",
           "path": "src-tauri/vendor/ffmpeg/LICENSE",
           "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
         },
         {
           "source": "tracked repository provenance notice",
-          "path": "src-tauri/vendor/ffmpeg/README-BtbN-build.txt",
-          "sha256": "bf59391fe6d8be64dd6fac6aa3f50779a0fe1c3de97943d681d82c8ca121977b"
+          "path": "src-tauri/vendor/ffmpeg/README-Gyan-build.txt",
+          "sha256": "82d96e212b8c408756ff08c78479ed9a97144df7653d414d0d6305c4f4461bcd"
         }
       ],
       "srt": {
         "enabled": true,
         "evidence": "ffmpeg.exe -hide_banner -protocols from the pinned archive listed srt.",
         "sourceRepository": "https://github.com/Haivision/srt",
-        "sourceCommit": "ff8ab25c57aece5b7351defe36dacc94fc28527f",
-        "sourceCommitUrl": "https://github.com/Haivision/srt/commit/ff8ab25c57aece5b7351defe36dacc94fc28527f",
-        "recipePinUrl": "https://github.com/BtbN/FFmpeg-Builds/blob/ccbffa4f85d0e8de5c135c69ebb10e4c14911fa9/scripts.d/50-srt.sh",
-        "pinScope": "BtbN build recipe source pin; not independent attestation of the source embedded in this binary."
+        "sourceCommit": null,
+        "sourceCommitUrl": null,
+        "recipePinUrl": "https://github.com/GyanD/codexffmpeg",
+        "pinScope": "The archive confirms SRT support. The exact libsrt source revision embedded in this binary is not verified."
       },
       "sourceOffer": {
         "status": "not-ready",
         "blockers": [
-          "The pinned BtbN build recipe downloads the libvpl PR 198 patch from a mutable pull/198.patch URL; the exact patch content applied when this artifact was built is not confirmed, so the exact corresponding source set is not established."
+          "The upstream archive identifies the FFmpeg source revision and build configuration, but the complete source set for statically linked dependencies and patches has not been verified."
         ]
       }
     },

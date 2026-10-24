@@ -66,10 +66,10 @@ function Get-RuntimeManifest {
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Fail "Tracked runtime manifest is missing: $manifestPath" }
     $runtime = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
     if ($runtime.schemaVersion -ne 1 -or $runtime.components -isnot [array]) { Fail 'scripts/runtime-manifest.json must have schemaVersion=1 and a components array.' }
-    $ffmpeg = @($runtime.components | Where-Object { $_.id -eq 'ffmpeg-btbn-gpl-n9.0' })
+    $ffmpeg = @($runtime.components | Where-Object { $_.id -eq 'ffmpeg-gyan-full-9.0.2' })
     $mpv = @($runtime.components | Where-Object { $_.id -eq 'libmpv' })
     if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { Fail 'Runtime manifest must contain exactly one pinned FFmpeg and one libmpv record.' }
-    if ([string]$ffmpeg[0].archive.url -notmatch '^https://github\.com/BtbN/FFmpeg-Builds/releases/download/' -or
+    if ([string]$ffmpeg[0].archive.url -notmatch '^https://github\.com/GyanD/codexffmpeg/releases/download/9\.0\.2/ffmpeg-9\.0\.2-full_build\.zip$' -or
         [string]$ffmpeg[0].archive.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
         [string]$mpv[0].build.archiveUrl -notmatch '^https://github\.com/shinchiro/mpv-winbuild-cmake/releases/download/' -or
         [string]$mpv[0].build.archiveSha256 -notmatch '^[a-fA-F0-9]{64}$') { Fail 'Runtime manifest upstream URLs or archive SHA-256 pins are incomplete.' }

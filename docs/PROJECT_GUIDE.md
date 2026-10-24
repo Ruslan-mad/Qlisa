@@ -727,8 +727,8 @@ stored at the same scope; inspect the struct before deciding.
   `%LOCALAPPDATA%\Qlisa\runtime\`; macOS/Linux use platform libmpv.
 - Windows Qlisa app builds always use `vendor/asiosdk/` via
   `src-tauri/.cargo/config.toml` and enable `asio-support`.
-- Windows Qlisa downloads FFmpeg/ffprobe from the pinned BtbN FFmpeg 9.0 GPL
-  static archive on first launch and installs them under
+- Windows Qlisa downloads FFmpeg/ffprobe from the pinned Gyan FFmpeg 9.0.2
+  full GPL static archive on first launch and installs them under
   `%LOCALAPPDATA%\Qlisa\runtime\`. See [runtime pins and source provenance](THIRD_PARTY_SOURCE_OFFER.md).
   NSIS installs Qlisa per-machine under `C:\Program Files\Qlisa`. The runtime
   manifest pins upstream URLs and SHA256 hashes. The media binaries are not
@@ -934,7 +934,7 @@ progress and cancellation, and applying an output to its cue with a restore
 path. Compatibility results are heuristics for the playback engine; they do
 not guarantee decode quality on every platform. Conversion and metadata probes
 run outside the audio callback and transport path. Windows first launch
-downloads `ffmpeg.exe` and `ffprobe.exe` from one pinned BtbN archive directly
+downloads `ffmpeg.exe` and `ffprobe.exe` from one pinned Gyan archive directly
 from upstream. Cue assignment and source restoration use UUID lookup, including
 nested visual cues. See the [media conversion note](media-conversion.md) for
 restore guards, metadata refresh, and video preload behavior, and

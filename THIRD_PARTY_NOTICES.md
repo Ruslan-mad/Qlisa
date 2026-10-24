@@ -16,31 +16,27 @@ Release checklist: confirm that no NDI Runtime DLL is present in the source expo
 
 ## FFmpeg, ffprobe, and SRT
 
-The selected Windows runtime is downloaded directly from BtbN/FFmpeg-Builds release tag
-[`autobuild-2026-09-23-14-55`](https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-09-23-14-55),
-asset `ffmpeg-n9.0.2-3-ga5923073bf-win64-gpl-9.0.zip`. It is a Windows x86_64,
-GPL static build. The archive SHA-256 is
-`fdea132b8059ba9dfd6c1ce05bd831a85e665705f03e50162ae2fe599223b5ae`; both
-`ffmpeg.exe` and `ffprobe.exe` come from that archive. Their SHA-256 values,
-FFmpeg source commit, and pinned BtbN build-system commit are recorded in the
-[BtbN build notice](src-tauri/vendor/ffmpeg/README-BtbN-build.txt).
+The selected Windows runtime is downloaded directly from GyanD/codexffmpeg
+release [`9.0.2`](https://github.com/GyanD/codexffmpeg/releases/tag/9.0.2),
+asset [`ffmpeg-9.0.2-full_build.zip`](https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build.zip).
+It is a Windows x86_64, GPLv3 static build. The archive SHA-256 is
+`759d0a9831c436a0eb331ad36f236c06cb04aaa0005da46571f0e9d3d9206f6b`; both
+`ffmpeg.exe` and `ffprobe.exe` come from that archive. Their hashes and the
+FFmpeg source commit are recorded in the
+[Gyan build notice](src-tauri/vendor/ffmpeg/README-Gyan-build.txt).
 
-The FFmpeg version string is `n9.0.2-3-ga5923073bf-20260923`. Its source is
-[FFmpeg commit `a5923073bfd8f25b7300d93af3f8e690174ebd30`](https://github.com/FFmpeg/FFmpeg/commit/a5923073bfd8f25b7300d93af3f8e690174ebd30).
-The build identifies GPL version 3 (`--enable-gpl --enable-version3`) and
-enables `libsrt`. The archive's `LICENSE.txt` is GPLv3; the tracked
-`src-tauri/vendor/ffmpeg/LICENSE` has the same SHA-256 and contents. Qlisa
-invokes FFmpeg for SRT; Qlisa does not link SRT directly.
+The binaries report version `9.0.2-full_build-www.gyan.dev` and FFmpeg source
+commit [`946fcce07b6dcd0331c8cc609192aeff5e1924f8`](https://github.com/FFmpeg/FFmpeg/commit/946fcce07b6dcd0331c8cc609192aeff5e1924f8).
+The archive README identifies GPL v3; the build reports
+`--enable-gpl --enable-version3` and static linking. Its `LICENSE` matches the
+tracked `src-tauri/vendor/ffmpeg/LICENSE`. Verified features include SRT,
+x264, x265, AAC, and Qlisa's required filters. Qlisa invokes FFmpeg for SRT;
+Qlisa does not link SRT directly.
 
-The BtbN build scripts and FFmpeg source are public, but the exact corresponding
-source set for all statically linked components, patches, and applicable
-third-party notices has not yet been assembled and reviewed. This is the
-remaining FFmpeg source-compliance blocker. Do not describe binary
-redistribution as ready until that review is complete. See the
-[source-offer status](docs/THIRD_PARTY_SOURCE_OFFER.md).
-
-Gyan FFmpeg 9.0.1 is superseded. Its prior provenance and unresolved source
-offer remain in Git history; they do not describe the selected runtime.
+The exact source revisions and patches for every statically linked component
+have not been independently verified. Qlisa downloads the archive directly
+from upstream and does not redistribute the binaries in its installer or
+updater. See the [source-offer status](docs/THIRD_PARTY_SOURCE_OFFER.md).
 
 ## mpv / libmpv
 
