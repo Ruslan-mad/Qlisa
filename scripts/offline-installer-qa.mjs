@@ -146,19 +146,27 @@ async function discoverTarget(port, timeoutMs) {
   if (!response.ok) throw new Error(`CDP target list returned HTTP ${response.status}`);
   const targets = await response.json();
   const pages = targets.filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
-  const mainPages = pages.filter((page) => {
+  let target;
+  for (const page of pages) {
+    let client;
     try {
-      const url = new URL(page.url);
-      return !/preferences|browser[-_/ ]?surface/i.test(`${url.pathname} ${url.search} ${page.title}`);
+      client = await cdpClient(page.webSocketDebuggerUrl, Math.min(timeoutMs, 2_000));
+      await client.send("Runtime.enable");
+      const response = await client.send("Runtime.evaluate", {
+        expression: "window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label ?? null",
+        returnByValue: true,
+      });
+      if (response.result?.value === "main") {
+        target = page;
+        break;
+      }
     } catch {
-      return false;
+      // Hidden browser targets may not expose Tauri metadata.
+    } finally {
+      client?.close();
     }
-  });
-  const target = mainPages.find((page) => {
-    const url = new URL(page.url);
-    return /tauri\.localhost|127\.0\.0\.1|localhost/i.test(url.hostname) && url.pathname === "/" && /qlisa/i.test(page.title);
-  }) ?? mainPages.find((page) => /tauri\.localhost|qlisa/i.test(`${page.url} ${page.title}`));
-  if (!target) throw new Error("No Qlisa WebView2 page target is available");
+  }
+  if (!target) throw new Error("No WebView2 page target reports Tauri window label 'main'");
   return target;
 }
 
