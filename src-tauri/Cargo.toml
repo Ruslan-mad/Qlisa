@@ -1,6 +1,6 @@
 [package]
 name = "qlisa"
-version = "1.5.19"
+version = "1.5.20"
 edition = "2021"
 description = "Qlisa — Windows cue-based stage playback application"
 authors = ["Qlisa contributors; derived from Inkue"]
