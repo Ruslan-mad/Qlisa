@@ -98,6 +98,10 @@ $script:report = [ordered]@{
 }
 $script:transcriptStarted = $false
 $script:exitCode = 0
+$script:webViewPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments'
+$script:webViewPolicyNames = @('qlisa.exe', 'com.qlisa.app')
+$script:webViewPolicyBackup = $null
+$script:webViewPolicyChanged = $false
 
 function Add-Phase([string]$Name, [string]$Result, [double]$Seconds, [string]$Details = '') {
     [void]($script:report.phases += [ordered]@{
@@ -349,6 +353,60 @@ function Stop-TestApp([string]$Executable) {
     if (@(Get-AppProcess $Executable).Count -gt 0) { throw 'Could not stop the isolated Qlisa process.' }
 }
 
+function Set-WebView2DebugPolicy {
+    if ($null -eq $script:webViewPolicyBackup) {
+        $keyExisted = Test-Path -LiteralPath $script:webViewPolicyPath -PathType Container
+        $originalValues = @()
+        if ($keyExisted) {
+            $key = Get-Item -LiteralPath $script:webViewPolicyPath
+            $existingNames = @($key.GetValueNames())
+            foreach ($name in $script:webViewPolicyNames) {
+                if ($name -in $existingNames) {
+                    $originalValues += [ordered]@{
+                        name = $name
+                        existed = $true
+                        value = $key.GetValue($name)
+                        kind = $key.GetValueKind($name).ToString()
+                    }
+                } else {
+                    $originalValues += [ordered]@{ name = $name; existed = $false; value = $null; kind = $null }
+                }
+            }
+        } else {
+            foreach ($name in $script:webViewPolicyNames) {
+                $originalValues += [ordered]@{ name = $name; existed = $false; value = $null; kind = $null }
+            }
+        }
+        $script:webViewPolicyBackup = [ordered]@{ keyExisted = $keyExisted; values = $originalValues }
+    }
+    $script:webViewPolicyChanged = $true
+    New-Item -Path $script:webViewPolicyPath -Force -ErrorAction Stop | Out-Null
+    $arguments = '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222'
+    foreach ($name in $script:webViewPolicyNames) {
+        New-ItemProperty -LiteralPath $script:webViewPolicyPath -Name $name -Value $arguments -PropertyType String -Force -ErrorAction Stop | Out-Null
+    }
+    $script:report.runtime.remoteDebuggingPolicyApplied = $true
+}
+
+function Restore-WebView2DebugPolicy {
+    if (-not $script:webViewPolicyChanged -or $null -eq $script:webViewPolicyBackup) { return }
+    foreach ($value in $script:webViewPolicyBackup.values) {
+        if ($value.existed) {
+            New-ItemProperty -LiteralPath $script:webViewPolicyPath -Name $value.name -Value $value.value -PropertyType $value.kind -Force -ErrorAction Stop | Out-Null
+        } else {
+            Remove-ItemProperty -LiteralPath $script:webViewPolicyPath -Name $value.name -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $script:webViewPolicyBackup.keyExisted -and (Test-Path -LiteralPath $script:webViewPolicyPath -PathType Container)) {
+        $key = Get-Item -LiteralPath $script:webViewPolicyPath
+        if (@($key.GetValueNames()).Count -eq 0 -and @($key.GetSubKeyNames()).Count -eq 0) {
+            Remove-Item -LiteralPath $script:webViewPolicyPath -Force -ErrorAction Stop
+        }
+    }
+    $script:webViewPolicyChanged = $false
+    $script:report.runtime.remoteDebuggingPolicyRestored = $true
+}
+
 function Start-AppAndProbe([string]$Executable, [string]$CheckName, [string]$ScreenshotPath) {
     Stop-TestApp $Executable
     $portDeadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -362,7 +420,8 @@ function Start-AppAndProbe([string]$Executable, [string]$CheckName, [string]$Scr
     $stderrPath = Join-Path $reportDir "$logStem.stderr.log"
     $oldArgs = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
     try {
-        $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222'
+        Set-WebView2DebugPolicy
+        Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
         $process = Start-Process -FilePath $Executable -PassThru -WorkingDirectory (Split-Path -Parent $Executable) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     } finally {
         $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $oldArgs
@@ -633,6 +692,7 @@ try {
     $networkRestored = $false
     try { Restore-NetworkFromState $statePath; $networkRestored = $true } catch { [void]($script:report.errors += $_.Exception.Message); $script:report.status = 'failed' }
     if ($networkRestored) { Remove-RestoreWatchdog }
+    try { Restore-WebView2DebugPolicy } catch { [void]($script:report.errors += ('WebView2 debug policy restoration failed: ' + $_.Exception.Message)); $script:report.status = 'failed' }
     if ($script:transcriptStarted) { Stop-Transcript | Out-Null }
     if (Test-Path -LiteralPath $reportDir -PathType Container) {
         try { Write-FinalReport } catch { Write-Error "Could not write final QA report: $($_.Exception.Message)" }
