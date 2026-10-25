@@ -357,18 +357,38 @@ function Start-AppAndProbe([string]$Executable, [string]$CheckName, [string]$Scr
         if ($portUse) { Start-Sleep -Milliseconds 250 }
     } while ($portUse -and [DateTime]::UtcNow -lt $portDeadline)
     if ($portUse) { throw 'CDP port 9222 is already in use on the ephemeral runner.' }
+    $logStem = [regex]::Replace($CheckName, '[^A-Za-z0-9_-]', '-')
+    $stdoutPath = Join-Path $reportDir "$logStem.stdout.log"
+    $stderrPath = Join-Path $reportDir "$logStem.stderr.log"
     $oldArgs = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
     try {
         $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222'
-        $process = Start-Process -FilePath $Executable -PassThru -WorkingDirectory (Split-Path -Parent $Executable)
+        $process = Start-Process -FilePath $Executable -PassThru -WorkingDirectory (Split-Path -Parent $Executable) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
     } finally {
         $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $oldArgs
     }
     $out = & node $helperPath probe --port 9222 --timeout-ms 90000 --screenshot $ScreenshotPath 2>&1
     $code = $LASTEXITCODE
     if ($code -ne 0) {
+        $appProcesses = @(Get-AppProcess $Executable | Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine)
+        $appProcessIds = @($appProcesses | ForEach-Object { [uint32]$_.ProcessId })
+        $webViewProcesses = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ParentProcessId -in $appProcessIds } |
+            Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine)
+        $listeners = @(Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue |
+            Select-Object LocalAddress, LocalPort, OwningProcess)
+        $script:report.runtime['appProbeDiagnostics'] = [ordered]@{
+            check = $CheckName
+            appProcesses = $appProcesses
+            childWebViewProcesses = $webViewProcesses
+            cdpListeners = $listeners
+            stdoutLog = (Split-Path -Leaf $stdoutPath)
+            stderrLog = (Split-Path -Leaf $stderrPath)
+        }
+        $diagnosticOutput = (($out | ForEach-Object { [string]$_ }) -join "`n")
+        if ($diagnosticOutput.Length -gt 2000) { $diagnosticOutput = $diagnosticOutput.Substring(0, 2000) + '…' }
         Stop-TestApp $Executable
-        throw "$CheckName failed: $($out -join ' ')"
+        throw "$CheckName failed: $diagnosticOutput"
     }
     $probeResult = ($out -join "`n") | ConvertFrom-Json
     if (-not $probeResult.ok -or -not $probeResult.backendReady -or -not $probeResult.media.ready -or $probeResult.network.ndi.availability -ne 'ready') {

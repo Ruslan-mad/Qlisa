@@ -208,7 +208,14 @@ async function probe(options) {
       }
       lastError = JSON.stringify(result);
     } catch (error) {
-      lastError = error.message;
+      const causes = [];
+      let cause = error;
+      while (cause && causes.length < 4) {
+        const details = [cause.code, cause.message].filter(Boolean).join(" ");
+        if (details) causes.push(details);
+        cause = cause.cause;
+      }
+      lastError = causes.join(" <- ") || String(error);
     } finally {
       client?.close();
     }
