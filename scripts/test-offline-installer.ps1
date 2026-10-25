@@ -370,18 +370,54 @@ function Start-AppAndProbe([string]$Executable, [string]$CheckName, [string]$Scr
     $out = & node $helperPath probe --port 9222 --timeout-ms 90000 --screenshot $ScreenshotPath 2>&1
     $code = $LASTEXITCODE
     if ($code -ne 0) {
-        $appProcesses = @(Get-AppProcess $Executable | Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine)
+        $process.Refresh()
+        $startedProcessHasExited = $process.HasExited
+        $startedProcessExitCode = if ($startedProcessHasExited) { $process.ExitCode } else { $null }
+        $startedProcessSessionId = try { $process.SessionId } catch { $null }
+        $appProcesses = @(Get-AppProcess $Executable | Select-Object ProcessId, ParentProcessId, SessionId, ExecutablePath, CommandLine)
         $appProcessIds = @($appProcesses | ForEach-Object { [uint32]$_.ProcessId })
         $webViewProcesses = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.ParentProcessId -in $appProcessIds } |
-            Select-Object ProcessId, ParentProcessId, ExecutablePath, CommandLine)
+            Select-Object ProcessId, ParentProcessId, SessionId, ExecutablePath, CommandLine)
+        $loadedModules = @()
+        foreach ($appProcessId in $appProcessIds) {
+            try {
+                $loadedModules += @(Get-Process -Id $appProcessId -Module -ErrorAction Stop |
+                    Where-Object { $_.ModuleName -match '^(?i:libmpv|vulkan-1)\.dll$' } |
+                    Select-Object @{ Name = 'ProcessId'; Expression = { $appProcessId } }, ModuleName, FileName)
+            } catch { }
+        }
         $listeners = @(Get-NetTCPConnection -LocalPort 9222 -State Listen -ErrorAction SilentlyContinue |
             Select-Object LocalAddress, LocalPort, OwningProcess)
+        $applicationErrors = @()
+        try {
+            $eventStart = ([DateTime]::Parse($script:report.startedAtUtc)).ToLocalTime()
+            $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error'; StartTime = $eventStart } -MaxEvents 50 -ErrorAction SilentlyContinue |
+                Where-Object { $_.Message -match '(?i)(qlisa\.exe|msedgewebview2\.exe)' } | Select-Object -First 10)
+            foreach ($event in $events) {
+                $message = [string]$event.Message
+                if ($message.Length -gt 2000) { $message = $message.Substring(0, 2000) + '…' }
+                $applicationErrors += [ordered]@{ timeCreated = $event.TimeCreated.ToString('o'); eventId = $event.Id; provider = $event.ProviderName; message = $message }
+            }
+        } catch { }
+        $appLogSource = Join-Path $env:APPDATA 'Inkue\logs\inkue.log'
+        $appLogName = 'inkue-application.log'
+        $appLogCopied = $false
+        if (Test-Path -LiteralPath $appLogSource -PathType Leaf) {
+            try { Copy-Item -LiteralPath $appLogSource -Destination (Join-Path $reportDir $appLogName) -Force; $appLogCopied = $true } catch { }
+        }
         $script:report.runtime['appProbeDiagnostics'] = [ordered]@{
             check = $CheckName
+            startedProcessHasExited = $startedProcessHasExited
+            startedProcessExitCode = $startedProcessExitCode
+            startedProcessSessionId = $startedProcessSessionId
             appProcesses = $appProcesses
             childWebViewProcesses = $webViewProcesses
+            loadedMediaModules = $loadedModules
             cdpListeners = $listeners
+            applicationErrorEvents = $applicationErrors
+            appLogCopied = $appLogCopied
+            appLog = if ($appLogCopied) { $appLogName } else { $null }
             stdoutLog = (Split-Path -Leaf $stdoutPath)
             stderrLog = (Split-Path -Leaf $stderrPath)
         }
