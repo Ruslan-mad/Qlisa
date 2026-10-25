@@ -26,23 +26,26 @@ function Restore-NetworkFromState([string]$Path) {
     $mustBeUp = [System.Collections.Generic.List[string]]::new()
     foreach ($adapter in @($state.adapters)) {
         try {
-            $current = Get-NetAdapter -Name ([string]$adapter.name) -IncludeHidden -ErrorAction SilentlyContinue
-            if ($null -eq $current) { $errors.Add("$($adapter.name): adapter is missing"); continue }
+            $current = Get-NetAdapter -InterfaceIndex ([int]$adapter.interfaceIndex) -IncludeHidden -ErrorAction SilentlyContinue
+            if ($null -eq $current) { continue }
             if ($current.Status -eq 'Disabled') {
-                Enable-NetAdapter -Name ([string]$adapter.name) -Confirm:$false -ErrorAction Stop | Out-Null
+                Enable-NetAdapter -InputObject $current -Confirm:$false -ErrorAction Stop | Out-Null
             }
-            if ($adapter.wasUp) { $mustBeUp.Add([string]$adapter.name) }
+            if ($adapter.wasUp) { $mustBeUp.Add([string]$adapter.interfaceIndex) }
         } catch { $errors.Add("$($adapter.name): $($_.Exception.Message)") }
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while ($mustBeUp.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) {
-        $pending = @($mustBeUp | Where-Object { (Get-NetAdapter -Name $_ -IncludeHidden -ErrorAction SilentlyContinue).Status -ne 'Up' })
+        $pending = @($mustBeUp | Where-Object {
+            $current = Get-NetAdapter -InterfaceIndex ([int]$_) -IncludeHidden -ErrorAction SilentlyContinue
+            $null -ne $current -and $current.Status -ne 'Up'
+        })
         if ($pending.Count -eq 0) { break }
         Start-Sleep -Milliseconds 500
     }
-    foreach ($name in $mustBeUp) {
-        $current = Get-NetAdapter -Name $name -IncludeHidden -ErrorAction SilentlyContinue
-        if ($null -eq $current -or $current.Status -ne 'Up') { $errors.Add("${name}: network adapter did not return to Up state") }
+    foreach ($interfaceIndex in $mustBeUp) {
+        $current = Get-NetAdapter -InterfaceIndex ([int]$interfaceIndex) -IncludeHidden -ErrorAction SilentlyContinue
+        if ($null -ne $current -and $current.Status -ne 'Up') { $errors.Add("Interface ${interfaceIndex}: network adapter did not return to Up state") }
     }
     if ($errors.Count -gt 0) { throw ('Network restoration failed: ' + ($errors -join '; ')) }
     Set-Content -LiteralPath ($Path + '.restored') -Value ([DateTime]::UtcNow.ToString('o')) -Encoding ascii
@@ -260,21 +263,29 @@ $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
 $errors = @()
 foreach ($adapter in @($state.adapters)) {
     try {
-        $current = Get-NetAdapter -Name ([string]$adapter.name) -IncludeHidden -ErrorAction SilentlyContinue
-        if ($null -eq $current) { $errors += "$($adapter.name): adapter is missing"; continue }
+        $current = Get-NetAdapter -InterfaceIndex ([int]$adapter.interfaceIndex) -IncludeHidden -ErrorAction SilentlyContinue
+        if ($null -eq $current) { continue }
         if ($current.Status -eq 'Disabled') {
-            Enable-NetAdapter -Name ([string]$adapter.name) -Confirm:$false -ErrorAction Stop | Out-Null
+            Enable-NetAdapter -InputObject $current -Confirm:$false -ErrorAction Stop | Out-Null
         }
     } catch { $errors += "$($adapter.name): $($_.Exception.Message)" }
 }
 if ($errors.Count -gt 0) { Set-Content -LiteralPath ($StatePath + '.restore-error') -Value ($errors -join '; ') -Encoding ascii; exit 1 }
 $deadline = [DateTime]::UtcNow.AddSeconds(30)
 while ([DateTime]::UtcNow -lt $deadline) {
-    $pending = @($state.adapters | Where-Object { $_.wasUp -and (Get-NetAdapter -Name ([string]$_.name) -IncludeHidden -ErrorAction SilentlyContinue).Status -ne 'Up' })
+    $pending = @($state.adapters | Where-Object {
+        if (-not $_.wasUp) { return $false }
+        $current = Get-NetAdapter -InterfaceIndex ([int]$_.interfaceIndex) -IncludeHidden -ErrorAction SilentlyContinue
+        $null -ne $current -and $current.Status -ne 'Up'
+    })
     if ($pending.Count -eq 0) { break }
     Start-Sleep -Milliseconds 500
 }
-$notUp = @($state.adapters | Where-Object { $_.wasUp -and (Get-NetAdapter -Name ([string]$_.name) -IncludeHidden -ErrorAction SilentlyContinue).Status -ne 'Up' })
+$notUp = @($state.adapters | Where-Object {
+    if (-not $_.wasUp) { return $false }
+    $current = Get-NetAdapter -InterfaceIndex ([int]$_.interfaceIndex) -IncludeHidden -ErrorAction SilentlyContinue
+    $null -ne $current -and $current.Status -ne 'Up'
+})
 if ($notUp.Count -gt 0) { Set-Content -LiteralPath ($StatePath + '.restore-error') -Value 'One or more network adapters did not return to Up state.' -Encoding ascii; exit 1 }
 Set-Content -LiteralPath ($StatePath + '.restored') -Value ([DateTime]::UtcNow.ToString('o')) -Encoding ascii
 '@
@@ -285,7 +296,7 @@ function Invoke-OfflineStage {
     param([string]$Name, [scriptblock]$Action, [int]$MaxSeconds = 210)
     $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Status -eq 'Up' -and $_.Name -notmatch '(?i)loopback' })
     if ($adapters.Count -eq 0) { throw 'No active non-loopback network adapter was found; cannot prove the offline stage.' }
-    $state = [ordered]@{ adapters = @($adapters | ForEach-Object { [ordered]@{ name = $_.Name; wasEnabled = $true; wasUp = $true } }); createdAtUtc = [DateTime]::UtcNow.ToString('o') }
+    $state = [ordered]@{ adapters = @($adapters | ForEach-Object { [ordered]@{ name = $_.Name; interfaceIndex = [int]$_.ifIndex; wasEnabled = $true; wasUp = $true } }); createdAtUtc = [DateTime]::UtcNow.ToString('o') }
     Remove-Item -LiteralPath ($statePath + '.restored') -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath ($statePath + '.restore-error') -Force -ErrorAction SilentlyContinue
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
@@ -297,7 +308,10 @@ function Invoke-OfflineStage {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     try {
         foreach ($adapter in $adapters) {
-            Disable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction Stop | Out-Null
+            $current = Get-NetAdapter -InterfaceIndex ([int]$adapter.ifIndex) -IncludeHidden -ErrorAction SilentlyContinue
+            if ($null -ne $current -and $current.Status -eq 'Up') {
+                Disable-NetAdapter -InputObject $current -Confirm:$false -ErrorAction Stop | Out-Null
+            }
         }
         $activeAdapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Status -eq 'Up' -and $_.Name -notmatch '(?i)loopback' })
         if ($activeAdapters.Count -gt 0) { throw 'One or more non-loopback network adapters remain active.' }
