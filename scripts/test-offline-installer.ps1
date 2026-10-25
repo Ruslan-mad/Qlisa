@@ -278,9 +278,9 @@ Set-Content -LiteralPath ($StatePath + '.restored') -Value ([DateTime]::UtcNow.T
 
 function Invoke-OfflineStage {
     param([string]$Name, [scriptblock]$Action, [int]$MaxSeconds = 210)
-    $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Status -ne 'Disabled' -and $_.Name -notmatch '(?i)loopback' })
-    if ($adapters.Count -eq 0) { throw 'No enabled network adapter was found; cannot prove the offline stage.' }
-    $state = [ordered]@{ adapters = @($adapters | ForEach-Object { [ordered]@{ name = $_.Name; wasEnabled = $true; wasUp = ($_.Status -eq 'Up') } }); createdAtUtc = [DateTime]::UtcNow.ToString('o') }
+    $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Status -eq 'Up' -and $_.Name -notmatch '(?i)loopback' })
+    if ($adapters.Count -eq 0) { throw 'No active non-loopback network adapter was found; cannot prove the offline stage.' }
+    $state = [ordered]@{ adapters = @($adapters | ForEach-Object { [ordered]@{ name = $_.Name; wasEnabled = $true; wasUp = $true } }); createdAtUtc = [DateTime]::UtcNow.ToString('o') }
     Remove-Item -LiteralPath ($statePath + '.restored') -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath ($statePath + '.restore-error') -Force -ErrorAction SilentlyContinue
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
@@ -294,17 +294,17 @@ function Invoke-OfflineStage {
         foreach ($adapter in $adapters) {
             Disable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction Stop | Out-Null
         }
-        $stillEnabled = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Name -in @($adapters.Name) -and $_.Status -ne 'Disabled' })
-        if ($stillEnabled.Count -gt 0) { throw 'One or more network adapters remain enabled.' }
+        $activeAdapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Status -eq 'Up' -and $_.Name -notmatch '(?i)loopback' })
+        if ($activeAdapters.Count -gt 0) { throw 'One or more non-loopback network adapters remain active.' }
         $defaultRoutes = @(Get-NetRoute -ErrorAction SilentlyContinue | Where-Object {
-            ($_.DestinationPrefix -eq '0.0.0.0/0' -or $_.DestinationPrefix -eq '::/0') -and $_.InterfaceIndex -in @($adapters.InterfaceIndex)
+            $_.DestinationPrefix -eq '0.0.0.0/0' -or $_.DestinationPrefix -eq '::/0'
         })
-        if ($defaultRoutes.Count -gt 0) { throw 'A default route remains on a disabled adapter.' }
+        if ($defaultRoutes.Count -gt 0) { throw 'One or more default routes remain during the offline stage.' }
         $script:report.lastOfflineStage = $Name
         Write-Host "OFFLINE: $Name; disabled $($adapters.Count) network adapter(s)."
         & $Action
         if ($timer.Elapsed.TotalSeconds -ge $MaxSeconds) { throw "$Name exceeded its $MaxSeconds second offline window." }
-        Add-Phase $Name 'passed' $timer.Elapsed.TotalSeconds 'Network adapters disabled; no default route remained.'
+        Add-Phase $Name 'passed' $timer.Elapsed.TotalSeconds 'All active non-loopback adapters disabled; no default route remained.'
     } catch {
         Add-Phase $Name 'failed' $timer.Elapsed.TotalSeconds $_.Exception.Message
         throw
