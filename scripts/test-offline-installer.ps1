@@ -440,9 +440,11 @@ try {
     $tagVersion = $version
     $fullName = "Qlisa_${tagVersion}_x64-full-setup.exe"
     $compactName = "Qlisa_${tagVersion}_x64-update-setup.exe"
-    $releaseInfo = Invoke-Gh @('api', "repos/$env:GITHUB_REPOSITORY/releases/tags/$ReleaseTag") | ConvertFrom-Json
-    if ($releaseInfo.tag_name -ne $ReleaseTag -or -not $releaseInfo.draft) { throw 'The requested GitHub release must exist as a draft with the exact tag.' }
-    $script:report.releaseId = $releaseInfo.id
+    $releaseInfo = Invoke-Gh @('release', 'view', $ReleaseTag, '--repo', $env:GITHUB_REPOSITORY, '--json', 'tagName,isDraft,isPrerelease,url') | ConvertFrom-Json
+    if ($releaseInfo.tagName -ne $ReleaseTag -or -not $releaseInfo.isDraft -or $releaseInfo.isPrerelease) {
+        throw 'The requested GitHub release must exist as a non-prerelease draft with the exact tag.'
+    }
+    $script:report.releaseUrl = $releaseInfo.url
     Save-ReleaseSourceFile 'scripts/full-installer-manifest.json' $fullManifestPath
     Save-ReleaseSourceFile 'src-tauri/tauri.conf.json' $nodeConfigPath
     $downloadArgs = @('release', 'download', $ReleaseTag, '--repo', $env:GITHUB_REPOSITORY, '--dir', $downloadsDir)
