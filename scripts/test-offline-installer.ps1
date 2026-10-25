@@ -131,7 +131,12 @@ function Invoke-ProcessWithTimeout {
 function Invoke-Gh([string[]]$Arguments) {
     $output = & gh @Arguments 2>&1
     $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) { throw "GitHub CLI request failed (exit $exitCode)." }
+    if ($exitCode -ne 0) {
+        $diagnostic = ($output | ForEach-Object { [string]$_ }) -join "`n"
+        if (-not [string]::IsNullOrEmpty($env:GH_TOKEN)) { $diagnostic = $diagnostic.Replace($env:GH_TOKEN, '[redacted]') }
+        if ($diagnostic.Length -gt 1000) { $diagnostic = $diagnostic.Substring(0, 1000) + '…' }
+        throw "GitHub CLI request failed (exit $exitCode): $diagnostic"
+    }
     return ($output -join "`n")
 }
 
