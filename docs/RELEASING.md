@@ -1,12 +1,9 @@
 # Windows local build and release
 
-`scripts/publish.ps1` prepares a **local-only signed Windows build**. It does
-not create a tag, push, or publish a GitHub Release. Its installer, `.sig`, and
-`latest.json` are private local test artifacts. The installer and updater
-package contain Qlisa, not FFmpeg, ffprobe, or libmpv binaries. Qlisa downloads
-the pinned media archives directly from upstream when needed. This packaging
-choice does not determine or remove legal obligations for those upstream
-binaries.
+`scripts/publish.ps1` builds and signs the full and compact Windows NSIS
+installers and creates local `latest.json` metadata. It updates and commits
+the version files, but it does not tag, push, or publish a GitHub Release.
+Publication is a separate step after review.
 
 Automatic GitHub CI runs are disabled. Maintainers can start the available
 checks manually from GitHub Actions. A local release build and the GitHub

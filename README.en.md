@@ -71,7 +71,7 @@ Qlisa 1.5.13 added UUID-based commands between Cue Lists. Goto moves the target 
 
 Qlisa 1.5.14 added a configurable status bar and restoration of the main window's position, size, and maximized state. See the [1.5.14 release notes](docs/RELEASE_NOTES_1.5.14.md), [status bar guide](docs/status-bar.md), and [window state note](docs/window-state.md).
 
-Qlisa 1.5.19 is the current release. It fixes first-run Windows Media Runtime downloads by switching FFmpeg and ffprobe to a pinned Gyan release. [Download Qlisa 1.5.19](https://github.com/Ruslan-mad/Qlisa/releases/tag/v1.5.19); see the [1.5.19 release notes](docs/RELEASE_NOTES_1.5.19.md). The [1.5.18 release notes](docs/RELEASE_NOTES_1.5.18.md) describe the previous release.
+Qlisa 1.5.20 is the current release. For a new or offline installation, download the [full installer (390.7 MB)](https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.20/Qlisa_1.5.20_x64-full-setup.exe). To update an installed copy, use the [compact update package (9.62 MB)](https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.20/Qlisa_1.5.20_x64-update-setup.exe); the in-app updater uses this package. The full package includes verified media components, the offline WebView2 installer, and the official NDI Runtime installer. See the [1.5.20 release notes](docs/RELEASE_NOTES_1.5.20.md) and [offline installer QA results](docs/OFFLINE_INSTALLER_QA_1.5.20.md).
 
 Qlisa 1.5.12 also introduced the Stage theme for live operation, with a
 compact Cue List, independently collapsible panels, and large transport
@@ -91,7 +91,7 @@ Built-in tools convert audio, video, and images. FFmpeg and ffprobe handle media
 
 Qlisa is for **Windows 10 and Windows 11**. The installer installs the app for all users under `C:\Program Files\Qlisa` and may ask for administrator rights.
 
-1. For a new or offline install, download `Qlisa_*_full-setup.exe` from the [latest release page](https://github.com/Ruslan-mad/Qlisa/releases/latest). `Qlisa_*_update-setup.exe` is for updating an installed copy.
+1. For a new or offline install, use the full installer linked above. Use the compact update package for an installed copy.
 
 2. Run the installer and complete setup.
 
