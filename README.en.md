@@ -44,11 +44,32 @@ In the Cue List, **Up/Down** moves through visible rows and moves the Playhead; 
 
 ## Screenshots
 
-![Qlisa main window with its Cue List](docs/screenshots/main-window.png)
+### Main window
 
-| Active Cues | Cue Inspector |
-| --- | --- |
-| ![Active Cues panel](docs/screenshots/active-cues.png) | ![Cue settings in the Inspector](docs/screenshots/inspector.png) |
+[![Qlisa main window: Cue List with audio and waveform](docs/screenshots/main-window.png)](docs/screenshots/main-window.png)
+
+### Playback
+
+[![Qlisa during playback with active status indicators](docs/screenshots/playback.png)](docs/screenshots/playback.png)
+
+### Panels and controls
+
+<table>
+  <tr><th>Cue Inspector</th><th>Active Cues</th></tr>
+  <tr>
+    <td><a href="docs/screenshots/inspector.png"><img src="docs/screenshots/inspector.png" width="250" alt="Audio Cue settings in the Inspector"></a></td>
+    <td><a href="docs/screenshots/active-cues.png"><img src="docs/screenshots/active-cues.png" width="220" alt="Active Cues panel showing current cues"></a></td>
+  </tr>
+  <tr><th>Other Cue types</th><th>Audio settings</th></tr>
+  <tr>
+    <td><a href="docs/screenshots/cue-types.png"><img src="docs/screenshots/cue-types.png" width="360" alt="Other menu with available Cue types"></a></td>
+    <td><a href="docs/screenshots/audio-settings.png"><img src="docs/screenshots/audio-settings.png" width="360" alt="Audio device and routing settings"></a></td>
+  </tr>
+</table>
+
+**Transport controls**
+
+[![Qlisa transport controls strip](docs/screenshots/transport.png)](docs/screenshots/transport.png)
 
 ## Features
 

@@ -44,11 +44,32 @@
 
 ## Скриншоты
 
-![Главное окно Qlisa со списком Cue](docs/screenshots/main-window.png)
+### Главное окно
 
-| Активные Cue | Инспектор Cue |
-| --- | --- |
-| ![Панель Active Cues](docs/screenshots/active-cues.png) | ![Настройки Cue в Inspector](docs/screenshots/inspector.png) |
+[![Главное окно Qlisa: список Cue и аудиоволна](docs/screenshots/main-window.png)](docs/screenshots/main-window.png)
+
+### Воспроизведение
+
+[![Окно Qlisa во время воспроизведения с активной индикацией](docs/screenshots/playback.png)](docs/screenshots/playback.png)
+
+### Панели и управление
+
+<table>
+  <tr><th>Инспектор Cue</th><th>Активные Cue</th></tr>
+  <tr>
+    <td><a href="docs/screenshots/inspector.png"><img src="docs/screenshots/inspector.png" width="250" alt="Инспектор аудио Cue с его настройками"></a></td>
+    <td><a href="docs/screenshots/active-cues.png"><img src="docs/screenshots/active-cues.png" width="220" alt="Панель Active Cues с текущими Cue"></a></td>
+  </tr>
+  <tr><th>Другие типы Cue</th><th>Настройки звука</th></tr>
+  <tr>
+    <td><a href="docs/screenshots/cue-types.png"><img src="docs/screenshots/cue-types.png" width="360" alt="Меню «Другое» с доступными типами Cue"></a></td>
+    <td><a href="docs/screenshots/audio-settings.png"><img src="docs/screenshots/audio-settings.png" width="360" alt="Настройки аудиоустройства и маршрутизации"></a></td>
+  </tr>
+</table>
+
+**Транспорт**
+
+[![Полоса транспортного управления Qlisa](docs/screenshots/transport.png)](docs/screenshots/transport.png)
 
 ## Возможности
 
