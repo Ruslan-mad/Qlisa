@@ -1,0 +1,66 @@
+name: Windows offline installer QA
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Draft release tag, for example v1.5.20
+        required: true
+        type: string
+        default: v1.5.20
+      full_sha256:
+        description: Expected SHA-256 of the full installer
+        required: true
+        type: string
+      compact_sha256:
+        description: Expected SHA-256 of the compact update installer
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  offline-installer-qa:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    steps:
+      - name: Check out QA harness source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Run isolated offline install QA
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QA_RELEASE_TAG: ${{ inputs.release_tag }}
+          QA_FULL_SHA256: ${{ inputs.full_sha256 }}
+          QA_COMPACT_SHA256: ${{ inputs.compact_sha256 }}
+        run: |
+          & .\scripts\test-offline-installer.ps1 `
+            -ReleaseTag $env:QA_RELEASE_TAG `
+            -ExpectedFullSha256 $env:QA_FULL_SHA256 `
+            -ExpectedCompactSha256 $env:QA_COMPACT_SHA256
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Restore network if the QA step was interrupted
+        if: always()
+        shell: pwsh
+        run: |
+          & .\scripts\test-offline-installer.ps1 -RestoreNetworkOnly
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload offline QA report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qlisa-offline-qa-${{ inputs.release_tag }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/qlisa-offline-qa-${{ github.run_id }}-${{ github.run_attempt }}/report/
+          if-no-files-found: warn
+          retention-days: 14
