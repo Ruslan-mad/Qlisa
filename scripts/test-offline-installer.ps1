@@ -199,7 +199,7 @@ function Remove-WebView2FromRunner {
         throw 'WebView2 is present but has no removable runtime installer. Cold offline QA cannot proceed.'
     }
     $scope = if ($installer.runtime.StartsWith($env:LOCALAPPDATA, [StringComparison]::OrdinalIgnoreCase)) { '--user-level' } else { '--system-level' }
-    Invoke-ProcessWithTimeout -FilePath $installer.installer -ArgumentString "--uninstall --msedgewebview $scope --force-uninstall" -TimeoutSeconds 90 -Label 'WebView2 removal' | Out-Null
+    Invoke-ProcessWithTimeout -FilePath $installer.installer -ArgumentString "--uninstall --msedgewebview $scope --force-uninstall" -TimeoutSeconds 90 -Label 'WebView2 removal' -SuccessExitCodes @(0, 19, 3010) | Out-Null
     $after = Get-WebView2Evidence
     if ($after.paths.Count -gt 0 -or $after.entries.Count -gt 0) {
         throw 'WebView2 remains installed after removal. Cold offline QA cannot proceed.'
