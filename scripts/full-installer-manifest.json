@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "runtimeFiles": [
+    {
+      "fileName": "ffmpeg.exe",
+      "sha256": "589e50b766d251afdf181dd664d40bd94407e200b019989fd7468c7d118a28d0"
+    },
+    {
+      "fileName": "ffprobe.exe",
+      "sha256": "02264dfa4f56baaa31e443ece8aa16d397f6b008200e7fd184d22b9009e75fd3"
+    },
+    {
+      "fileName": "libmpv-2.dll",
+      "sha256": "751131f81b5ce485d046ff08d1a44a93c5455be5135d53c0ab19c56780925ff0"
+    },
+    {
+      "fileName": "vulkan-1.dll",
+      "sha256": "e933f507df7162eb64de289c5c5ce4ecb48584e5c2b507eea4750b1c870ae6bd",
+      "version": "1.4.321.0",
+      "source": "Windows Vulkan Runtime loader from System32 on the pinned release builder"
+    }
+  ],
+  "ndiRuntime": {
+    "fileName": "NDI-6-Runtime.exe",
+    "version": "6.3.2.0",
+    "url": "https://downloads.ndi.tv/SDK/NDI_SDK/NDI%206%20Runtime.exe",
+    "discoveryUrl": "https://ndi.link/NDIRedistV6",
+    "sha256": "7ee73eedb56402bca5100868353dbab4e944b6c37d2d9881580698a3b61346cd",
+    "signer": "Vizrt AG"
+  },
+  "webview2OfflineInstaller": {
+    "url": "https://go.microsoft.com/fwlink/p/?LinkId=2124701",
+    "sha256": "9b0142e22e8daa92855d746ae4d1e9eeef561ccaf67d1dd452165c4af3df3191",
+    "signer": "Microsoft Corporation"
+  }
+}

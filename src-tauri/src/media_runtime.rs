@@ -7,9 +7,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const MANIFEST: &str = include_str!("../../scripts/runtime-manifest.json");
+const FULL_INSTALLER_MANIFEST: &str = include_str!("../../scripts/full-installer-manifest.json");
 const PENDING: &str = ".reinstall-pending";
 static PREPARE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -68,6 +69,15 @@ pub fn reinstall_pending() -> bool {
     pending_path().exists()
 }
 fn expected_hash(id: &str, file: &str) -> Result<String, String> {
+    if id == "vulkan-loader" {
+        return serde_json::from_str::<serde_json::Value>(FULL_INSTALLER_MANIFEST)
+            .map_err(|e| format!("Invalid full-installer manifest: {e}"))?["runtimeFiles"]
+            .as_array()
+            .and_then(|a| a.iter().find(|x| x["fileName"] == file))
+            .and_then(|x| x["sha256"].as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("Full-installer manifest has no hash for {file}"));
+    }
     let c = component(id)?;
     if id == "libmpv" {
         return c["sha256"]
@@ -143,6 +153,36 @@ pub fn status() -> MediaRuntimeStatus {
         version,
     }
     }
+}
+fn full_package_ready(media_ready: bool, full_payload_present: bool, cached_loader_verified: bool) -> bool {
+    media_ready && (!full_payload_present || cached_loader_verified)
+}
+
+fn ensure_seeded_runtime_ready(seeded_full: bool, runtime_ready: bool) -> Result<(), &'static str> {
+    if seeded_full && !runtime_ready {
+        return Err("Full-installer runtime seed did not produce a ready runtime");
+    }
+    Ok(())
+}
+pub fn status_for_app(app: &AppHandle) -> MediaRuntimeStatus {
+    let mut current = status();
+    #[cfg(windows)]
+    {
+        let full_payload_present = match full_resource_root(app) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(error) => {
+                log::error!("Could not validate full-installer payload marker: {error}");
+                current.ready = false;
+                return current;
+            }
+        };
+        let cached_loader_verified = verified_file(&runtime_dir().join("vulkan-1.dll"), "vulkan-loader", "vulkan-1.dll");
+        current.ready = full_package_ready(current.ffmpeg && current.ffprobe && current.libmpv, full_payload_present, cached_loader_verified);
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+    current
 }
 fn progress(app: &AppHandle, phase: &str, percent: Option<u8>, message: &str) {
     let _ = app.emit(
@@ -259,6 +299,82 @@ fn verify_hash(path: &Path, wanted: &str, what: &str) -> Result<(), String> {
     }
     Ok(())
 }
+fn replace_file(staged: &Path, destination: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let from: Vec<u16> = staged.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+                from.as_ptr(),
+                to.as_ptr(),
+                windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                    | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok == 0 {
+            return Err(format!("Could not install {}: {}", destination.display(), std::io::Error::last_os_error()));
+        }
+    }
+    #[cfg(not(windows))]
+    fs::rename(staged, destination)
+        .map_err(|e| format!("Could not install {}: {e}", destination.display()))?;
+    Ok(())
+}
+fn seed_file(source: &Path, destination: &Path, expected: &str, label: &str) -> Result<bool, String> {
+    // The full package is a release input. Validate it even when a user's
+    // existing cache is valid, so a missing or damaged installer payload is
+    // never hidden by that cache or by the network downloader.
+    verify_hash(source, expected, &format!("bundled {label}"))?;
+    if hash_file(destination)
+        .ok()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+    {
+        return Ok(false);
+    }
+    let staged = destination.with_extension(format!("{}.seed", destination.extension().and_then(|e| e.to_str()).unwrap_or("tmp")));
+    let result = (|| {
+        fs::copy(source, &staged).map_err(|e| format!("Could not stage bundled {label}: {e}"))?;
+        verify_hash(&staged, expected, &format!("staged {label}"))?;
+        replace_file(&staged, destination)
+    })();
+    if staged.exists() { fs::remove_file(&staged).ok(); }
+    result?;
+    Ok(true)
+}
+fn full_resource_root(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    let root = app.path().resource_dir().map_err(|e| format!("Could not resolve application resources: {e}"))?;
+    let payload = root.join("full-runtime");
+    let marker = payload.join("full-package.json");
+    if !marker.exists() {
+        return Ok(None);
+    }
+    let bundled = fs::read_to_string(&marker).map_err(|e| format!("Could not read full-installer marker: {e}"))?;
+    let expected: serde_json::Value = serde_json::from_str(FULL_INSTALLER_MANIFEST)
+        .map_err(|e| format!("Invalid embedded full-installer manifest: {e}"))?;
+    let actual: serde_json::Value = serde_json::from_str(&bundled)
+        .map_err(|e| format!("Invalid bundled full-installer marker: {e}"))?;
+    if actual != expected {
+        return Err("Bundled full-installer manifest does not match this application build".into());
+    }
+    Ok(Some(payload))
+}
+fn seed_full_runtime(app: &AppHandle, base: &Path) -> Result<bool, String> {
+    let Some(payload) = full_resource_root(app)? else { return Ok(false); };
+    let full: serde_json::Value = serde_json::from_str(FULL_INSTALLER_MANIFEST)
+        .map_err(|e| format!("Invalid embedded full-installer manifest: {e}"))?;
+    for record in full["runtimeFiles"].as_array().ok_or("Full-installer manifest has no runtimeFiles")? {
+        let name = record["fileName"].as_str().ok_or("Full-installer manifest has an unnamed runtime file")?;
+        if name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            return Err("Unsafe path in full-installer manifest".into());
+        }
+        let hash = record["sha256"].as_str().ok_or_else(|| format!("Full-installer manifest has no hash for {name}"))?;
+        seed_file(&payload.join(name), &base.join(name), hash, name)?;
+    }
+    fs::remove_file(pending_path()).ok();
+    Ok(true)
+}
 fn files_to_replace(valid: [bool; 3], force: bool, reinstall_pending: bool) -> [bool; 3] {
     let replace_all = force || reinstall_pending;
     valid.map(|is_valid| replace_all || !is_valid)
@@ -267,8 +383,12 @@ fn prepare_sync(app: &AppHandle, force: bool) -> Result<MediaRuntimeStatus, Stri
     let _guard = PREPARE_LOCK
         .lock()
         .map_err(|_| "Runtime preparation lock is poisoned".to_string())?;
+    let base = runtime_dir();
+    fs::create_dir_all(&base).map_err(|e| format!("Не удалось создать {}: {e}", base.display()))?;
+    let seeded_full = seed_full_runtime(app, &base)?;
     let current = status();
-    if current.ready && !force {
+    ensure_seeded_runtime_ready(seeded_full, current.ready).map_err(str::to_string)?;
+    if current.ready && (!force || seeded_full) {
         return Ok(current);
     }
     // A valid DLL may already be loaded by OutputEngine during normal startup.
@@ -280,8 +400,6 @@ fn prepare_sync(app: &AppHandle, force: bool) -> Result<MediaRuntimeStatus, Stri
     );
     let ff = component("ffmpeg-gyan-full-9.0.2")?;
     let mpv = component("libmpv")?;
-    let base = runtime_dir();
-    fs::create_dir_all(&base).map_err(|e| format!("Не удалось создать {}: {e}", base.display()))?;
     let work = std::env::temp_dir().join(format!("qlisa-media-runtime-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let result = (|| {
@@ -385,8 +503,8 @@ pub fn schedule_reinstall() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn get_media_runtime_status() -> MediaRuntimeStatus {
-    status()
+pub fn get_media_runtime_status(app: AppHandle) -> MediaRuntimeStatus {
+    status_for_app(&app)
 }
 #[tauri::command]
 pub async fn prepare_media_runtime(
@@ -410,6 +528,7 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("https://"));
+        assert_eq!(expected_hash("vulkan-loader", "vulkan-1.dll").unwrap(), "e933f507df7162eb64de289c5c5ce4ecb48584e5c2b507eea4750b1c870ae6bd");
     }
     #[test]
     fn archive_members_reject_path_traversal() {
@@ -443,5 +562,39 @@ mod tests {
     fn status_requires_all_three_valid_files() {
         let s = status();
         assert_eq!(s.ready, s.ffmpeg && s.ffprobe && s.libmpv);
+    }
+    #[test]
+    fn full_payload_requires_cached_vulkan_loader_before_frontend_ready() {
+        assert!(!full_package_ready(true, true, false));
+        assert!(full_package_ready(true, true, true));
+        assert!(full_package_ready(true, false, false));
+        assert!(!full_package_ready(false, false, false));
+    }
+    #[test]
+    fn invalid_full_seed_fails_instead_of_falling_back_to_download() {
+        assert!(ensure_seeded_runtime_ready(true, false).is_err());
+        assert!(ensure_seeded_runtime_ready(true, true).is_ok());
+        assert!(ensure_seeded_runtime_ready(false, false).is_ok());
+    }
+    #[test]
+    fn seed_file_verifies_before_skip_and_preserves_destination_on_bad_input() {
+        use sha2::{Digest, Sha256};
+        let root = std::env::temp_dir().join(format!("qlisa-seed-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.bin");
+        let destination = root.join("runtime.bin");
+        let pinned = b"pinned payload";
+        let wrong = b"wrong payload";
+        let hash = format!("{:x}", Sha256::digest(pinned));
+        fs::write(&source, pinned).unwrap();
+        fs::write(&destination, b"old payload").unwrap();
+        assert!(seed_file(&source, &destination, &hash, "test payload").unwrap());
+        assert_eq!(fs::read(&destination).unwrap(), pinned);
+        assert!(!seed_file(&source, &destination, &hash, "test payload").unwrap());
+
+        fs::write(&source, wrong).unwrap();
+        assert!(seed_file(&source, &destination, &hash, "test payload").is_err());
+        assert_eq!(fs::read(&destination).unwrap(), pinned);
+        fs::remove_dir_all(root).unwrap();
     }
 }

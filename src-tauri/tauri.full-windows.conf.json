@@ -1,0 +1,22 @@
+{
+  "bundle": {
+    "resources": {
+      "target/full-installer-payload/full-runtime/full-package.json": "full-runtime/full-package.json",
+      "target/full-installer-payload/full-runtime/ffmpeg.exe": "full-runtime/ffmpeg.exe",
+      "target/full-installer-payload/full-runtime/ffprobe.exe": "full-runtime/ffprobe.exe",
+      "target/full-installer-payload/full-runtime/libmpv-2.dll": "full-runtime/libmpv-2.dll",
+      "target/full-installer-payload/full-runtime/vulkan-1.dll": "full-runtime/vulkan-1.dll",
+      "target/full-installer-payload/ndi/NDI-6-Runtime.exe": "ndi/NDI-6-Runtime.exe"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "installer-hooks/full.nsh"
+      },
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      }
+    }
+  }
+}

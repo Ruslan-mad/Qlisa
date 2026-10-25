@@ -29,19 +29,23 @@ Actions workflow are separate checks.
   wrapped process, then restores the previous environment. Check that the
   wrapper exists before using it. Do not copy its credential store into the
   repository or pass the password on a command line.
-- `scripts/runtime-manifest.json` with the pinned upstream archive URLs and
-  SHA-256 values. The app embeds this manifest as runtime configuration. No
-  local media binaries, staging directory, or `prepare-runtime.ps1` step is
-  required for a release build.
+- `scripts/runtime-manifest.json` and `scripts/full-installer-manifest.json`
+  with pinned archive URLs, file hashes, and installer hashes. The full
+  installer needs matching local FFmpeg, ffprobe, libmpv, and Vulkan inputs.
+  `scripts/prepare-full-installer.ps1` validates and stages them under ignored
+  `src-tauri/target/`. It uses a matching local runtime cache or `src-tauri/vendor/`
+  when available. The NDI redistributable is downloaded from its pinned
+  official URL if no local path is supplied.
 - NSIS per-machine install mode and updater `passive` install mode are checked
   separately. The former installs under Program Files and can trigger UAC.
 
-The script checks that media binaries are absent from the Windows bundle
-resource map. When 7-Zip is available, it also lists the completed installer
-and rejects media runtime binaries in its payload. It scans the source tree
-for NDI Runtime DLLs. It does not require 7-Zip, Minisign, source archives, or a local
-`.release-compliance.json` for a local build. Tauri CLI 2 creates the updater
-signature during the build when `bundle.createUpdaterArtifacts` is `true`.
+The script validates separate compact and full Tauri configurations. The
+compact updater must not include media, Vulkan, or NDI payloads. The full
+installer must include the pinned runtime seed, official NDI redistributable,
+and offline WebView2 mode. It checks hashes and Authenticode signatures for
+staged official installers. When 7-Zip is available, it also lists both final
+NSIS packages to check their payload split. Tauri CLI 2 creates a `.sig` for
+each installer when `bundle.createUpdaterArtifacts` is `true`.
 
 Keep an encrypted backup of the private signing key outside the repository.
 Losing this key prevents updates for users who trust the configured public
@@ -58,13 +62,19 @@ repository root:
 ```
 
 The script checks the repository, runtime manifest pins, and signing setup. It runs
-frontend tests/build and Rust metadata/check/test/clippy checks. Then
-`scripts/release.mjs` updates and commits the local version files and builds
-the NSIS installer and Tauri updater artifact. The installer and its `.exe.sig`
-are under `src-tauri/target/release/bundle/nsis/`. The generated
-`latest.json` is under `src-tauri/target/release/prepared/vX.Y.Z/`. The script
-prints the artifact paths and SHA-256 values. It does not tag, push, or publish
-anything.
+frontend, release-pipeline, and Rust checks. It stages the full installer
+inputs, builds the Windows ASIO executable once, then packages it with compact
+and full NSIS configurations. `scripts/release.mjs` updates and commits the
+local version files before the build.
+
+The output directory contains `Qlisa_X.Y.Z_x64-full-setup.exe` and its `.sig`,
+plus `Qlisa_X.Y.Z_x64-update-setup.exe` and its `.sig`. The full installer
+contains the runtime seed, NDI redistributable, and offline WebView2 installer.
+The compact updater contains none of those payloads and removes the full
+payload files left by a prior full install. `latest.json` points to the compact
+updater and its exact signature. Artifacts and metadata are under
+`src-tauri/target/release/`; the script prints their paths and SHA-256 values.
+It does not tag, push, or publish anything.
 
 When the local signing wrapper is present, invoke the same pipeline through it:
 
@@ -92,21 +102,22 @@ Clippy warnings do not fail this check; a non-zero Clippy exit does. The
 pipeline does not run repository-wide `cargo fmt --check` because the current
 baseline has unformatted files outside this release change.
 
-With Tauri 2 `createUpdaterArtifacts: true`, the Windows NSIS installer is the
-updater artifact and has a matching `.exe.sig`. Qlisa's `latest.json` stores
-the exact signature text and installer URL. `v1Compatible` mode uses a
-different `.nsis.zip` updater artifact and is not used here.
+With Tauri 2 `createUpdaterArtifacts: true`, both Windows NSIS variants have a
+matching `.exe.sig`. Qlisa's `latest.json` stores the compact updater's exact
+signature text and URL. `v1Compatible` mode uses a different `.nsis.zip`
+updater artifact and is not used here.
 
 ## Publication and update test
 
-A successful local build does not establish legal compliance. Qlisa packages
-do not host the media binaries, but the application downloads them directly
-from upstream. Do not treat that choice as proof that legal obligations do not
-apply. Current pin evidence and source gaps are recorded in
+A successful local build does not establish legal compliance. The full
+installer includes selected media binaries and the NDI redistributable; the
+compact updater does not. Do not treat package separation as proof that legal
+obligations do not apply. Current pin evidence and source gaps are recorded in
 `scripts/runtime-manifest.json`, `docs/THIRD_PARTY_SOURCE_OFFER.md`, and
 `docs/dependency-license-audit.md`. Review applicable obligations before
-publication. Upload the installer, matching `.sig`, and `latest.json`; do not
-upload media runtime binaries as Qlisa release assets.
+publication. Upload both installer variants, their matching `.sig` files, and
+`latest.json`. Do not upload standalone runtime files as separate release
+assets.
 
 For updater testing, use the isolated procedure in
 [`UPDATER_TESTING.md`](UPDATER_TESTING.md). Do not treat a locally generated

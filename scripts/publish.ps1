@@ -5,14 +5,15 @@ Prepare a signed Qlisa Windows release locally.
 .DESCRIPTION
 Checks source and release prerequisites, runs frontend and Rust checks, updates
 the version through scripts/release.mjs, and creates local NSIS/updater
-artifacts for private testing. It never tags, pushes, or publishes. Missing
-signing keys stop the process before a build starts. Media binaries are fetched
-by Qlisa after installation and are not release build inputs.
+artifacts for private testing. It creates separate full/offline and compact
+updater installers. It never tags, pushes, or publishes. Missing signing keys
+stop the process before a build starts.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [switch]$DryRun,
+    [string]$RuntimeDirectory,
     [string]$SigningKeyPath = (Join-Path $env:USERPROFILE '.tauri\qlisa.key')
 )
 
@@ -77,10 +78,26 @@ function Get-RuntimeManifest {
 }
 function Assert-BundleConfiguration {
     $windows = Get-Content -Raw (Join-Path $script:Root 'src-tauri/tauri.windows.conf.json') | ConvertFrom-Json
+    $full = Get-Content -Raw (Join-Path $script:Root 'src-tauri/tauri.full-windows.conf.json') | ConvertFrom-Json
     $config = Get-Content -Raw (Join-Path $script:Root 'src-tauri/tauri.conf.json') | ConvertFrom-Json
-    $resourceText = $windows.bundle.resources | ConvertTo-Json -Depth 10 -Compress
-    if ($resourceText -match '(?i)ffmpeg\.exe|ffprobe\.exe|libmpv-2\.dll') { Fail 'Windows bundle resources must not contain FFmpeg, ffprobe, or libmpv binaries.' }
+    $compactResources = $windows.bundle.resources | ConvertTo-Json -Depth 10 -Compress
+    if ($compactResources -match '(?i)ffmpeg\.exe|ffprobe\.exe|libmpv-2\.dll|vulkan-1\.dll|NDI-6-Runtime\.exe') {
+        Fail 'Compact updater resources must not include full media, Vulkan, or NDI payloads.'
+    }
     if ($windows.bundle.windows.nsis.installMode -ne 'perMachine') { Fail 'NSIS bundle.windows.nsis.installMode must be perMachine.' }
+    if ($windows.bundle.windows.nsis.installerHooks -ne 'installer-hooks/compact.nsh') { Fail 'Compact updater must remove the full-installer payload resources.' }
+    if ($windows.bundle.windows.webviewInstallMode.type -ne 'embedBootstrapper') { Fail 'Compact updater must use the small embedBootstrapper WebView2 mode.' }
+    if ($full.bundle.windows.nsis.installMode -ne 'perMachine' -or
+        $full.bundle.windows.nsis.installerHooks -ne 'installer-hooks/full.nsh' -or
+        $full.bundle.windows.webviewInstallMode.type -ne 'offlineInstaller') {
+        Fail 'Full installer overlay must use the NDI installer hook and offline WebView2 mode.'
+    }
+    $fullResources = $full.bundle.resources | ConvertTo-Json -Depth 10 -Compress
+    if ($fullResources -notmatch '(?i)ffmpeg\.exe' -or $fullResources -notmatch '(?i)ffprobe\.exe' -or
+        $fullResources -notmatch '(?i)libmpv-2\.dll' -or $fullResources -notmatch '(?i)vulkan-1\.dll' -or
+        $fullResources -notmatch '(?i)NDI-6-Runtime\.exe' -or $fullResources -notmatch '(?i)full-package\.json') {
+        Fail 'Full installer overlay is missing one or more pinned runtime/NDI resources.'
+    }
     if ($config.plugins.updater.windows.installMode -ne 'passive') { Fail 'Updater installMode must remain passive, separately from NSIS installMode.' }
 }
 function Require-Command([string]$Name, [string]$InstallHint) {
@@ -101,18 +118,49 @@ function Assert-NoNdiInTree {
         }
     }
 }
-function Assert-NoMediaBinariesInInstaller([string]$Path) {
+function Assert-InstallerVariants([string]$FullPath, [string]$UpdatePath) {
     $archiver = Get-Command 7z.exe -ErrorAction SilentlyContinue
     if ($null -eq $archiver) { $archiver = Get-Command 7zz.exe -ErrorAction SilentlyContinue }
     if ($null -eq $archiver) {
-        Write-Warning '7-Zip is unavailable; installer payload could not be listed. Tauri resource configuration was checked.'
+        Write-Warning '7-Zip is unavailable; installer payload listing was skipped. Both Tauri resource maps and staged input hashes were checked.'
         return
     }
-    $listing = & $archiver.Source l -slt $Path 2>&1
-    if ($LASTEXITCODE -ne 0) { Fail "Could not inspect installer contents with 7-Zip: $Path" }
-    if (($listing -join "`n") -match '(?im)^Path = .*?(?:ffmpeg\.exe|ffprobe\.exe|libmpv-2\.dll)\s*$') {
-        Fail 'Final NSIS installer contains a media runtime binary.'
+    $compact = & $archiver.Source l -slt $UpdatePath 2>&1
+    if ($LASTEXITCODE -ne 0) { Fail "Could not inspect compact installer with 7-Zip: $UpdatePath" }
+    if (($compact -join "`n") -match '(?im)^Path = .*?(?:ffmpeg\.exe|ffprobe\.exe|libmpv-2\.dll|vulkan-1\.dll|NDI-6-Runtime\.exe)\s*$') {
+        Fail 'Compact updater installer contains a full-install runtime payload.'
     }
+    $full = & $archiver.Source l -slt $FullPath 2>&1
+    if ($LASTEXITCODE -ne 0) { Fail "Could not inspect full installer with 7-Zip: $FullPath" }
+    $listing = $full -join "`n"
+    foreach ($name in @('ffmpeg.exe', 'ffprobe.exe', 'libmpv-2.dll', 'vulkan-1.dll', 'NDI-6-Runtime.exe')) {
+        if ($listing -notmatch "(?im)^Path = .*?/$([regex]::Escape($name))\s*$" -and
+            $listing -notmatch "(?im)^Path = .*?\\$([regex]::Escape($name))\s*$") {
+            Fail "Full NSIS installer is missing required payload: $name"
+        }
+    }
+}
+function Assert-FullWebView2Input {
+    $manifest = Get-Content -Raw -LiteralPath (Join-Path $script:Root 'scripts/full-installer-manifest.json') | ConvertFrom-Json
+    $scriptPath = Join-Path $script:Root 'src-tauri/target/release/nsis/x64/installer.nsi'
+    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { Fail "Generated NSIS script is missing: $scriptPath" }
+    $source = Get-Content -Raw -LiteralPath $scriptPath
+    if ($source -notmatch '(?im)^!define\s+INSTALLWEBVIEW2MODE\s+"offlineInstaller"\s*$') {
+        Fail 'Generated full NSIS script does not use offlineInstaller WebView2 mode.'
+    }
+    $match = [regex]::Match($source, '(?im)^!define\s+WEBVIEW2INSTALLERPATH\s+"([^"]+)"\s*$')
+    if (-not $match.Success) { Fail 'Generated full NSIS script has no offline WebView2 installer input path.' }
+    $path = [System.IO.Path]::GetFullPath($match.Groups[1].Value)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Fail "Tauri offline WebView2 input is missing: $path" }
+    $actual = Get-Sha256 $path
+    if ($actual -ne [string]$manifest.webview2OfflineInstaller.sha256) {
+        Fail "Tauri used an unpinned WebView2 installer. Expected $($manifest.webview2OfflineInstaller.sha256); got $actual. Review before releasing."
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $path
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+        Fail "Offline WebView2 installer signature is not valid for Microsoft Corporation: status=$($signature.Status), subject=$($signature.SignerCertificate.Subject)."
+    }
+    Write-Host "Verified offline WebView2 input: $path  size=$((Get-Item -LiteralPath $path).Length) sha256=$actual"
 }
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { Fail "Version must be strict three-part SemVer, for example 1.5.3; got '$Version'." }
 if ($env:OS -ne 'Windows_NT') { Fail 'Windows release preparation must run on Windows.' }
@@ -159,18 +207,28 @@ Write-Host "Source commit: $((& $git.Source -C $script:Root rev-parse HEAD).Trim
 Write-Host "Version: $currentVersion -> $Version"
 Write-Host "Tag to use after review: $tag"
 Write-Host "Release notes: $releaseNotes"
-Write-Host 'Prerequisites: node, pnpm, cargo, rustc, local Tauri CLI, Git, signing key, and runtime pins are valid.'
+Write-Host 'Prerequisites: node, pnpm, cargo, rustc, local Tauri CLI, Git, signing key, runtime pins, and two NSIS configurations are valid.'
 if ($DryRun) {
-    Write-Host 'PREFLIGHT ONLY: no version files changed and no installer was built. Media runtime binaries are not required for release packaging.'
+    Write-Host 'PREFLIGHT ONLY: no version files changed, runtime inputs staged, or installer built.'
     exit 0
 }
 
 Invoke-Checked 'Frontend tests' $pnpm.Source @('test')
+Invoke-Checked 'Release pipeline tests' $pnpm.Source @('run', 'test:release')
 Invoke-Checked 'Frontend production build' $pnpm.Source @('build')
 Invoke-Checked 'Rust metadata' 'cargo' @('metadata', '--locked', '--no-deps', '--format-version', '1') (Join-Path $script:Root 'src-tauri')
 Invoke-Checked 'Rust check' 'cargo' @('check', '--locked', '--features', 'asio-support') (Join-Path $script:Root 'src-tauri')
 Invoke-Checked 'Rust tests' 'cargo' @('test', '--locked', '--features', 'asio-support') (Join-Path $script:Root 'src-tauri')
 Invoke-Checked 'Rust clippy' 'cargo' @('clippy', '--locked', '--all-targets', '--features', 'asio-support') (Join-Path $script:Root 'src-tauri')
+$prepareRuntimeArgs = @()
+if (-not [string]::IsNullOrWhiteSpace($RuntimeDirectory)) {
+    $RuntimeDirectory = [System.IO.Path]::GetFullPath($RuntimeDirectory)
+    if (-not (Test-Path -LiteralPath $RuntimeDirectory -PathType Container)) {
+        Fail "Pinned runtime source directory does not exist: $RuntimeDirectory"
+    }
+    $prepareRuntimeArgs += @('-RuntimeDirectory', $RuntimeDirectory)
+}
+Invoke-Checked 'Prepare pinned full-installer payload' (Join-Path $script:Root 'scripts/prepare-full-installer.ps1') $prepareRuntimeArgs
 
 $oldPrivateKey = $env:TAURI_SIGNING_PRIVATE_KEY
 $oldPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
@@ -201,33 +259,42 @@ $buildManifestPath = Join-Path $script:Root 'src-tauri/target/release/qlisa.rele
 if (-not (Test-Path -LiteralPath $buildManifestPath -PathType Leaf)) { Fail 'release.mjs did not produce its release manifest.' }
 $buildManifest = Get-Content -Raw -LiteralPath $buildManifestPath | ConvertFrom-Json
 if ($buildManifest.version -ne $Version -or $null -eq $buildManifest.installer -or
+    $null -eq $buildManifest.installerSignature -or
     $null -eq $buildManifest.updaterBundle -or $null -eq $buildManifest.updaterSignature) {
-    Fail 'release.mjs manifest is stale or lacks the fresh NSIS installer/updater signature records.'
+    Fail 'release.mjs manifest is stale or lacks one of the two installers and their signatures.'
 }
-$installerPath = [string]$buildManifest.installer.path
+$fullInstallerPath = [string]$buildManifest.installer.path
+$fullSignaturePath = [string]$buildManifest.installerSignature.path
 $updateBundlePath = [string]$buildManifest.updaterBundle.path
-$signaturePath = [string]$buildManifest.updaterSignature.path
-foreach ($artifactPath in @($installerPath, $updateBundlePath, $signaturePath)) {
+$updateSignaturePath = [string]$buildManifest.updaterSignature.path
+foreach ($artifactPath in @($fullInstallerPath, $fullSignaturePath, $updateBundlePath, $updateSignaturePath)) {
     if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) { Fail "Release manifest artifact is missing: $artifactPath" }
 }
-if ($updateBundlePath -cne $installerPath -or -not $updateBundlePath.ToLowerInvariant().EndsWith('.exe') -or $signaturePath -cne "$updateBundlePath.sig") {
-    Fail 'Release manifest does not identify the NSIS installer and its matching Tauri updater signature.'
+if (-not ([System.IO.Path]::GetFileName($fullInstallerPath) -match '-full-setup\.exe$') -or
+    -not ([System.IO.Path]::GetFileName($updateBundlePath) -match '-update-setup\.exe$') -or
+    $fullSignaturePath -cne "$fullInstallerPath.sig" -or $updateSignaturePath -cne "$updateBundlePath.sig") {
+    Fail 'Release manifest does not identify separately named full and compact installers with matching updater signatures.'
 }
-$installer = Get-Item -LiteralPath $installerPath
-Assert-NoMediaBinariesInInstaller $installerPath
+$fullInstaller = Get-Item -LiteralPath $fullInstallerPath
+$updateInstaller = Get-Item -LiteralPath $updateBundlePath
+Assert-InstallerVariants $fullInstallerPath $updateBundlePath
+Assert-FullWebView2Input
 
-$signature = Get-Content -Raw -LiteralPath $signaturePath
-if ([string]::IsNullOrWhiteSpace($signature) -or $signature -cne $signature.Trim()) { Fail 'Generated updater signature is empty or has surrounding whitespace; expected exact Tauri .sig content.' }
+$fullSignature = Get-Content -Raw -LiteralPath $fullSignaturePath
+$updateSignature = Get-Content -Raw -LiteralPath $updateSignaturePath
+foreach ($signature in @($fullSignature, $updateSignature)) {
+    if ([string]::IsNullOrWhiteSpace($signature) -or $signature -cne $signature.Trim()) { Fail 'Generated updater signature is empty or has surrounding whitespace; expected exact Tauri .sig content.' }
+}
 $outDirectory = Join-Path $script:Root "src-tauri/target/release/prepared/$tag"
 New-Item -ItemType Directory -Path $outDirectory -Force | Out-Null
 $latestPath = Join-Path $outDirectory 'latest.json'
-$assetUrl = "$script:RepoUrl/releases/download/$tag/$($installer.Name)"
-Invoke-Checked 'Create updater latest.json' $node.Source @((Join-Path $script:Root 'scripts/release.mjs'), '--write-updater-metadata', $Version, $releaseNotes, $assetUrl, $signaturePath, $latestPath)
+$assetUrl = "$script:RepoUrl/releases/download/$tag/$($updateInstaller.Name)"
+Invoke-Checked 'Create updater latest.json' $node.Source @((Join-Path $script:Root 'scripts/release.mjs'), '--write-updater-metadata', $Version, $releaseNotes, $assetUrl, $updateSignaturePath, $latestPath)
 $parsed = Get-Content -Raw -LiteralPath $latestPath | ConvertFrom-Json
-$expectedUrl = "$script:RepoUrl/releases/download/$tag/$($installer.Name)"
+$expectedUrl = "$script:RepoUrl/releases/download/$tag/$($updateInstaller.Name)"
 $expectedNotes = (Get-Content -Raw -LiteralPath $releaseNotes).Trim()
 $pubDate = [datetimeoffset]$parsed.pub_date
-if ($parsed.version -cne $Version -or [string]$parsed.platforms.'windows-x86_64'.signature -cne $signature -or
+if ($parsed.version -cne $Version -or [string]$parsed.platforms.'windows-x86_64'.signature -cne $updateSignature -or
     [string]$parsed.platforms.'windows-x86_64'.url -cne $expectedUrl -or
     [string]$parsed.notes -cne $expectedNotes -or
     $pubDate.Offset -ne [timespan]::Zero -or
@@ -235,7 +302,7 @@ if ($parsed.version -cne $Version -or [string]$parsed.platforms.'windows-x86_64'
     Fail 'Generated latest.json failed version, Windows platform, exact URL, exact signature text, UTC publication date, or release-notes checks.'
 }
 
-$assets = @($installer.FullName, $signaturePath, $latestPath)
+$assets = @($fullInstaller.FullName, $fullSignaturePath, $updateInstaller.FullName, $updateSignaturePath, $latestPath)
 $assetNames = @($assets | ForEach-Object { [System.IO.Path]::GetFileName($_) })
 if (@($assetNames | Select-Object -Unique).Count -ne $assetNames.Count) { Fail 'Release assets contain duplicate filenames; rename the colliding source or notice files before retrying.' }
 Write-Host ''
@@ -251,4 +318,4 @@ Write-Host "Release notes: $releaseNotes"
 Write-Host 'Release notes content:'
 Write-Host (Get-Content -Raw -LiteralPath $releaseNotes)
 Write-Host "Metadata: $latestPath"
-Write-Host 'LOCAL-ONLY SIGNED BUILD COMPLETE. These artifacts are not a publication-ready release. Nothing was tagged, pushed, or published.'
+Write-Host 'LOCAL-ONLY SIGNED BUILD COMPLETE. The full installer is for new/offline installs. The compact installer is for updates and latest.json. Nothing was tagged, pushed, or published.'

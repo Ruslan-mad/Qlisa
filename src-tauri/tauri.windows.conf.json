@@ -6,7 +6,8 @@
     },
     "windows": {
       "nsis": {
-        "installMode": "perMachine"
+        "installMode": "perMachine",
+        "installerHooks": "installer-hooks/compact.nsh"
       },
       "webviewInstallMode": {
         "type": "embedBootstrapper",

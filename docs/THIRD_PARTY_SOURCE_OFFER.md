@@ -1,9 +1,10 @@
 # Third-party runtime provenance
 
-Qlisa's Windows installer and updater do not contain FFmpeg, ffprobe, or
-libmpv binaries. The application downloads pinned archives directly from their
-upstream releases and verifies SHA-256 values. This delivery method does not
-remove any obligations that apply to the upstream binaries. The records below
+The Windows full installer embeds hash-pinned FFmpeg, ffprobe, and libmpv
+files. The compact updater does not. The application can download pinned
+archives directly from upstream for repair and verifies SHA-256 values. This
+delivery method does not remove any obligations that apply to the upstream
+binaries. The records below
 identify the selected artifacts and known source gaps; they are not a
 compliance attestation or a corresponding-source package.
 
@@ -26,9 +27,9 @@ compliance attestation or a corresponding-source package.
 The archive README identifies the FFmpeg source revision and describes static
 linking. The full source set for statically linked dependencies and their
 patches has not been independently verified. Gyan maintains versioned release
-assets; this pin does not depend on a daily autobuild retention window. Qlisa
-downloads the archive directly from upstream and does not redistribute the
-runtime binaries in its installer or updater. The tracked record is
+assets; this pin does not depend on a daily autobuild retention window. The
+full installer embeds the verified runtime executables; the compact updater
+does not. The tracked record is
 [`README-Gyan-build.txt`](../src-tauri/vendor/ffmpeg/README-Gyan-build.txt).
 
 ## Selected shinchiro 20260923 libmpv asset

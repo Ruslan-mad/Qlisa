@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   artifactChanged,
+  bundleCommandArgs,
   buildCommandArgs,
   compareVersions,
   createUpdaterMetadata,
@@ -92,13 +93,18 @@ test("builds and validates Tauri metadata with signature content and exact HTTPS
   assert.throws(() => validateUpdaterMetadata(metadata, { version: "1.5.6", url: "https://example.com/wrong", signature: "signed-content" }));
 });
 
-test("build commands forward asio-support through Cargo args and bundle only one target", () => {
-  assert.deepEqual(buildCommandArgs({}), [
+test("builds the ASIO executable once and creates compact and full NSIS bundles from it", () => {
+  assert.deepEqual(buildCommandArgs({ bundle: "nsis" }), [
     "exec", "tauri", "build", "--no-bundle", "--", "--features", "asio-support",
   ]);
-  assert.deepEqual(buildCommandArgs({ bundle: "nsis" }), [
-    "exec", "tauri", "build", "--bundles", "nsis", "--", "--features", "asio-support",
+  assert.deepEqual(bundleCommandArgs({ variant: "update" }), [
+    "exec", "tauri", "bundle", "--bundles", "nsis", "--features", "asio-support", "--ci",
   ]);
+  assert.deepEqual(bundleCommandArgs({ variant: "full", overlayConfig: "src-tauri/tauri.full-windows.conf.json" }), [
+    "exec", "tauri", "bundle", "--bundles", "nsis", "--features", "asio-support", "--ci", "--config", "src-tauri/tauri.full-windows.conf.json",
+  ]);
+  assert.throws(() => bundleCommandArgs({ variant: "full" }), /requires its Tauri config overlay/);
+  assert.throws(() => bundleCommandArgs({ variant: "update", overlayConfig: "full.json" }), /must use the default Tauri config/);
 });
 
 test("manifest contains full executable and installer file metadata", () => {
@@ -109,6 +115,7 @@ test("manifest contains full executable and installer file metadata", () => {
     commit: "abc123",
     executable,
     installer,
+    installerSignature: { path: "C:/Qlisa/qlisa-full.exe.sig", size: 64 },
     updaterBundle: null,
     updaterSignature: null,
     builtAt: "2026-09-18T12:02:00.000Z",
@@ -121,6 +128,7 @@ test("manifest contains full executable and installer file metadata", () => {
     bundledTarget: "msi",
     executable,
     installer,
+    installerSignature: { path: "C:/Qlisa/qlisa-full.exe.sig", size: 64 },
     updaterBundle: null,
     updaterSignature: null,
   });

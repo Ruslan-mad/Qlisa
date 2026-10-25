@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { checkRuntimeDownloads } from "./runtime-download-check.mjs";
 import {
   artifactChanged,
+  bundleCommandArgs,
   buildCommandArgs,
   compareVersions,
   createReleaseManifest,
@@ -95,8 +96,8 @@ function printDryRun(currentVersion, release) {
   console.log("1. Update package.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json, and the qlisa entry in src-tauri/Cargo.lock.");
   console.log("2. Validate the Cargo lockfile: cargo metadata --locked --no-deps --format-version 1 (from src-tauri/).");
   console.log(`3. Commit only those version files: git add -- ${VERSION_PATHS.join(" ")} && git commit -m "release: v${release.version}".`);
-  console.log(`4. Build from that release commit: pnpm ${buildArgs.join(" ")}`);
-  console.log(`5. Record executable, installer, and updater artifacts in src-tauri/target/release/qlisa.release.json.`);
+  console.log(`4. Build the ASIO executable once: pnpm ${buildArgs.join(" ")}`);
+  console.log("5. Create compact and full NSIS installers from that executable, sign both, and record both variants in src-tauri/target/release/qlisa.release.json.");
 }
 
 function ensureWindowsAsioPrerequisites() {
@@ -105,13 +106,29 @@ function ensureWindowsAsioPrerequisites() {
   const sdkDirectory = join(ROOT, "vendor", "asiosdk");
   if (!existsSync(sdkDirectory)) throw new Error(`ASIO SDK is missing: ${sdkDirectory}`);
   const windowsConfig = JSON.parse(readFileSync(join(ROOT, "src-tauri", "tauri.windows.conf.json"), "utf8"));
+  const fullConfig = JSON.parse(readFileSync(join(ROOT, "src-tauri", "tauri.full-windows.conf.json"), "utf8"));
   const bundleConfig = JSON.parse(readFileSync(join(ROOT, "src-tauri", "tauri.conf.json"), "utf8"));
-  const serializedResources = JSON.stringify(windowsConfig.bundle?.resources ?? {}).toLowerCase();
-  if (["ffmpeg.exe", "ffprobe.exe", "libmpv-2.dll"].some((name) => serializedResources.includes(name))) {
-    throw new Error("Windows Tauri bundle resources must not include FFmpeg, ffprobe, or libmpv binaries.");
+  const compactResources = JSON.stringify(windowsConfig.bundle?.resources ?? {}).toLowerCase();
+  if (["ffmpeg.exe", "ffprobe.exe", "libmpv-2.dll", "vulkan-1.dll", "ndi-6-runtime.exe"].some((name) => compactResources.includes(name))) {
+    throw new Error("Compact updater bundle resources must not include media, Vulkan, or NDI installer payloads.");
   }
   if (windowsConfig.bundle?.windows?.nsis?.installMode !== "perMachine") {
     throw new Error("Windows NSIS bundle must set bundle.windows.nsis.installMode to perMachine.");
+  }
+  if (windowsConfig.bundle?.windows?.nsis?.installerHooks !== "installer-hooks/compact.nsh") {
+    throw new Error("Compact updater bundle must remove only the full-installer payload resources.");
+  }
+  if (windowsConfig.bundle?.windows?.webviewInstallMode?.type !== "embedBootstrapper") {
+    throw new Error("Compact updater bundle must keep the small embedBootstrapper WebView2 mode.");
+  }
+  if (fullConfig.bundle?.windows?.webviewInstallMode?.type !== "offlineInstaller" ||
+      fullConfig.bundle?.windows?.nsis?.installMode !== "perMachine" ||
+      fullConfig.bundle?.windows?.nsis?.installerHooks !== "installer-hooks/full.nsh") {
+    throw new Error("Full installer overlay must use offline WebView2, per-machine installation, and the NDI runtime hook.");
+  }
+  const fullResources = JSON.stringify(fullConfig.bundle?.resources ?? {}).toLowerCase();
+  for (const name of ["full-package.json", "ffmpeg.exe", "ffprobe.exe", "libmpv-2.dll", "vulkan-1.dll", "ndi-6-runtime.exe"]) {
+    if (!fullResources.includes(name)) throw new Error(`Full installer overlay is missing resource ${name}.`);
   }
   if (bundleConfig.plugins?.updater?.windows?.installMode !== "passive") {
     throw new Error("Tauri updater installMode must remain passive; this is separate from the NSIS install mode.");
@@ -227,6 +244,18 @@ function findNewUpdaterArtifacts(before, installer) {
   return { updaterBundle: installer, updaterSignature: fileInfo(signaturePath) };
 }
 
+function renameArtifact(artifact, filename) {
+  const destination = join(dirname(artifact.path), filename);
+  if (existsSync(destination) || existsSync(`${destination}.sig`)) {
+    throw new Error(`Refusing to overwrite an existing release artifact: ${destination}`);
+  }
+  renameSync(artifact.path, destination);
+  const signaturePath = `${artifact.path}.sig`;
+  if (!existsSync(signaturePath)) throw new Error(`Missing Tauri updater signature before artifact rename: ${signaturePath}`);
+  renameSync(signaturePath, `${destination}.sig`);
+  return { installer: fileInfo(destination), signature: fileInfo(`${destination}.sig`) };
+}
+
 function printArtifact(label, artifact) {
   console.log(`${label}: ${artifact.path}`);
   console.log(`  Size: ${artifact.size} bytes`);
@@ -273,6 +302,9 @@ function rollbackVersionFiles(originals, written, staged, initialHead) {
 
 async function release(releaseOptions) {
   validateReleasePreparationOptions(releaseOptions);
+  if (releaseOptions.prepareRelease && !releaseOptions.dryRun && releaseOptions.bundle !== "nsis") {
+    throw new Error("The two-installer release pipeline requires --bundle=nsis; rejecting before version changes.");
+  }
   ensureCleanTree();
   const initialHead = git(["rev-parse", "HEAD"]);
   const state = readVersionState();
@@ -320,11 +352,10 @@ async function release(releaseOptions) {
     const executablePath = join(ROOT, "src-tauri", "target", "release", "qlisa.exe");
     const executableBefore = snapshotFile(executablePath);
     const beforeBundle = artifactSnapshot(releaseOptions.bundle);
-    const beforeUpdater = updaterArtifactSnapshot(releaseOptions.bundle);
     const buildArgs = buildCommandArgs(releaseOptions);
 
     removeStaleTargetMediaFiles();
-    console.log(`Building release from commit ${commit} with ASIO support...`);
+    console.log(`Building release executable from commit ${commit} with ASIO support...`);
     run(process.env.QLISA_PNPM_EXECUTABLE ?? "pnpm.cmd", buildArgs, { cwd: ROOT, shell: true, inherit: true });
 
     const executableAfter = snapshotFile(executablePath);
@@ -333,16 +364,34 @@ async function release(releaseOptions) {
       throw new Error(`Release executable was not refreshed by this build; refusing to record a stale artifact: ${executablePath}`);
     }
     const executable = fileInfo(executablePath);
-    const installer = findNewInstaller(releaseOptions.bundle, beforeBundle);
-    const { updaterBundle, updaterSignature } = findNewUpdaterArtifacts(beforeUpdater, installer);
+    const bundleDirectory = join(ROOT, "src-tauri", "target", "release", "bundle", "nsis");
+    const pnpm = process.env.QLISA_PNPM_EXECUTABLE ?? "pnpm.cmd";
+    console.log("Bundling compact updater installer...");
+    const beforeCompactUpdater = updaterArtifactSnapshot("nsis");
+    run(pnpm, bundleCommandArgs({ variant: "update" }), { cwd: ROOT, shell: true, inherit: true });
+    const compactInstaller = findNewInstaller("nsis", beforeBundle);
+    findNewUpdaterArtifacts(beforeCompactUpdater, compactInstaller);
+    const compact = renameArtifact(compactInstaller, `Qlisa_${releaseOptions.version}_x64-update-setup.exe`);
+
+    const beforeFullBundle = artifactSnapshot("nsis");
+    const beforeFullUpdater = updaterArtifactSnapshot("nsis");
+    console.log("Bundling full offline installer with pinned runtime seed and NDI redist...");
+    run(pnpm, bundleCommandArgs({
+      variant: "full",
+      overlayConfig: "src-tauri/tauri.full-windows.conf.json",
+    }), { cwd: ROOT, shell: true, inherit: true });
+    const fullInstaller = findNewInstaller("nsis", beforeFullBundle);
+    findNewUpdaterArtifacts(beforeFullUpdater, fullInstaller);
+    const full = renameArtifact(fullInstaller, `Qlisa_${releaseOptions.version}_x64-full-setup.exe`);
     const builtAt = new Date().toISOString();
     const manifest = createReleaseManifest({
       version: releaseOptions.version,
       commit,
       executable,
-      installer,
-      updaterBundle,
-      updaterSignature,
+      installer: full.installer,
+      installerSignature: full.signature,
+      updaterBundle: compact.installer,
+      updaterSignature: compact.signature,
       builtAt,
       bundle: releaseOptions.bundle,
     });
@@ -353,10 +402,10 @@ async function release(releaseOptions) {
     console.log(`Release commit: ${commit}`);
     console.log(`Build completed at: ${builtAt}`);
     printArtifact("Executable", executable);
-    if (installer) printArtifact("Installer", installer);
-    if (updaterBundle) printArtifact("Updater bundle", updaterBundle);
-    if (updaterSignature) printArtifact("Updater signature", updaterSignature);
-    else console.log("Installer: not built (--no-bundle)");
+    printArtifact("Full installer", full.installer);
+    printArtifact("Full installer signature", full.signature);
+    printArtifact("Compact updater installer", compact.installer);
+    printArtifact("Compact updater signature", compact.signature);
     console.log(`Manifest: ${manifestPath}`);
   } catch (error) {
     rollbackVersionFiles(originals, written, stagingAttempted, initialHead);

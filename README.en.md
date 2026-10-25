@@ -81,7 +81,7 @@ controls. See the [Stage theme notes](docs/flagship-theme.md) and [1.5.12 releas
 
 Qlisa supports MIDI, OSC, Timecode, sACN, Art-Net, NDI, and SRT. A Cue can run media and send commands to compatible software or systems.
 
-To use NDI, install the official [NDI Runtime](https://ndi.video/) separately. Qlisa does not include it in the installer.
+The full installer includes the official NDI 6 Runtime and runs its standard installer. The compact update package does not include or run NDI.
 
 ### Conversion and import
 
@@ -91,13 +91,13 @@ Built-in tools convert audio, video, and images. FFmpeg and ffprobe handle media
 
 Qlisa is for **Windows 10 and Windows 11**. The installer installs the app for all users under `C:\Program Files\Qlisa` and may ask for administrator rights.
 
-1. Open the [latest release page](https://github.com/Ruslan-mad/Qlisa/releases/latest) and download the Windows installer.
+1. For a new or offline install, download `Qlisa_*_full-setup.exe` from the [latest release page](https://github.com/Ruslan-mad/Qlisa/releases/latest). `Qlisa_*_update-setup.exe` is for updating an installed copy.
 
 2. Run the installer and complete setup.
 
-3. Start Qlisa. The first launch requires an internet connection to download the Media Runtime components.
+3. Start Qlisa. The full installer contains the verified Media Runtime and offline WebView2 installer. If a bundled file fails verification, Qlisa stops preparation and shows an error.
 
-NDI Runtime is required only when using NDI. Install it separately from the [NDI website](https://ndi.video/).
+The full installer also installs NDI 6 Runtime when a suitable version is missing. Compact updates preserve the runtime cache and installed NDI Runtime.
 
 ## Projects
 
@@ -107,7 +107,7 @@ New projects use the `.qlisa` extension. Qlisa also opens `.inkue` projects; bot
 
 Qlisa checks for app updates through GitHub Releases. The user starts an update from the app. Qlisa delays installation while Cues are playing.
 
-On first launch, Qlisa downloads FFmpeg, ffprobe, and libmpv directly from pinned upstream releases, verifies their SHA-256 checksums, and stores the components in `%LOCALAPPDATA%\Qlisa\runtime`. On later launches, the app checks the files and downloads them again if they are missing or damaged. If a download fails, Qlisa shows the reason and a Retry button. You do not need to choose FFmpeg or libmpv manually. An internet connection is required for the initial download and repairs. The Qlisa installer does not contain these components.
+The full installer first verifies the SHA-256 hashes of bundled FFmpeg, ffprobe, libmpv, and the Vulkan loader, then copies them to `%LOCALAPPDATA%\Qlisa\runtime`. This allows setup to start without a network connection. The compact update package omits these large components and preserves the existing cache. If runtime files are missing or damaged, Qlisa verifies pinned upstream archives and downloads the required files. A verification or download error keeps the main window closed.
 
 See [Windows Media Runtime](docs/windows-network-runtime.md) for details.
 

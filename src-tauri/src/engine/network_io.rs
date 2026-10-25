@@ -411,24 +411,33 @@ pub fn find_ndi_runtime() -> Option<PathBuf> {
 }
 
 fn ndi_candidates() -> Vec<PathBuf> {
+    let v6 = std::env::var_os("NDI_RUNTIME_DIR_V6").map(PathBuf::from);
+    let v5 = std::env::var_os("NDI_RUNTIME_DIR_V5").map(PathBuf::from);
+    #[cfg(target_os = "windows")]
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    #[cfg(not(target_os = "windows"))]
+    let program_files = None;
+    ndi_candidates_for(v6, v5, program_files)
+}
+
+fn ndi_candidates_for(v6: Option<PathBuf>, v5: Option<PathBuf>, program_files: Option<PathBuf>) -> Vec<PathBuf> {
     let dll = if cfg!(target_arch = "x86_64") {
         "Processing.NDI.Lib.x64.dll"
     } else {
         "Processing.NDI.Lib.x86.dll"
     };
     let mut paths = Vec::new();
-    for variable in ["NDI_RUNTIME_DIR_V6", "NDI_RUNTIME_DIR_V5"] {
-        if let Ok(dir) = std::env::var(variable) {
-            paths.push(PathBuf::from(dir).join(dll));
-        }
+    if let Some(dir) = v6 {
+        paths.push(dir.join(dll));
     }
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            let root = PathBuf::from(program_files).join("NDI");
-            paths.push(root.join("NDI 6 Runtime").join("v6").join(dll));
-            paths.push(root.join("NDI 5 Runtime").join(dll));
-        }
+    if let Some(program_files) = program_files.as_ref() {
+        paths.push(program_files.join("NDI").join("NDI 6 Runtime").join("v6").join(dll));
+    }
+    if let Some(dir) = v5 {
+        paths.push(dir.join(dll));
+    }
+    if let Some(program_files) = program_files {
+        paths.push(program_files.join("NDI").join("NDI 5 Runtime").join(dll));
     }
     paths
 }
@@ -4936,6 +4945,21 @@ mod tests {
                 &executable_directory.join("resources").join("ndi").join(dll)
             ));
         }
+    }
+
+    #[test]
+    fn ndi_v6_installation_precedes_stale_v5_environment_override() {
+        let candidates = ndi_candidates_for(
+            Some(PathBuf::from("C:/ndi-v6-env")),
+            Some(PathBuf::from("C:/ndi-v5-env")),
+            Some(PathBuf::from("C:/Program Files")),
+        );
+        let file = if cfg!(target_arch = "x86_64") { "Processing.NDI.Lib.x64.dll" } else { "Processing.NDI.Lib.x86.dll" };
+        let v6_env = PathBuf::from("C:/ndi-v6-env").join(file);
+        let program_files_v6 = PathBuf::from("C:/Program Files/NDI/NDI 6 Runtime/v6").join(file);
+        let v5_env = PathBuf::from("C:/ndi-v5-env").join(file);
+        assert!(candidates.iter().position(|path| path == &v6_env).unwrap() < candidates.iter().position(|path| path == &v5_env).unwrap());
+        assert!(candidates.iter().position(|path| path == &program_files_v6).unwrap() < candidates.iter().position(|path| path == &v5_env).unwrap());
     }
 
     #[test]

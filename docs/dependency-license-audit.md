@@ -33,7 +33,7 @@ The review is based on lockfile versions and registry metadata, not the package 
 
 The selected payload is Gyan FFmpeg **9.0.2 full, GPLv3 static**, archive [`ffmpeg-9.0.2-full_build.zip`](https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-full_build.zip), SHA-256 `759d0a9831c436a0eb331ad36f236c06cb04aaa0005da46571f0e9d3d9206f6b`. The archive contains both executables; their hashes are recorded in [`README-Gyan-build.txt`](../src-tauri/vendor/ffmpeg/README-Gyan-build.txt). The archive README identifies GPL v3, its `LICENSE` matches the tracked license, and its build configuration enables GPLv3 and static linking. The verified binaries expose SRT, x264, x265, AAC, and Qlisa's required filters. They report FFmpeg source commit [`946fcce07b6dcd0331c8cc609192aeff5e1924f8`](https://github.com/FFmpeg/FFmpeg/commit/946fcce07b6dcd0331c8cc609192aeff5e1924f8).
 
-The exact source revisions and patches for every statically linked dependency in this Gyan binary have not been independently verified. Qlisa downloads the versioned binary archive directly from upstream and does not include it in the installer or updater. Do not describe this record as a corresponding-source offer or compliance attestation. See [runtime provenance](THIRD_PARTY_SOURCE_OFFER.md).
+The exact source revisions and patches for every statically linked dependency in this Gyan binary have not been independently verified. The full installer embeds the verified runtime executables; the compact updater does not. Qlisa can download the versioned archive directly from upstream for repair. Do not describe this record as a corresponding-source offer or compliance attestation. See [runtime provenance](THIRD_PARTY_SOURCE_OFFER.md).
 
 ### libmpv
 

@@ -348,8 +348,33 @@ impl MpvLib {
         };
 
         for path in &candidates {
+            #[cfg(target_os = "windows")]
+            if path.file_name().is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("libmpv-2.dll")) {
+                let loader = crate::media_runtime::runtime_dir().join("vulkan-1.dll");
+                if loader.exists() && !crate::media_runtime::verified_file(&loader, "vulkan-loader", "vulkan-1.dll") {
+                    return Err(anyhow!("Vulkan loader in the media runtime cache failed SHA-256 verification: {}", loader.display()));
+                }
+            }
             // SAFETY: loading an external shared library is inherently unsafe.
-            if let Ok(lib) = unsafe { Library::new(path) } {
+            let loaded = unsafe {
+                #[cfg(target_os = "windows")]
+                {
+                    use libloading::os::windows::{
+                        Library as WindowsLibrary, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+                        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+                    };
+                    WindowsLibrary::load_with_flags(
+                        path,
+                        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+                    )
+                    .map(Library::from)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Library::new(path)
+                }
+            };
+            if let Ok(lib) = loaded {
                 log::info!("libmpv loaded from {}", path.display());
                 return Ok(lib);
             }

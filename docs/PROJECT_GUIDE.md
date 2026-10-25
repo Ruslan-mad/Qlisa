@@ -680,13 +680,14 @@ selected display because they own one exclusive WebView. If no selected display
 is enabled, new cues keep the regular `default_output_id` routing. Older
 preferences migrate that regular default into the new selection once.
 
-- Windows builds do not stage or bundle FFmpeg, ffprobe, or libmpv. On first
-  launch, a preparation window downloads the pinned FFmpeg pair and libmpv
-  directly from their upstream URLs, checks their SHA256 hashes, and installs
-  them under `%LOCALAPPDATA%\Qlisa\runtime\` before opening the main window.
-  Missing or damaged files are repaired automatically; preparation errors offer
-  Retry or Close. NDI is dynamically loaded from the user's separately
-  installed NDI Runtime; the NDI DLL is never bundled by Qlisa.
+- The full Windows installer embeds hash-pinned FFmpeg, ffprobe, libmpv, and
+  Vulkan loader files. First launch verifies and seeds them to
+  `%LOCALAPPDATA%\Qlisa\runtime\` before opening the main window. The compact
+  updater contains no large media payload and removes only leftover full-package
+  installer files; it preserves the user runtime cache. Missing or damaged
+  cache files use the pinned upstream downloader in compact installs. NDI is
+  installed by the full setup when no NDI 6.3.2-or-newer runtime is found; Qlisa
+  still dynamically loads the installed NDI DLL and does not bundle it directly.
 - The SRT sender carries program audio and video on Windows. On macOS/Linux,
   current SRT output is video-only; NDI carries program audio on all supported
   platforms according to the code's status text.
@@ -751,18 +752,20 @@ stored at the same scope; inspect the struct before deciding.
 
 - Rust stable toolchain, Node.js, pnpm, and Tauri 2 platform prerequisites.
 - `pnpm install` at repository root.
-- libmpv for visual playback. Windows first launch downloads the pinned DLL
-  from upstream, verifies its SHA256 hash, and installs it into
+- libmpv for visual playback. Windows full setup seeds the pinned DLL from its
+  verified installer payload. Compact installs can download the pinned DLL
+  from upstream and verify its SHA256 hash. Both use
   `%LOCALAPPDATA%\Qlisa\runtime\`; macOS/Linux use platform libmpv.
 - Windows Qlisa app builds always use `vendor/asiosdk/` via
   `src-tauri/.cargo/config.toml` and enable `asio-support`.
-- Windows Qlisa downloads FFmpeg/ffprobe from the pinned Gyan FFmpeg 9.0.2
-  full GPL static archive on first launch and installs them under
-  `%LOCALAPPDATA%\Qlisa\runtime\`. See [runtime pins and source provenance](THIRD_PARTY_SOURCE_OFFER.md).
-  NSIS installs Qlisa per-machine under `C:\Program Files\Qlisa`. The runtime
-  manifest pins upstream URLs and SHA256 hashes. The media binaries are not
-  inputs to the installer or updater package; the updater updates Qlisa only.
-  NDI Runtime is installed separately by the user.
+- Windows full setup includes the pinned Gyan FFmpeg 9.0.2 pair, libmpv,
+  Vulkan loader, offline WebView2 installer, and the official NDI 6
+  redistributable. It verifies the runtime seed hashes before staging them in
+  `%LOCALAPPDATA%\Qlisa\runtime\`. The compact updater carries no runtime
+  payload and preserves that cache. Release builders stage the exact pinned
+  media and Vulkan inputs with `scripts/prepare-full-installer.ps1`. See
+  [runtime pins and source provenance](THIRD_PARTY_SOURCE_OFFER.md). NSIS
+  installs Qlisa per-machine under `C:\Program Files\Qlisa`.
 
 ### Commands
 
@@ -809,13 +812,11 @@ the normal Windows ASIO path before distributing a release.
 
 The Windows release pipeline starts with `scripts/publish.ps1 -Version X.Y.Z`.
 It requires a clean `main` branch, synchronized version fields, a signing key,
-release notes, and pinned media archive metadata. It does not require locally
-staged media binaries. It runs frontend and Rust checks, creates the local
-`release: vX.Y.Z` version commit, then builds the Windows ASIO NSIS installer
-and Tauri updater artifact. Tauri updater artifacts are the NSIS executable and
-its `.exe.sig`; the media runtime and NDI Runtime are not included. The script
-prepares local assets and metadata only. It does not tag, push, or publish to
-GitHub. See [Windows release preparation](RELEASING.md) for prerequisites and
+release notes, and pinned runtime inputs. It runs frontend and Rust checks,
+builds the ASIO executable once, then creates signed full and compact NSIS
+installers. `latest.json` points to the compact updater. The script prepares
+local assets and metadata only; it does not tag, push, or publish to GitHub.
+See [Windows release preparation](RELEASING.md) for prerequisites and
 publication steps.
 
 The updater plugin is registered in the Rust app and configured with Qlisa's
@@ -1093,7 +1094,7 @@ live audio or physical output.
 | App opens, but video/image output is unavailable | Check the runtime status in Qlisa and confirm `%LOCALAPPDATA%\Qlisa\runtime\libmpv-2.dll` is present and loadable; open the app log. |
 | Audio is silent or the selected device disappeared | Check Preferences → Audio, health alerts, and machine config. The device watchdog attempts fallback/recovery; verify Output Patches and channel mapping. |
 | Media cue appears stuck/loading or has no duration | Check path, codec/decode alert, file permissions, and Preflight/Relink. Inspect logs; metadata and decodes run off the UI path. |
-| NDI not available | Install the official NDI Runtime separately, then check Preferences → NDI/SRT Output status. A valid local runtime is required for NDI discovery/sender startup. Qlisa does not bundle the DLL. |
+| NDI not available | Run the full installer to add the official NDI Runtime, then check Preferences → NDI/SRT Output status. A valid local runtime is required for NDI discovery/sender startup. Qlisa does not bundle the DLL directly. |
 | SRT reports unavailable | Check `%LOCALAPPDATA%\Qlisa\runtime\ffmpeg.exe` and confirm the pinned Windows build described in [FFmpeg source and build provenance](THIRD_PARTY_SOURCE_OFFER.md) supports SRT. |
 | Runtime preparation fails | Check network access to the pinned upstream URLs in `scripts/runtime-manifest.json`, then choose Retry on the preparation screen. |
 | A new Tauri window fails to use filesystem/window APIs | Check the window's label and `src-tauri/capabilities/*.json`; permissions are scoped by window. |

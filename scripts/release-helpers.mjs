@@ -103,14 +103,24 @@ export function validateUpdaterMetadata(metadata, { version, url, signature }) {
 }
 
 export function buildCommandArgs(releaseOptions) {
-  const args = ["exec", "tauri", "build"];
-  if (releaseOptions.bundle) args.push("--bundles", releaseOptions.bundle);
-  else args.push("--no-bundle");
+  const args = ["exec", "tauri", "build", "--no-bundle"];
   args.push("--", "--features", "asio-support");
   return args;
 }
 
-export function createReleaseManifest({ version, commit, executable, installer, updaterBundle, updaterSignature, builtAt, bundle }) {
+export function bundleCommandArgs({ variant, overlayConfig }) {
+  if (variant !== "update" && variant !== "full") throw new Error(`Unknown installer variant: ${variant}`);
+  const args = ["exec", "tauri", "bundle", "--bundles", "nsis", "--features", "asio-support", "--ci"];
+  if (variant === "full") {
+    if (!overlayConfig) throw new Error("The full installer requires its Tauri config overlay");
+    args.push("--config", overlayConfig);
+  } else if (overlayConfig) {
+    throw new Error("The compact updater installer must use the default Tauri config");
+  }
+  return args;
+}
+
+export function createReleaseManifest({ version, commit, executable, installer, installerSignature, updaterBundle, updaterSignature, builtAt, bundle }) {
   return {
     version,
     commit,
@@ -119,6 +129,7 @@ export function createReleaseManifest({ version, commit, executable, installer, 
     bundledTarget: bundle ?? null,
     executable,
     installer: installer ?? null,
+    installerSignature: installerSignature ?? null,
     updaterBundle: updaterBundle ?? null,
     updaterSignature: updaterSignature ?? null,
   };

@@ -1,6 +1,6 @@
 # Third-party notices
 
-This file identifies upstream projects and runtime components used by Qlisa. Windows installer and updater packages do not contain FFmpeg, ffprobe, or libmpv binaries. On first launch, Qlisa downloads pinned upstream assets directly and stores required runtime files under `%LOCALAPPDATA%\Qlisa\runtime\`. This download flow does not determine or remove legal obligations for those binaries. Versions below describe the pinned upstream assets and must be reviewed when any runtime pin changes. This summary does not replace applicable license texts or notices.
+This file identifies upstream projects and runtime components used by Qlisa. The Windows full installer embeds pinned FFmpeg, ffprobe, libmpv, and Vulkan loader files; the compact updater does not. Qlisa can download pinned media archives directly from upstream when files need repair. The full installer also includes the official NDI 6 redistributable installer but no raw NDI DLL. These packaging choices do not determine or remove legal obligations. Versions below describe the pinned upstream assets and must be reviewed when any runtime pin changes. This summary does not replace applicable license texts or notices.
 
 ## Qlisa and Inkue
 
@@ -10,9 +10,9 @@ QLab is a trademark of Figure 53, LLC. Qlisa is not affiliated with or endorsed 
 
 ## NDI
 
-Qlisa contains NDI integration code that dynamically loads the NDI Runtime installed by the user. Qlisa source and installers do not include `Processing.NDI.Lib.x64.dll`, the NDI Runtime, or NDI SDK binaries. NDI use is subject to the current [NDI SDK terms](http://ndi.link/ndisdk_license); obtain the Runtime from [ndi.video](https://ndi.video/). NDI® is a registered trademark of Vizrt NDI AB.
+Qlisa contains NDI integration code that dynamically loads the NDI Runtime. The full installer includes the official NDI 6 Runtime redistributable installer and runs it when no NDI 6.3.2-or-newer runtime is installed. The compact updater does not include or install NDI. Qlisa source and installer payloads do not contain `Processing.NDI.Lib.x64.dll` directly. NDI use is subject to the current [NDI SDK terms](http://ndi.link/ndisdk_license); the redistributable is obtained from [ndi.video](https://ndi.video/). NDI® is a registered trademark of Vizrt NDI AB.
 
-Release checklist: confirm that no NDI Runtime DLL is present in the source export or installer.
+Release checklist: confirm that the full installer includes only the pinned official NDI redistributable installer and no raw NDI Runtime DLL; confirm the compact updater contains neither.
 
 ## FFmpeg, ffprobe, and SRT
 
@@ -34,15 +34,16 @@ x264, x265, AAC, and Qlisa's required filters. Qlisa invokes FFmpeg for SRT;
 Qlisa does not link SRT directly.
 
 The exact source revisions and patches for every statically linked component
-have not been independently verified. Qlisa downloads the archive directly
-from upstream and does not redistribute the binaries in its installer or
-updater. See the [source-offer status](docs/THIRD_PARTY_SOURCE_OFFER.md).
+have not been independently verified. The full installer embeds the extracted
+runtime files after hash verification; the compact updater does not. The app
+can also download the archive directly from upstream for repair. See the
+[source-offer status](docs/THIRD_PARTY_SOURCE_OFFER.md).
 
 ## mpv / libmpv
 
 Windows visual playback loads `libmpv-2.dll` at runtime. Qlisa pins Windows x64 DLL version `v0.41.0-1055-g6fd80b200` from the generic x86_64 `mpv-dev` asset in [shinchiro/mpv-winbuild-cmake release 20260923](https://github.com/shinchiro/mpv-winbuild-cmake/releases/tag/20260923). The asset is `mpv-dev-x86_64-20260923-git-6fd80b2003.7z`, SHA-256 `372f29c292d0c8b4ce916225739e5872e35b8e11f3f4590c285baed8ba551100`; the extracted DLL SHA-256 is `751131f81b5ce485d046ff08d1a44a93c5455be5135d53c0ab19c56780925ff0`. It reports mpv source commit [`6fd80b2003873ef2bed09e78374549687a143236`](https://github.com/mpv-player/mpv/commit/6fd80b2003873ef2bed09e78374549687a143236). The release's [build run](https://github.com/shinchiro/mpv-winbuild-cmake/actions/runs/35800030374) and build-system commit [`05a60b3cfd04e3e3b89918f4a27f3dde2935dff2`](https://github.com/shinchiro/mpv-winbuild-cmake/tree/05a60b3cfd04e3e3b89918f4a27f3dde2935dff2) identify the clang generic x86_64 build.
 
-The DLL passed isolated playback, seek, and two simultaneous libmpv context checks. WASAPI audio was configured; physical audio output was not verified. The exact combined license, dependency revisions, patches, and corresponding source for its statically linked components remain unverified. The Qlisa package does not contain this DLL and obtains it directly from upstream; that delivery flow does not establish or remove legal obligations. See [`scripts/runtime-manifest.json`](scripts/runtime-manifest.json) and [the 20260923 source/build record](docs/shinchiro-20260923-source-build-manifest.md) for hashes, build evidence, and the remaining source gap.
+The DLL passed isolated playback, seek, and two simultaneous libmpv context checks. WASAPI audio was configured; physical audio output was not verified. The exact combined license, dependency revisions, patches, and corresponding source for its statically linked components remain unverified. The full installer embeds this pinned DLL after hash verification; the compact updater does not. This delivery flow does not establish or remove legal obligations. See [`scripts/runtime-manifest.json`](scripts/runtime-manifest.json) and [the 20260923 source/build record](docs/shinchiro-20260923-source-build-manifest.md) for hashes, build evidence, and the remaining source gap.
 
 ## Steinberg ASIO SDK
 
