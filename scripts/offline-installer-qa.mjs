@@ -146,7 +146,18 @@ async function discoverTarget(port, timeoutMs) {
   if (!response.ok) throw new Error(`CDP target list returned HTTP ${response.status}`);
   const targets = await response.json();
   const pages = targets.filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
-  const target = pages.find((page) => /tauri\.localhost|qlisa/i.test(`${page.url} ${page.title}`)) ?? pages[0];
+  const mainPages = pages.filter((page) => {
+    try {
+      const url = new URL(page.url);
+      return !/preferences|browser[-_/ ]?surface/i.test(`${url.pathname} ${url.search} ${page.title}`);
+    } catch {
+      return false;
+    }
+  });
+  const target = mainPages.find((page) => {
+    const url = new URL(page.url);
+    return /tauri\.localhost|127\.0\.0\.1|localhost/i.test(url.hostname) && url.pathname === "/" && /qlisa/i.test(page.title);
+  }) ?? mainPages.find((page) => /tauri\.localhost|qlisa/i.test(`${page.url} ${page.title}`));
   if (!target) throw new Error("No Qlisa WebView2 page target is available");
   return target;
 }
@@ -178,8 +189,12 @@ async function probe(options) {
       const backendReady = await invoke(client, "is_backend_ready");
       const media = await invoke(client, "get_media_runtime_status");
       const network = await invoke(client, "get_network_io_status");
-      const result = { backendReady, media, network };
-      if (backendReady === true && media?.ready === true && media.ffmpeg && media.ffprobe && media.libmpv && network?.ndi?.availability === "ready") {
+      const mainUiReady = await client.send("Runtime.evaluate", {
+        expression: "Boolean(document.querySelector('.stage-transport-go'))",
+        returnByValue: true,
+      }).then((response) => response.result?.value === true);
+      const result = { backendReady, media, network, mainUiReady };
+      if (backendReady === true && media?.ready === true && media.ffmpeg && media.ffprobe && media.libmpv && network?.ndi?.availability === "ready" && mainUiReady) {
         if (options.screenshot) {
           try {
             await client.send("Page.enable");
