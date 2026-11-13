@@ -189,6 +189,9 @@ pub struct CueSummary {
     /// `None` for Simultaneous groups and non-Group cues.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_child_id: Option<String>,
+    /// Runtime-only current slide for Presentation navigation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation_current_child_id: Option<String>,
     /// Number-only master and timed action metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub number_master_id: Option<String>,
@@ -235,9 +238,12 @@ pub struct WorkspaceCueCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_source_revision: Option<String>,
     pub is_loading: bool,
-    /// True when this cue has the Number-only background screensaver flag.
+    /// True when this cue resists ordinary transport stops.
     pub background_screensaver: bool,
     pub is_disabled: bool,
+    /// Runtime-only current slide for Presentation navigation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation_current_child_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_patch_name: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -290,6 +296,7 @@ fn catalog_cues(
                 is_loading: loading.contains(&cue.id()),
                 background_screensaver: cue.background_screensaver(),
                 is_disabled: cue.is_disabled(),
+                presentation_current_child_id: cue.presentation_current_child_id().map(|id| id.to_string()),
                 output_patch_name: patches.name_for(cue.as_ref()),
                 children: cue
                     .child_cues()
@@ -630,7 +637,7 @@ fn cue_target_numbers(serialized: &serde_json::Value) -> Vec<String> {
 fn visual_output_ids_for_cue(cue: &dyn Cue) -> Option<Vec<String>> {
     if !matches!(
         cue.cue_type(),
-        CueType::Video | CueType::Image | CueType::Browser | CueType::Camera | CueType::Text
+        CueType::Video | CueType::Image | CueType::Browser | CueType::Camera | CueType::Text | CueType::Timer
     ) {
         return None;
     }
@@ -815,6 +822,7 @@ fn summarise(
         group_mode: cue.group_mode(),
         playlist_loop: cue.playlist_loop(),
         active_child_id: cue.active_child_id().map(|id| id.to_string()),
+        presentation_current_child_id: cue.presentation_current_child_id().map(|id| id.to_string()),
         number_master_id: cue.number_master_id().map(|id| id.to_string()),
         number_master_type: cue.number_master_id().and_then(|id| cue.child_cues().and_then(|children| children.iter().find(|child| child.id() == id).map(|child| child.cue_type()))),
         number_master_name: cue.number_master_id().and_then(|id| cue.child_cues().and_then(|children| children.iter().find(|child| child.id() == id).map(|child| child.name().to_string()))),
@@ -1231,10 +1239,31 @@ pub fn get_cue(cue_id: String, state: State<'_, AppState>) -> Result<serde_json:
     let ws = state.workspace.lock().map_err(|e| e.to_string())?;
     let cue = find_workspace_cue(&ws, &id).ok_or("Cue not found")?;
     let mut data = cue.serialize();
+    let cue_type = cue.cue_type();
+    let camera_voice = (cue_type == CueType::Camera).then(|| cue.playing_voice_id()).flatten();
+    let camera_dimensions = (cue_type == CueType::Camera).then(|| cue.live_source_dimensions()).flatten();
     let project_dir = ws.file_path.as_deref().and_then(std::path::Path::parent);
     let project_dir = project_dir.map(std::path::Path::to_path_buf);
     drop(ws);
     add_media_source_revisions(&mut data, project_dir.as_deref());
+    if cue_type == CueType::Camera {
+        let dimensions = camera_dimensions.or_else(|| {
+            let voice = camera_voice?;
+            state.output_engine.live_video_source_dimensions(voice)
+        });
+        if let Some((width, height)) = dimensions {
+            if let Some(object) = data.as_object_mut() {
+                object.insert("_live_source_dimensions".into(), serde_json::json!({ "width": width, "height": height }));
+            }
+        }
+    } else if matches!(cue_type, CueType::Text | CueType::Timer) {
+        if let Some(object) = data.as_object_mut() {
+            object.insert(
+                "_overlay_margin_by_output".into(),
+                serde_json::json!(state.output_engine.overlay_margin_by_output()),
+            );
+        }
+    }
     Ok(data)
 }
 
@@ -1310,7 +1339,35 @@ fn is_protected_single_update_key(key: &str) -> bool {
     matches!(
         key,
         "id" | "type" | "cue_type" | "children" | "duration_ms" | "_bulk_edit"
+            | "presentation_video_imported" | "presentation_video_layout"
+            | "presentation_video_layout_supported" | "presentation_video_layout_error"
     )
+}
+
+fn validate_presentation_video_mode_update(
+    cue: &dyn Cue,
+    properties: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(raw_mode) = properties.get("presentation_video_mode") else { return Ok(()) };
+    if cue.cue_type() != CueType::Video {
+        return Err("presentation_video_mode can only be updated on imported video cues".into());
+    }
+    let mode: crate::cue::types::PresentationVideoMode = serde_json::from_value(raw_mode.clone())
+        .map_err(|_| "presentation_video_mode must be fullscreen or as_slide".to_string())?;
+    if cue.is_running() || cue.is_paused() {
+        return Err("Presentation video placement can only change while the cue is stopped".into());
+    }
+    if mode == crate::cue::types::PresentationVideoMode::AsSlide {
+        let serialized = cue.serialize();
+        let imported = serialized.get("presentation_video_imported").and_then(serde_json::Value::as_bool) == Some(true);
+        let supported = serialized.get("presentation_video_layout_supported").and_then(serde_json::Value::as_bool) == Some(true);
+        let layout = serialized.get("presentation_video_layout")
+            .and_then(|value| serde_json::from_value::<crate::cue::types::PresentationVideoLayout>(value.clone()).ok());
+        if !imported || !supported || !layout.is_some_and(|layout| layout.supports_exact_as_slide()) {
+            return Err("AsSlide placement requires a supported imported slide rectangle".into());
+        }
+    }
+    Ok(())
 }
 
 fn validate_common_bulk_value(
@@ -1419,6 +1476,7 @@ fn rebuild_key_allowed_for_type(key: &str, cue_type: CueType) -> bool {
         CueType::Camera => is_visual_fade_key(key) || matches!(key, "output_id" | "output_ids"),
         CueType::Browser => matches!(key, "url" | "output_id" | "output_ids" | "reload_on_go" | "zoom"),
         CueType::Text => matches!(key, "display_duration_ms" | "output_id" | "output_ids"),
+        CueType::Timer => matches!(key, "timer_duration_ms" | "mode" | "format" | "font" | "font_size" | "text_color" | "output_id" | "output_ids" | "screen_index" | "sound_start" | "sound_end" | "sound_start_preset" | "sound_end_preset" | "sound_start_path" | "sound_end_path" | "sound_volume" | "sound_patch_id" | "finish_and_hide"),
         CueType::Wait => key == "wait_duration_ms",
         CueType::Fade => key == "fade_duration_ms",
         // Number uses the regular audio fade field names as a shared
@@ -1448,6 +1506,7 @@ fn validate_rebuild_bulk_value(key: &str, value: &serde_json::Value) -> Result<(
         | "start_time_ms"
         | "end_time_ms"
         | "display_duration_ms" => validate_nullable_u64(key, value),
+        "timer_duration_ms" => value.as_u64().filter(|v| *v <= 86_400_000).map(|_| ()).ok_or_else(|| "timer_duration_ms must be from 0 to 86400000".to_string()),
         "fade_in_curve" | "fade_out_curve" | "video_fade_in_curve" | "video_fade_out_curve" => {
             if value.is_null()
                 || serde_json::from_value::<crate::cue::types::FadeCurve>(value.clone()).is_ok()
@@ -1496,6 +1555,20 @@ fn validate_rebuild_bulk_value(key: &str, value: &serde_json::Value) -> Result<(
                 .map(|_| ())
                 .map_err(|_| "output_patch_id must be a UUID string or null".to_string())
         }
+        "sound_patch_id" => {
+            if value.is_null() { return Ok(()); }
+            value.as_str().ok_or("sound_patch_id must be a UUID string or null")?.parse::<Uuid>().map(|_| ()).map_err(|_| "sound_patch_id must be a UUID string or null".to_string())
+        }
+        "mode" => serde_json::from_value::<crate::cue::timer_cue::TimerMode>(value.clone()).map(|_| ()).map_err(|_| "mode must be countdown or countup".to_string()),
+        "format" => serde_json::from_value::<crate::cue::timer_cue::TimerFormat>(value.clone()).map(|_| ()).map_err(|_| "format must be seconds or minutes_seconds".to_string()),
+        "font" => value.as_str().map(|_| ()).ok_or_else(|| "font must be a string".to_string()),
+        "font_size" => value.as_u64().filter(|size| (8..=300).contains(size)).map(|_| ()).ok_or_else(|| "font_size must be from 8 to 300".to_string()),
+        "text_color" => value.as_str().filter(|color| color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|ch| ch.is_ascii_hexdigit())).map(|_| ()).ok_or_else(|| "text_color must be #RRGGBB".to_string()),
+        "screen_index" => if value.is_null() || value.as_u64().is_some() { Ok(()) } else { Err("screen_index must be a non-negative integer or null".to_string()) },
+        "sound_start" | "sound_end" | "finish_and_hide" => value.as_bool().map(|_| ()).ok_or_else(|| format!("{key} must be a boolean")),
+        "sound_start_preset" | "sound_end_preset" => value.as_str().filter(|preset| matches!(*preset, "notification_1" | "notification_2" | "notification_3" | "notification_4" | "notification_5" | "custom")).map(|_| ()).ok_or_else(|| format!("{key} must select a built-in sound or custom")),
+        "sound_start_path" | "sound_end_path" => if value.is_null() || value.as_str().is_some_and(|p| !p.is_empty()) { Ok(()) } else { Err(format!("{key} must be a non-empty path or null")) },
+        "sound_volume" => value.as_f64().filter(|volume| volume.is_finite() && (0.0..=1.0).contains(volume)).map(|_| ()).ok_or_else(|| "sound_volume must be between 0 and 1".to_string()),
         "output_id" => {
             if value.is_null() || value.as_str().is_some_and(|id| !id.is_empty()) {
                 Ok(())
@@ -1604,8 +1677,10 @@ fn apply_single_direct_patch(cue: &mut dyn Cue, patch: SingleCueDirectPatch) {
 }
 
 fn validate_direct_patch_target(cue: &dyn Cue, patch: &SingleCueDirectPatch) -> Result<(), String> {
-    if patch.background_screensaver.is_some() && cue.cue_type() != CueType::Number {
-        return Err("background_screensaver can only be updated on a Number cue".to_string());
+    if patch.background_screensaver.is_some()
+        && !matches!(cue.cue_type(), CueType::Number | CueType::Audio | CueType::Video | CueType::Image)
+    {
+        return Err("background_screensaver can only be updated on Number, Audio, Video, or Image cues".to_string());
     }
     Ok(())
 }
@@ -1675,6 +1750,33 @@ fn validated_live_pan(value: &serde_json::Value) -> Result<f32, String> {
     Ok(pan as f32)
 }
 
+fn validated_ass_overlay_geometry(value: &serde_json::Value) -> Result<crate::engine::output_engine::VideoGeometry, String> {
+    let geometry: crate::engine::output_engine::VideoGeometry = serde_json::from_value(value.clone())
+        .map_err(|_| "geometry must be valid".to_string())?;
+    if !geometry.pan_x.is_finite() || !(-1.0..=1.0).contains(&geometry.pan_x)
+        || !geometry.pan_y.is_finite() || !(-1.0..=1.0).contains(&geometry.pan_y)
+        || !geometry.scale.is_finite() || !(0.05..=8.0).contains(&geometry.scale)
+    {
+        return Err("Text and Timer geometry requires pan from -1 to 1 and scale from 0.05 to 8".to_string());
+    }
+    if geometry.fit_mode != crate::engine::output_engine::FitMode::Fit
+        || geometry.rotation != 0
+        || geometry.crop_left != 0.0 || geometry.crop_right != 0.0
+        || geometry.crop_top != 0.0 || geometry.crop_bottom != 0.0
+    {
+        return Err("Text and Timer geometry supports pan and scale only".to_string());
+    }
+    Ok(geometry)
+}
+
+fn validated_ass_overlay_geometry_map(value: &serde_json::Value) -> Result<HashMap<String, crate::engine::output_engine::VideoGeometry>, String> {
+    let raw: HashMap<String, serde_json::Value> = serde_json::from_value(value.clone())
+        .map_err(|_| "geometry_by_output must map output IDs to valid geometry".to_string())?;
+    raw.into_iter().map(|(id, geometry)| {
+        Ok((id, validated_ass_overlay_geometry(&geometry)?))
+    }).collect()
+}
+
 /// Return an in-place patch only when every key is known-safe for the target
 /// cue type. A mixed safe/unsafe patch deliberately falls back to the guarded
 /// rebuild route, rather than applying only part of an operator's request.
@@ -1701,6 +1803,16 @@ fn classify_live_in_place_patch(
                     Some(validated_live_db(value)?);
                 has_live_field = true;
             }
+            "gain_envelope" if matches!(cue_type, CueType::Audio | CueType::Video) => {
+                let envelope: Option<crate::cue::gain_envelope::GainEnvelope> =
+                    serde_json::from_value(value.clone())
+                        .map_err(|_| "gain_envelope must be an array of valid points or null".to_string())?;
+                if let Some(envelope) = envelope.as_ref() {
+                    envelope.validate()?;
+                }
+                patch.audio.get_or_insert_with(Default::default).gain_envelope = Some(envelope);
+                has_live_field = true;
+            }
             "muted" if matches!(cue_type, CueType::Audio | CueType::Video | CueType::Camera) => {
                 patch.audio.get_or_insert_with(Default::default).muted = Some(
                     value.as_bool().ok_or("muted must be a boolean")?,
@@ -1725,6 +1837,16 @@ fn classify_live_in_place_patch(
                     .audio
                     .get_or_insert_with(Default::default)
                     .level_matrix = Some(matrix);
+                has_live_field = true;
+            }
+            "geometry" if matches!(cue_type, CueType::Text | CueType::Timer) => {
+                patch.visual.get_or_insert_with(Default::default).geometry =
+                    Some(validated_ass_overlay_geometry(value)?);
+                has_live_field = true;
+            }
+            "geometry_by_output" if matches!(cue_type, CueType::Text | CueType::Timer) => {
+                let overrides = validated_ass_overlay_geometry_map(value)?;
+                patch.visual.get_or_insert_with(Default::default).geometry_by_output = Some(overrides);
                 has_live_field = true;
             }
             "geometry" if matches!(cue_type, CueType::Video | CueType::Image | CueType::Camera) => {
@@ -1781,6 +1903,7 @@ fn reject_group_rebuild(cue: &dyn Cue, properties: &serde_json::Value) -> Result
 #[derive(Clone, Copy)]
 enum LiveAudioField {
     Gain,
+    Envelope,
     Muted,
     Pan,
     Matrix,
@@ -1792,10 +1915,29 @@ fn should_apply_live_audio_field(
 ) -> bool {
     patch.map_or(true, |patch| match field {
         LiveAudioField::Gain => patch.volume_db.is_some(),
+        LiveAudioField::Envelope => patch.gain_envelope.is_some(),
         LiveAudioField::Muted => patch.muted.is_some(),
         LiveAudioField::Pan => patch.pan.is_some(),
         LiveAudioField::Matrix => patch.level_matrix.is_some(),
     })
+}
+
+fn preview_envelope_update(
+    cue_id: Uuid,
+    session: Option<&PreviewSession>,
+    authored: Option<crate::cue::gain_envelope::GainEnvelope>,
+    patch: Option<&crate::cue::traits::LiveAudioPatch>,
+) -> Option<(Vec<Uuid>, crate::cue::gain_envelope::GainEnvelopeRt)> {
+    let session = session.filter(|session| session.cue_id == cue_id && session.transport.is_some())?;
+    let envelope = match patch.and_then(|patch| patch.gain_envelope.as_ref()) {
+        Some(envelope) => envelope.clone(),
+        None => authored,
+    };
+    let rt = envelope
+        .as_ref()
+        .and_then(|envelope| envelope.to_rt().ok())
+        .unwrap_or_default();
+    Some((session.all_voice_ids().to_vec(), rt))
 }
 
 fn apply_existing_cue_live_side_effects(
@@ -1812,6 +1954,12 @@ fn apply_existing_cue_live_side_effects(
             .unwrap_or(params.voice_id);
         if should_apply_live_audio_field(audio_patch, LiveAudioField::Gain) {
             let _ = state.audio_engine.set_voice_gain(audio_voice, params.gain);
+        }
+        if should_apply_live_audio_field(audio_patch, LiveAudioField::Envelope) {
+            let envelope = params.gain_envelope.as_ref()
+                .and_then(|value| value.to_rt().ok())
+                .unwrap_or_default();
+            let _ = state.audio_engine.set_voice_gain_envelope(audio_voice, envelope);
         }
         if should_apply_live_audio_field(audio_patch, LiveAudioField::Muted) {
             let _ = state.audio_engine.set_voice_muted(audio_voice, params.muted);
@@ -1837,6 +1985,21 @@ fn apply_existing_cue_live_side_effects(
             let _ = state
                 .audio_engine
                 .set_voice_level_matrix(audio_voice, matrix.as_ref());
+        }
+    }
+    if should_apply_live_audio_field(audio_patch, LiveAudioField::Envelope) {
+        // Headphone preview owns a separate voice. Apply the same authored
+        // source-time curve when the edited Audio/Video cue is its source.
+        let authored = serde_json::from_value::<crate::cue::gain_envelope::GainEnvelope>(
+            cue.serialize()["gain_envelope"].clone(),
+        ).ok().filter(|envelope| !envelope.points.is_empty());
+        let preview_update = state.preview_session.lock().ok().and_then(|session| {
+            preview_envelope_update(cue.id(), session.as_ref(), authored, audio_patch)
+        });
+        if let Some((preview_voices, envelope)) = preview_update {
+            for voice_id in preview_voices {
+                let _ = state.audio_engine.set_voice_gain_envelope(voice_id, envelope);
+            }
         }
     }
     if let Some(voice_id) = cue
@@ -1896,7 +2059,7 @@ fn ensure_rebuild_safe(
     is_loading: bool,
     change_description: &str,
 ) -> Result<(), String> {
-    if is_fade_rebuild_editable(cue, is_loading) {
+    if is_fade_rebuild_editable(cue, is_loading) || (cue.cue_type() == CueType::Timer && !is_loading) {
         return Ok(());
     }
     if is_loading {
@@ -2020,10 +2183,12 @@ fn prepare_bulk_update(
     let mut preserved_streams = HashMap::new();
     collect_stream_audio_recursive(cue, &mut preserved_streams);
     let runtime = cue.runtime_state();
+    let runtime_extension = cue.runtime_extension();
     let mut rebuilt = registry.from_json(json).map_err(|e| e.to_string())?;
     restore_decoded_audio_recursive(rebuilt.as_mut(), &preserved_audio);
     restore_stream_audio_recursive(rebuilt.as_mut(), &preserved_streams);
     rebuilt.restore_runtime_state(runtime);
+    if let Some(extension) = runtime_extension { rebuilt.restore_runtime_extension(extension); }
 
     Ok(PreparedBulkUpdate {
         id: cue.id(),
@@ -2064,6 +2229,11 @@ pub fn bulk_update_cues(
     // prospective fade replacements are built, before the cue list changes.
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let runtime_context = crate::commands::transport_cmds::make_context_from_workspace(
+        &state,
+        &ws,
+        ws.preferences.audio.default_fade_out_ms,
+    );
     let patch_channels_by_id: Vec<(Uuid, Vec<u16>)> = ws
         .output_patches
         .iter()
@@ -2103,10 +2273,14 @@ pub fn bulk_update_cues(
             }
         } else if let Some(in_place) = update.in_place.take() {
             let audio_patch = in_place.audio.clone();
+            let refresh_visual = in_place.visual.is_some();
             let cue = cue_list
                 .get_mut_recursive(&update.id)
                 .ok_or("Cue disappeared during bulk update")?;
             apply_single_in_place_patch(cue, in_place);
+            if refresh_visual {
+                cue.refresh_live_visual(&runtime_context);
+            }
             apply_existing_cue_live_side_effects(
                 cue,
                 &state,
@@ -2120,6 +2294,8 @@ pub fn bulk_update_cues(
             .get_mut_recursive(&update.id)
             .ok_or("Cue disappeared during bulk update")?;
         apply_common_bulk_patch(cue, update.common);
+        cue.refresh_runtime_after_rebuild(&runtime_context)
+            .map_err(|error| error.to_string())?;
     }
     ws.mark_modified();
     drop(ws);
@@ -2142,6 +2318,7 @@ mod bulk_update_tests {
             mic_cue::MicCue,
             registry::CueRegistry,
             text_cue::TextCue,
+            timer_cue::TimerCue,
             traits::{CueFactory, RuntimeState},
             video_cue::{VideoCue, VideoCueFactory},
             wait_cue::WaitCue,
@@ -2175,6 +2352,48 @@ mod bulk_update_tests {
         let target = preview_target_cue(&number).expect("Number master should be previewable");
         assert_eq!(target.id(), master_id);
         assert_eq!(target.cue_type(), CueType::Audio);
+    }
+
+    #[test]
+    fn presentation_video_as_slide_requires_imported_exact_stopped_layout() {
+        let mut video = VideoCue::new();
+        assert!(validate_presentation_video_mode_update(
+            &video,
+            &serde_json::json!({"presentation_video_mode":"as_slide"})
+        ).is_err());
+
+        video.presentation_video_imported = true;
+        video.presentation_video_layout_supported = true;
+        video.presentation_video_layout = Some(crate::cue::types::PresentationVideoLayout {
+            slide_width: 12_192_000,
+            slide_height: 6_858_000,
+            x: 0.1,
+            y: 0.2,
+            width: 0.3,
+            height: 0.4,
+            rotation: 0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        });
+        let mode = serde_json::json!({"presentation_video_mode":"as_slide"});
+        validate_presentation_video_mode_update(&video, &mode).unwrap();
+
+        video.presentation_video_layout_supported = false;
+        assert!(validate_presentation_video_mode_update(&video, &mode).is_err());
+        video.presentation_video_layout_supported = true;
+        video.presentation_video_layout.as_mut().unwrap().width = f64::NAN;
+        assert!(validate_presentation_video_mode_update(&video, &mode).is_err());
+
+        video.presentation_video_layout.as_mut().unwrap().width = 0.3;
+        video.restore_runtime_state(RuntimeState {
+            state: CueState::Running,
+            voice_id: None,
+            started_at: None,
+            action_started_at: None,
+        });
+        assert!(validate_presentation_video_mode_update(&video, &mode).is_err());
     }
 
     #[test]
@@ -2496,6 +2715,32 @@ mod bulk_update_tests {
         assert_eq!(json["level_matrix"][0][1], -12.0);
         assert_eq!(json["geometry"]["fit_mode"], "fill");
         assert_eq!(json["layer_style"]["blend_mode"], "screen");
+    }
+
+    #[test]
+    fn ass_geometry_updates_text_and_timer_in_place_and_validates_supported_axes() {
+        for (cue_type, mut cue) in [
+            (CueType::Text, Box::new(TextCue::new()) as Box<dyn Cue>),
+            (CueType::Timer, Box::new(TimerCue::new()) as Box<dyn Cue>),
+        ] {
+            let pointer = cue.as_ref() as *const dyn Cue as *const ();
+            let patch = classify_live_in_place_patch(&serde_json::json!({
+                "geometry": { "pan_x": 0.25, "scale": 1.5 },
+                "geometry_by_output": { "portrait": { "pan_y": -0.2, "scale": 0.75 } }
+            }), cue_type).unwrap().expect("overlay geometry is live-safe");
+            assert!(patch.visual.is_some());
+            apply_single_in_place_patch(cue.as_mut(), patch);
+            assert_eq!(pointer, cue.as_ref() as *const dyn Cue as *const ());
+            assert_eq!(cue.serialize()["geometry"]["pan_x"], 0.25);
+            assert_eq!(cue.serialize()["geometry_by_output"]["portrait"]["pan_y"], -0.2);
+        }
+
+        assert!(classify_live_in_place_patch(&serde_json::json!({
+            "geometry": { "pan_x": 1.1 }
+        }), CueType::Timer).is_err());
+        assert!(classify_live_in_place_patch(&serde_json::json!({
+            "geometry": { "rotation": 90 }
+        }), CueType::Text).is_err());
     }
 
     #[test]
@@ -2957,13 +3202,69 @@ mod bulk_update_tests {
     }
 
     #[test]
-    fn screensaver_flag_direct_update_requires_a_number_and_boolean_value() {
-        let camera = CameraCue::new();
+    fn screensaver_flag_direct_update_accepts_supported_media_and_number_cues() {
         let update = classify_single_cue_update(&serde_json::json!({ "background_screensaver": true }))
             .expect("flag shape must parse before cue type validation");
         let SingleCueUpdateKind::Direct(patch) = update else { panic!("expected direct update"); };
+        for cue in [
+            Box::new(AudioCue::new()) as Box<dyn Cue>,
+            Box::new(VideoCue::new()),
+            Box::new(ImageCue::new()),
+            Box::new(GroupCue::new_number()),
+        ] {
+            validate_direct_patch_target(cue.as_ref(), &patch).unwrap_or_else(|error| {
+                panic!("{:?} should support background protection: {error}", cue.cue_type())
+            });
+        }
+        let camera = CameraCue::new();
         assert!(validate_direct_patch_target(&camera, &patch).is_err());
         assert!(classify_single_cue_update(&serde_json::json!({ "background_screensaver": "yes" })).is_err());
+    }
+
+    #[test]
+    fn media_screensaver_flag_roundtrips_and_legacy_cues_default_false() {
+        for cue_type in ["audio", "video", "image"] {
+            let legacy = registry().from_json(serde_json::json!({ "type": cue_type }))
+                .expect("legacy media cue loads");
+            assert!(!legacy.background_screensaver(), "{cue_type} defaults to unprotected");
+
+            let mut cue = legacy;
+            cue.set_background_screensaver(true);
+            let restored = registry().from_json(cue.serialize()).expect("flag roundtrip");
+            assert!(restored.background_screensaver(), "{cue_type} flag persists");
+        }
+    }
+
+    #[test]
+    fn media_screensaver_direct_patch_keeps_running_cue_instances() {
+        let runtime = || RuntimeState {
+            state: CueState::Running,
+            voice_id: Some(Uuid::new_v4()),
+            started_at: Some(std::time::Instant::now()),
+            action_started_at: Some(std::time::Instant::now()),
+        };
+        for mut cue in [
+            Box::new(AudioCue::new()) as Box<dyn Cue>,
+            Box::new(VideoCue::new()),
+            Box::new(ImageCue::new()),
+        ] {
+            let runtime = runtime();
+            let started_at = runtime.started_at;
+            let action_started_at = runtime.action_started_at;
+            cue.restore_runtime_state(runtime);
+            let instance = cue.as_ref() as *const dyn Cue as *const ();
+            let update = classify_single_cue_update(&serde_json::json!({ "background_screensaver": true }))
+                .expect("flag is a direct field");
+            let SingleCueUpdateKind::Direct(patch) = update else { panic!("expected direct patch"); };
+            validate_direct_patch_target(cue.as_ref(), &patch).unwrap();
+            apply_single_direct_patch(cue.as_mut(), patch);
+            assert_eq!(instance, cue.as_ref() as *const dyn Cue as *const ());
+            assert_eq!(cue.state(), CueState::Running);
+            let after = cue.runtime_state();
+            assert_eq!(after.started_at, started_at);
+            assert_eq!(after.action_started_at, action_started_at);
+            assert!(cue.background_screensaver());
+        }
     }
 
     #[test]
@@ -3107,6 +3408,79 @@ mod bulk_update_tests {
         assert!(!super::should_apply_live_audio_field(Some(&patch), super::LiveAudioField::Gain));
         assert!(!super::should_apply_live_audio_field(Some(&patch), super::LiveAudioField::Pan));
         assert!(!super::should_apply_live_audio_field(Some(&patch), super::LiveAudioField::Matrix));
+        assert!(!super::should_apply_live_audio_field(Some(&patch), super::LiveAudioField::Envelope));
+    }
+
+    #[test]
+    fn gain_envelope_live_patch_validates_and_updates_audio_cue_once_in_place() {
+        let mut cue = AudioCue::new();
+        let pointer = &cue as *const AudioCue;
+        let patch = classify_live_in_place_patch(
+            &serde_json::json!({
+                "gain_envelope": [
+                    { "time_ms": 0, "gain": 2.0 },
+                    { "time_ms": 1_000, "gain": 0.25 }
+                ]
+            }),
+            CueType::Audio,
+        ).unwrap().expect("safe live curve patch");
+        let audio_patch = patch.audio.clone().expect("audio patch");
+        apply_single_in_place_patch(&mut cue, patch);
+        assert_eq!(pointer, &cue as *const AudioCue);
+        assert_eq!(cue.serialize()["gain_envelope"].as_array().unwrap().len(), 2);
+        assert_eq!(cue.serialize()["gain_envelope"][0]["gain"], 2.0);
+        assert!(should_apply_live_audio_field(Some(&audio_patch), LiveAudioField::Envelope));
+
+        let clear = classify_live_in_place_patch(
+            &serde_json::json!({ "gain_envelope": null }), CueType::Audio,
+        ).unwrap().expect("clear curve patch");
+        apply_single_in_place_patch(&mut cue, clear);
+        assert!(cue.serialize()["gain_envelope"].is_null());
+
+        assert!(classify_live_in_place_patch(
+            &serde_json::json!({ "gain_envelope": [{ "time_ms": 0, "gain": 2.5 }] }),
+            CueType::Audio,
+        ).is_err());
+        assert!(classify_live_in_place_patch(
+            &serde_json::json!({ "gain_envelope": [] }), CueType::Video,
+        ).unwrap().is_some());
+        assert!(classify_live_in_place_patch(
+            &serde_json::json!({ "gain_envelope": [] }), CueType::Mic,
+        ).unwrap().is_none());
+    }
+
+    #[test]
+    fn standby_cue_edit_updates_its_active_headphone_preview_curve() {
+        use crate::cue::gain_envelope::{GainEnvelope, GainEnvelopePoint};
+
+        let cue = AudioCue::new();
+        assert!(cue.live_audio_params().is_none(), "Standby cue has no GO voice");
+        let voice_id = Uuid::new_v4();
+        let session = PreviewSession::new(cue.id(), vec![voice_id], 7)
+            .unwrap()
+            .with_transport(Some(PreviewTransport { trim_start_ms: 0, end_ms: 2_000 }));
+        let curve = GainEnvelope { points: vec![
+            GainEnvelopePoint { time_ms: 0, gain: 2.0 },
+            GainEnvelopePoint { time_ms: 1_000, gain: 0.0 },
+        ] };
+        let patch = crate::cue::traits::LiveAudioPatch {
+            gain_envelope: Some(Some(curve)),
+            ..Default::default()
+        };
+
+        let (voices, rt) = preview_envelope_update(cue.id(), Some(&session), None, Some(&patch))
+            .expect("matching standalone headphone preview");
+        assert_eq!(voices, vec![voice_id]);
+        assert_eq!(rt.gain_at_ms(0.0), 2.0);
+        assert!((rt.gain_at_ms(500.0) - 1.0).abs() < 1e-6);
+
+        let clear = crate::cue::traits::LiveAudioPatch {
+            gain_envelope: Some(None),
+            ..Default::default()
+        };
+        let (_, cleared) = preview_envelope_update(cue.id(), Some(&session), None, Some(&clear))
+            .expect("matching preview can clear curve");
+        assert_eq!(cleared.gain_at_ms(500.0), 1.0);
     }
 
     #[test]
@@ -3239,7 +3613,7 @@ pub fn add_cue(
     Ok(id)
 }
 
-fn apply_new_cue_output_defaults(
+pub(super) fn apply_new_cue_output_defaults(
     cue: Box<dyn Cue>,
     display: &crate::preferences::DisplayPreferences,
     registry: &crate::cue::registry::CueRegistry,
@@ -3258,7 +3632,7 @@ fn apply_new_cue_output_defaults(
 
 /// Video's file-independent black-bars default is known when the cue is
 /// created. Image defaults wait for the first assigned path to reveal format.
-fn apply_new_video_black_bars_default(
+pub(super) fn apply_new_video_black_bars_default(
     cue: Box<dyn Cue>,
     preferences: &GeneralPreferences,
     registry: &crate::cue::registry::CueRegistry,
@@ -3280,7 +3654,7 @@ fn new_cue_output_ids_for_type(
 ) -> Option<Vec<String>> {
     if !matches!(
         cue_type,
-        CueType::Video | CueType::Image | CueType::Camera | CueType::Browser | CueType::Text
+        CueType::Video | CueType::Image | CueType::Camera | CueType::Browser | CueType::Text | CueType::Timer
     ) {
         return None;
     }
@@ -3517,10 +3891,10 @@ fn targeted_cue_accepts_target(cue_type: &CueType, target_type: &CueType) -> boo
     match cue_type {
         CueType::Fade => matches!(
             target_type,
-            CueType::Audio | CueType::Video | CueType::Image | CueType::Camera | CueType::Group | CueType::Number
+            CueType::Audio | CueType::Video | CueType::Image | CueType::Camera | CueType::Group | CueType::Number | CueType::Presentation
         ),
         CueType::Devamp => {
-            matches!(target_type, CueType::Audio | CueType::Video | CueType::Group | CueType::Number)
+            matches!(target_type, CueType::Audio | CueType::Video | CueType::Group | CueType::Number | CueType::Presentation)
         }
         _ => targeted_cue_label(cue_type).is_some(),
     }
@@ -3528,7 +3902,7 @@ fn targeted_cue_accepts_target(cue_type: &CueType, target_type: &CueType) -> boo
 
 /// Apply the configured colour to a cue that has just been created. Existing
 /// cues are never revisited when preferences change.
-fn apply_default_cue_color(cue: &mut dyn Cue, preferences: &GeneralPreferences) {
+pub(super) fn apply_default_cue_color(cue: &mut dyn Cue, preferences: &GeneralPreferences) {
     let cue_type = cue.cue_type();
     cue.set_color(preferences.default_cue_color(&cue_type));
 }
@@ -4025,6 +4399,11 @@ pub fn update_cue(
             // Lock order: registry first, then workspace (matches duplicate_cue).
             let registry = state.registry.lock().map_err(|e| e.to_string())?;
             let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+            let runtime_context = crate::commands::transport_cmds::make_context_from_workspace(
+                &state,
+                &ws,
+                ws.preferences.audio.default_fade_out_ms,
+            );
             // Snapshot the patch table before borrowing the cue list: a live matrix
             // edit needs the same channel mapping the GO path used.
             let patch_channels_by_id: Vec<(Uuid, Vec<u16>)> = ws
@@ -4037,6 +4416,7 @@ pub fn update_cue(
             let in_place_patch = {
                 let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
                 let cue = cue_list.get_recursive(&id).ok_or("Cue not found")?;
+                validate_presentation_video_mode_update(cue, &properties)?;
                 let patch = classify_live_in_place_patch(&properties, cue.cue_type())?;
                 if patch.is_none() {
                     reject_group_rebuild(cue, &properties)?;
@@ -4046,6 +4426,7 @@ pub fn update_cue(
 
             if let Some(patch) = in_place_patch {
                 let audio_patch = patch.audio.clone();
+                let refresh_visual = patch.visual.is_some();
                 {
                     let cue_list = ws.active_cue_list().ok_or("No active cue list")?;
                     let snapshot = super::undo_cmds::take_snapshot(cue_list);
@@ -4059,6 +4440,9 @@ pub fn update_cue(
                 let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
                 let cue = cue_list.get_mut_recursive(&id).ok_or("Cue not found")?;
                 apply_single_in_place_patch(cue, patch);
+                if refresh_visual {
+                    cue.refresh_live_visual(&runtime_context);
+                }
                 apply_existing_cue_live_side_effects(
                     cue,
                     &state,
@@ -4130,10 +4514,12 @@ pub fn update_cue(
                         }
                     }
                     let runtime = cue.runtime_state();
+                    let runtime_extension = cue.runtime_extension();
                     let mut new_cue = registry.from_json(json).map_err(|e| e.to_string())?;
                     restore_decoded_audio_recursive(new_cue.as_mut(), &preserved_audio);
                     restore_stream_audio_recursive(new_cue.as_mut(), &preserved_streams);
                     new_cue.restore_runtime_state(runtime);
+                    if let Some(extension) = runtime_extension { new_cue.restore_runtime_extension(extension); }
                     new_cue
                 };
 
@@ -4153,8 +4539,10 @@ pub fn update_cue(
                 let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
                 cue_list.replace_cue_recursive(&id, new_cue);
                 let cue = cue_list
-                    .get_recursive(&id)
+                    .get_mut_recursive(&id)
                     .ok_or("Cue disappeared during update")?;
+                cue.refresh_runtime_after_rebuild(&runtime_context)
+                    .map_err(|e| e.to_string())?;
                 apply_existing_cue_live_side_effects(
                     cue,
                     &state,
@@ -4614,7 +5002,7 @@ fn replace_file_backed_cue_path(
 
 /// Apply an image format default only to an unassigned image cue whose
 /// black-bars value still matches the cue type's built-in default.
-fn apply_initial_image_black_bars_default(
+pub(super) fn apply_initial_image_black_bars_default(
     json: &mut serde_json::Value,
     file_path: &str,
     defaults: &DefaultBlackBarsPreferences,
@@ -4637,6 +5025,81 @@ fn apply_initial_image_black_bars_default(
 
 fn video_preload_matches_current_path(cue: &dyn Cue, path: &std::path::Path) -> bool {
     cue.media_file_path() == Some(path)
+}
+
+/// Preload video duration and paired audio metadata using one bounded worker.
+/// Imports can add many Video Cues at once, so they share the same path and
+/// streaming setup as `set_video_file` without spawning one worker per row.
+pub(crate) fn schedule_video_preload(
+    state: &AppState,
+    app_handle: tauri::AppHandle,
+    assignments: Vec<(Uuid, std::path::PathBuf, Option<Duration>)>,
+) {
+    if assignments.is_empty() { return; }
+    let mut by_path: HashMap<std::path::PathBuf, Vec<(Uuid, Option<Duration>)>> = HashMap::new();
+    for (id, path, duration) in assignments {
+        by_path.entry(path).or_default().push((id, duration));
+    }
+    if let Ok(mut loading) = state.loading_cues.lock() {
+        for assigned in by_path.values() { loading.extend(assigned.iter().map(|(id, _)| *id)); }
+    }
+    let loading_ids: Vec<Uuid> = by_path.values().flatten().map(|(id, _)| *id).collect();
+
+    let workspace = Arc::clone(&state.workspace);
+    let loading_cues = Arc::clone(&state.loading_cues);
+    let output_engine = Arc::clone(&state.output_engine);
+    let handle = app_handle.clone();
+    let spawn = std::thread::Builder::new().name("inkue-video-import-preload".into()).spawn(move || {
+        for (path, ids) in by_path {
+            let duration = ids.iter().find_map(|(_, duration)| *duration).or_else(|| {
+                output_engine.try_mpv_lib_arc()
+                    .and_then(|lib| crate::engine::OutputEngine::probe_duration(&lib, &path))
+            });
+            let audio = crate::cue::media_decode::probe_audio_track(&path);
+            let mut current_ids = HashSet::new();
+            let mut found_ids = HashSet::new();
+            if let Ok(mut ws) = workspace.lock() {
+                for (id, _) in &ids {
+                    'lists: for list in &mut ws.cue_lists {
+                        if let Some(cue) = list.get_mut_recursive(id) {
+                            found_ids.insert(*id);
+                            if !video_preload_matches_current_path(cue, &path) { break 'lists; }
+                            current_ids.insert(*id);
+                            if let Some(duration) = duration { cue.set_runtime_duration(duration); }
+                            match &audio {
+                                Ok(Some(info)) => cue.accept_preloaded_stream(
+                                    path.clone(),
+                                    info.channels,
+                                    info.sample_rate,
+                                    info.total_frames.map(|frames| Duration::from_secs_f64(
+                                        frames as f64 / info.sample_rate.max(1) as f64,
+                                    )),
+                                ),
+                                Ok(None) => {},
+                                Err(error) => log::warn!("Video audio metadata probe failed for {path:?}: {error}"),
+                            }
+                            break 'lists;
+                        }
+                    }
+                }
+            }
+            if let Ok(mut loading) = loading_cues.lock() {
+                for (id, _) in &ids {
+                    if current_ids.contains(id) || !found_ids.contains(id) { loading.remove(id); }
+                }
+            }
+            if duration.is_none() {
+                log::warn!("Video duration probe returned no duration for {}", path.display());
+            }
+        }
+        let _ = handle.emit("workspace-modified", serde_json::json!({}));
+    });
+    if let Err(error) = spawn {
+        log::error!("Could not start video preload worker: {error}");
+        if let Ok(mut loading) = state.loading_cues.lock() {
+            for id in loading_ids { loading.remove(&id); }
+        }
+    }
 }
 
 /// Set the file path of an audio cue.
@@ -4803,6 +5266,7 @@ struct PreviewSource {
     trim_end_ms: Option<u64>,
     rate: f32,
     loop_count: u32,
+    gain_envelope: Option<crate::cue::gain_envelope::GainEnvelope>,
 }
 
 #[derive(Clone)]
@@ -4887,6 +5351,11 @@ fn build_preview_voice(
         crate::cue::types::db_to_linear(source.volume_db) as f32,
         source.pan.clamp(-1.0, 1.0),
     );
+    if let Some(envelope) = source.gain_envelope.as_ref() {
+        let rt = envelope.to_rt().map_err(|error| error.to_string())?;
+        // SAFETY: this preview voice has not been submitted to an audio callback.
+        unsafe { voice.set_initial_gain_envelope(rt); }
+    }
     // `fill_buffer` already performs source/output sample-rate conversion, so
     // rate here is only the cue's user-selected rate multiplier.
     voice.inner.set_rate(source.rate.clamp(0.1, 4.0));
@@ -4965,6 +5434,9 @@ fn preview_source_from_parts(
             .and_then(|value| value.as_u64())
             .map(|value| value.min(u32::MAX as u64) as u32)
             .unwrap_or(0),
+        gain_envelope: json.get("gain_envelope")
+            .and_then(|raw| serde_json::from_value::<crate::cue::gain_envelope::GainEnvelope>(raw.clone()).ok())
+            .filter(|envelope| !envelope.points.is_empty()),
     })
 }
 
@@ -5075,6 +5547,14 @@ fn streaming_preview_voice(
         crate::cue::types::db_to_linear(json.get("volume_db").and_then(|value| value.as_f64()).unwrap_or(0.0)) as f32,
         json.get("pan").and_then(|value| value.as_f64()).unwrap_or(0.0) as f32,
     );
+    if let Some(envelope) = json.get("gain_envelope")
+        .and_then(|raw| serde_json::from_value::<crate::cue::gain_envelope::GainEnvelope>(raw.clone()).ok())
+        .filter(|envelope| !envelope.points.is_empty())
+    {
+        let rt = envelope.to_rt().map_err(|error| error.to_string())?;
+        // SAFETY: this preview voice has not been submitted to an audio callback.
+        unsafe { voice.set_initial_gain_envelope(rt); }
+    }
     voice.frame_pos.store(start_frame, Ordering::Relaxed);
     voice.loop_start_frame.store(trim_start_ms.saturating_mul(sample_rate as u64) / 1000, Ordering::Relaxed);
     voice.inner.loops_remaining.store(loops, Ordering::Relaxed);
@@ -5794,13 +6274,6 @@ pub fn set_video_file(
     replace_file_backed_cue_path(cue_list, &registry, &id, CueType::Video, &file_path, None)?;
     drop(registry);
 
-    // Mark as loading — the audio track is decoded off-thread (the indicator
-    // clears when decoding finishes), mirroring Audio Cues.
-    {
-        let mut loading = state.loading_cues.lock().map_err(|e| e.to_string())?;
-        loading.insert(id);
-    }
-
     drop(ws); // release the workspace lock before any background work
     invalidate_media_metadata_path(
         &state,
@@ -5808,69 +6281,12 @@ pub fn set_video_file(
         workspace_dir.as_deref(),
     );
 
-    // Probe the video duration (mpv) and audio metadata (symphonia). The audio
-    // preload starts a bounded stream instead of retaining a full PCM copy.
-    {
-        let path = std::path::PathBuf::from(&file_path);
-        let cue_id = id;
-        let output_engine = Arc::clone(&state.output_engine);
-        let workspace2 = Arc::clone(&state.workspace);
-        let loading_cues = state.loading_cues.clone();
-        let handle2 = app_handle.clone();
-        std::thread::Builder::new()
-            .name("inkue-video-load".into())
-            .spawn(move || {
-                let duration = output_engine
-                    .try_mpv_lib()
-                    .and_then(|lib| crate::engine::OutputEngine::probe_duration(lib, &path));
-                let audio = crate::cue::media_decode::probe_audio_track(&path);
-
-                // Search all cue lists — the user may have switched lists while loading.
-                let mut assignment_is_current = false;
-                let mut cue_still_exists = false;
-                if let Ok(mut ws) = workspace2.lock() {
-                    'store: {
-                        for cl in ws.cue_lists.iter_mut() {
-                            if let Some(cue) = cl.get_mut_recursive(&cue_id) {
-                                cue_still_exists = true;
-                                // A later file assignment may have replaced this source
-                                // while its probe was running. Do not apply stale duration
-                                // or audio state to the newly assigned media.
-                                if !video_preload_matches_current_path(cue, &path) {
-                                    break 'store;
-                                }
-                                assignment_is_current = true;
-                                if let Some(dur) = duration {
-                                    cue.set_runtime_duration(dur);
-                                }
-                                match audio {
-                                    Ok(Some(info)) => cue.accept_preloaded_stream(
-                                        path.clone(),
-                                        info.channels,
-                                        info.sample_rate,
-                                        info.total_frames.map(|frames| std::time::Duration::from_secs_f64(
-                                            frames as f64 / info.sample_rate.max(1) as f64,
-                                        )),
-                                    ),
-                                    Ok(None) => {} // silent video — no audio track
-                                    Err(e) => {
-                                        log::warn!("Video audio decode failed for {path:?}: {e}");
-                                    }
-                                }
-                                break 'store;
-                            }
-                        }
-                    }
-                }
-                if assignment_is_current || !cue_still_exists {
-                    if let Ok(mut loading) = loading_cues.lock() {
-                        loading.remove(&cue_id);
-                    }
-                }
-                let _ = handle2.emit("workspace-modified", serde_json::json!({}));
-            })
-            .ok();
-    }
+    // Probe duration and streaming audio metadata on one bounded worker.
+    schedule_video_preload(
+        &state,
+        app_handle.clone(),
+        vec![(id, std::path::PathBuf::from(&file_path), None)],
+    );
 
     let _ = app_handle.emit("workspace-modified", serde_json::json!({}));
     Ok(())
@@ -7427,6 +7843,7 @@ mod tests {
             trim_end_ms: Some(6_000),
             rate: 1.0,
             loop_count: 2,
+            gain_envelope: None,
         };
         // Number clock 7.5 s, action starts at 1 s: 6.5 s into a 4 s crop.
         // The second pass is at source 4.5 s (2 s crop start + 2.5 s).
@@ -7448,6 +7865,7 @@ mod tests {
                 trim_end_ms: Some(8_000),
                 rate: 2.0,
                 loop_count: 0,
+                gain_envelope: None,
             },
             offset_ms: 0,
             is_master: true,
@@ -7469,6 +7887,7 @@ mod tests {
                 trim_end_ms: Some(8_000),
                 rate: 2.0,
                 loop_count: 0,
+                gain_envelope: None,
             },
             offset_ms: 500,
             is_master: false,
@@ -7479,6 +7898,12 @@ mod tests {
 
     #[test]
     fn preview_uses_the_requested_file_position_inside_the_clip_window() {
+        let curve = crate::cue::gain_envelope::GainEnvelope {
+            points: vec![
+                crate::cue::gain_envelope::GainEnvelopePoint { time_ms: 0, gain: 0.1 },
+                crate::cue::gain_envelope::GainEnvelopePoint { time_ms: 9_000, gain: 0.9 },
+            ],
+        };
         let voice = build_preview_voice(
             PreviewSource {
                 samples: std::sync::Arc::new(vec![0.0; 10_000]),
@@ -7490,6 +7915,7 @@ mod tests {
                 trim_end_ms: Some(8_000),
                 rate: 1.5,
                 loop_count: 0,
+                gain_envelope: Some(curve),
             },
             Some(5_250),
             None,
@@ -7504,6 +7930,8 @@ mod tests {
         // SAFETY: build_preview_voice has not submitted this voice to an RT callback.
         assert_eq!(unsafe { *voice.inner.end_frame.get() }, Some(8_000));
         assert_eq!(voice.inner.rate(), 1.5);
+        // The preview uses the same file-time curve as GO, including after a seek.
+        assert!((unsafe { (&*voice.inner.gain_envelope.get()).envelope().gain_at_frame(5_250.0, 1_000) } - 0.56666666).abs() < 1e-5);
     }
 
     #[test]
@@ -7519,6 +7947,7 @@ mod tests {
                 trim_end_ms: Some(8_000),
                 rate: 1.0,
                 loop_count: 0,
+                gain_envelope: None,
             },
             Some(8_000),
             None,

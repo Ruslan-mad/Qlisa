@@ -4,6 +4,7 @@ use std::ffi::c_void;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::cue::types::PresentationVideoLayout;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -61,9 +62,8 @@ fn geometry_default_scale() -> f64 {
 }
 
 /// Per-cue visual geometry for Video and Image cues, applied to the output
-/// surface via mpv properties (`video-zoom`, `video-pan-x/y`, `video-rotate`,
-/// `keepaspect`, `panscan`, `video-crop`) on every load — and live when the
-/// cue currently on screen is edited in the inspector.
+/// surface via mpv display properties and a post-layout compositor clip mask.
+/// Geometry updates apply live when the cue is currently on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct VideoGeometry {
     #[serde(default)]
@@ -77,12 +77,12 @@ pub struct VideoGeometry {
     /// Linear scale factor (1.0 = 100 %).  mpv `video-zoom` is `log2(scale)`.
     #[serde(default = "geometry_default_scale")]
     pub scale: f64,
-    /// Clockwise rotation in degrees (0–359).
+    /// Clockwise rotation in degrees (0–360; 360 is preserved as an authored neutral value).
     #[serde(default)]
     pub rotation: u32,
-    /// Crop per edge as a fraction of the source size (0 .. 0.45 each).
-    /// Converted to mpv's pixel-based `video-crop` once the source dimensions
-    /// are known (the crop applies to the source rect, before rotation).
+    /// Clip per edge as a fraction of the full source size (0 .. 1).
+    /// The compositor applies this after the full source has been laid out,
+    /// so the remaining pixels keep their original positions.
     #[serde(default)]
     pub crop_left: f64,
     #[serde(default)]
@@ -137,26 +137,23 @@ impl VideoGeometry {
         }
     }
 
-    /// Pixel rect `(w, h, x, y)` for mpv `video-crop`, computed against the
-    /// actual source dimensions.  `None` = no crop configured.
-    ///
-    /// Edges are clamped to 0.45 each so the remaining rect is never empty.
-    pub fn crop_rect_px(&self, src_w: u32, src_h: u32) -> Option<(u32, u32, u32, u32)> {
-        if !self.has_crop() || src_w == 0 || src_h == 0 {
+    /// Normalized source-coordinate bounds `(left, top, right, bottom)`.
+    /// Opposite edges are independent: equal or crossed bounds describe an
+    /// empty clip instead of being normalized into a smaller crop.
+    pub fn source_crop_bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        if !self.has_crop() {
             return None;
         }
-        let clamp = |v: f64| v.clamp(0.0, 0.45);
+        let clamp = |v: f64| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
         let (l, r) = (clamp(self.crop_left), clamp(self.crop_right));
         let (t, b) = (clamp(self.crop_top), clamp(self.crop_bottom));
-        let x = (src_w as f64 * l).round() as u32;
-        let y = (src_h as f64 * t).round() as u32;
-        let w = ((src_w as f64 * (1.0 - l - r)).round() as u32)
-            .max(2)
-            .min(src_w - x);
-        let h = ((src_h as f64 * (1.0 - t - b)).round() as u32)
-            .max(2)
-            .min(src_h - y);
-        Some((w, h, x, y))
+        Some((l, t, 1.0 - r, 1.0 - b))
     }
 }
 
@@ -288,7 +285,7 @@ pub(crate) fn compose_display_props(
     cue: &VideoGeometry,
     transform: &OutputTransform,
 ) -> EffectiveDisplayProps {
-    let rotation = (cue.rotation.min(359) as f64 + transform.rotation).rem_euclid(360.0);
+    let rotation = ((cue.rotation % 360) as f64 + transform.rotation).rem_euclid(360.0);
     EffectiveDisplayProps {
         zoom_log2: cue.mpv_video_zoom() + transform.scale.max(0.01).log2(),
         pan_x: cue.pan_x + transform.pan_x,
@@ -385,6 +382,8 @@ pub struct ContentRequest<'a> {
     pub hold_last_frame: bool,
     /// Per-cue visual geometry (fit / pan / scale / rotate / crop).
     pub geometry: VideoGeometry,
+    /// Optional slide-relative frame for imported presentation video.
+    pub presentation_video_layout: Option<PresentationVideoLayout>,
     /// Camera / network feeds: apply low-latency demuxer options (no cache,
     /// minimal analyzeduration) instead of the file-playback defaults.
     pub live_source: bool,
@@ -525,7 +524,7 @@ mod tests {
         assert_eq!(g.scale, 1.0);
         assert_eq!(g.fit_mode, FitMode::Fit);
         assert_eq!(g.mpv_video_zoom(), 0.0);
-        assert_eq!(g.crop_rect_px(1920, 1080), None);
+        assert_eq!(g.source_crop_bounds(), None);
     }
 
     #[test]
@@ -578,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn geometry_crop_rect_px_math() {
+    fn geometry_crop_bounds_are_source_relative() {
         let g = VideoGeometry {
             crop_left: 0.1,
             crop_right: 0.1,
@@ -586,31 +585,29 @@ mod tests {
             crop_bottom: 0.25,
             ..Default::default()
         };
-        // 1920x1080: 10% off each side, 25% off top/bottom.
-        let (w, h, x, y) = g.crop_rect_px(1920, 1080).unwrap();
-        assert_eq!((w, h, x, y), (1536, 540, 192, 270));
+        assert_eq!(g.source_crop_bounds(), Some((0.1, 0.25, 0.9, 0.75)));
     }
 
     #[test]
-    fn geometry_crop_clamps_excessive_edges() {
+    fn geometry_crop_preserves_crossed_edges_as_empty() {
         let g = VideoGeometry {
-            crop_left: 0.9,
-            crop_right: 0.9,
+            crop_left: 0.96,
+            crop_right: 0.05,
             ..Default::default()
         };
-        // 0.9 per edge clamps to 0.45 each — the rect never collapses.
-        let (w, _h, x, _y) = g.crop_rect_px(1000, 1000).unwrap();
-        assert!(w >= 2);
-        assert!(x + w <= 1000);
+        let bounds = g.source_crop_bounds().unwrap();
+        assert_eq!(bounds.0, 0.96);
+        assert_eq!(bounds.2, 0.95);
+        assert!(bounds.0 >= bounds.2);
     }
 
     #[test]
-    fn geometry_crop_zero_source_is_none() {
+    fn geometry_crop_can_reach_source_edges() {
         let g = VideoGeometry {
-            crop_left: 0.1,
+            crop_left: 1.0,
             ..Default::default()
         };
-        assert_eq!(g.crop_rect_px(0, 1080), None);
+        assert_eq!(g.source_crop_bounds(), Some((1.0, 0.0, 1.0, 1.0)));
     }
 
     #[test]
@@ -635,8 +632,12 @@ mod tests {
         // Pre-1.3 workspaces have no layer_style: empty object = defaults.
         let empty: LayerStyle = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(empty.is_default());
-        let explicit_false: LayerStyle = serde_json::from_value(serde_json::json!({"black_bars": false})).unwrap();
-        assert_eq!(serde_json::to_value(explicit_false).unwrap()["black_bars"], false);
+        let explicit_false: LayerStyle =
+            serde_json::from_value(serde_json::json!({"black_bars": false})).unwrap();
+        assert_eq!(
+            serde_json::to_value(explicit_false).unwrap()["black_bars"],
+            false
+        );
     }
 
     #[test]
@@ -715,6 +716,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(compose_display_props(&cue, &t).rotation, 90);
+    }
+
+    #[test]
+    fn authored_360_is_preserved_but_composes_as_zero() {
+        let cue = VideoGeometry {
+            rotation: 360,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(cue).unwrap();
+        assert_eq!(json["rotation"], 360);
+        let restored: VideoGeometry = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.rotation, 360);
+        assert_eq!(
+            compose_display_props(&restored, &OutputTransform::default()).rotation,
+            0
+        );
     }
 
     #[test]

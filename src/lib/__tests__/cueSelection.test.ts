@@ -35,6 +35,15 @@ describe("cue selection helpers", () => {
       .toEqual(["number", "child"]);
   });
 
+  it("flattens expanded Presentation pages and their video cues", () => {
+    const cues = [{ id: "presentation", cue_type: "presentation", children: [
+      { id: "page-1", cue_type: "image" },
+      { id: "video-1", cue_type: "video" },
+    ] }];
+    expect(flattenVisibleCueTree(cues, new Set(["presentation"])).map(({ cue }) => cue.id))
+      .toEqual(["presentation", "page-1", "video-1"]);
+  });
+
   it("treats Ctrl and Command as equivalent multi-select modifiers", () => {
     expect(isMultiSelectModifier(true, false)).toBe(true);
     expect(isMultiSelectModifier(false, true)).toBe(true);

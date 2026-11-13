@@ -363,6 +363,7 @@ impl GeneralPreferences {
             (CueType::Group, CueColor::Yellow),
             (CueType::Memo, CueColor::Black),
             (CueType::Number, CueColor::Yellow),
+            (CueType::Presentation, CueColor::Pink),
             (CueType::Pause, CueColor::Red),
             (CueType::Resume, CueColor::Green),
             (CueType::Start, CueColor::Green),
@@ -1067,6 +1068,7 @@ mod tests {
         assert_eq!(prefs.default_cue_color(&CueType::Fade), CueColor::Orange);
         assert_eq!(prefs.default_cue_color(&CueType::Group), CueColor::Yellow);
         assert_eq!(prefs.default_cue_color(&CueType::Number), CueColor::Yellow);
+        assert_eq!(prefs.default_cue_color(&CueType::Presentation), CueColor::Pink);
         assert_eq!(prefs.default_cue_color(&CueType::Memo), CueColor::Black);
         assert_eq!(prefs.default_cue_color(&CueType::Pause), CueColor::Red);
         assert_eq!(prefs.default_cue_color(&CueType::Resume), CueColor::Green);

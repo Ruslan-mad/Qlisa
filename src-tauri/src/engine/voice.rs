@@ -13,6 +13,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::ring_command::{FadeCurve, VoiceId};
+use crate::cue::gain_envelope::{GainEnvelopeRt, GainEnvelopeState};
 use crate::cue::media_decode::{StreamPlaybackState, StreamingAudioSource};
 
 // ---------------------------------------------------------------------------
@@ -258,6 +259,9 @@ pub struct VoiceInner {
     /// Active fade, if any.  Mutated exclusively from inside the callback.
     /// SAFETY: only ever accessed from the single RT callback thread.
     pub fade: UnsafeCell<Option<FadeState>>,
+    /// Source-file gain automation. Initialized before submission and then
+    /// replaced only by commands consumed on the audio callback thread.
+    pub gain_envelope: UnsafeCell<GainEnvelopeState>,
     /// Optional end-frame marker.  Written once before voice is submitted.
     pub end_frame: UnsafeCell<Option<u64>>,
     /// Optional slice program (QLab slices).  Written once before the voice is
@@ -498,6 +502,14 @@ pub struct Voice {
 use std::sync::atomic::AtomicU64;
 
 impl Voice {
+    /// Set the initial source-time envelope before the voice enters any pool.
+    ///
+    /// # Safety
+    /// Call only before submitting this voice to an audio callback.
+    pub unsafe fn set_initial_gain_envelope(&self, envelope: GainEnvelopeRt) {
+        *self.inner.gain_envelope.get() = GainEnvelopeState::with_envelope(envelope);
+    }
+
     /// Create a new idle voice from pre-decoded samples.
     pub fn new(
         samples: Arc<Vec<f32>>,
@@ -530,6 +542,7 @@ impl Voice {
                 rate_bits: AtomicU32::new(f32::to_bits(1.0_f32)),
                 patch_gain_bits: AtomicU32::new(f32::to_bits(1.0_f32)),
                 fade: UnsafeCell::new(None),
+                gain_envelope: UnsafeCell::new(GainEnvelopeState::default()),
                 end_frame: UnsafeCell::new(None),
                 slices: UnsafeCell::new(None),
                 devamp_request: AtomicU8::new(DEVAMP_NONE),
@@ -576,6 +589,7 @@ impl Voice {
                 rate_bits: AtomicU32::new(f32::to_bits(1.0_f32)),
                 patch_gain_bits: AtomicU32::new(f32::to_bits(1.0_f32)),
                 fade: UnsafeCell::new(None),
+                gain_envelope: UnsafeCell::new(GainEnvelopeState::default()),
                 end_frame: UnsafeCell::new(None),
                 slices: UnsafeCell::new(None),
                 devamp_request: AtomicU8::new(DEVAMP_NONE),
@@ -621,6 +635,7 @@ impl Voice {
                 rate_bits: AtomicU32::new(f32::to_bits(1.0_f32)),
                 patch_gain_bits: AtomicU32::new(f32::to_bits(1.0_f32)),
                 fade: UnsafeCell::new(None),
+                gain_envelope: UnsafeCell::new(GainEnvelopeState::default()),
                 end_frame: UnsafeCell::new(None),
                 slices: UnsafeCell::new(None),
                 devamp_request: AtomicU8::new(DEVAMP_NONE),
@@ -654,19 +669,31 @@ impl Voice {
         self.frame_pos.load(Ordering::Relaxed)
     }
 
-    pub fn set_playing(&self) {
+    fn transition_from_nonterminal(&self, target: VoiceState) -> bool {
         self.state
-            .store(VoiceState::Playing as u8, Ordering::Release);
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current != VoiceState::Stopped as u8).then_some(target as u8)
+            })
+            .is_ok()
+    }
+
+    pub fn set_playing(&self) -> bool {
+        if !self.transition_from_nonterminal(VoiceState::Playing) {
+            return false;
+        }
         if let Some(stream) = &self.stream {
             stream.set_playback_state(StreamPlaybackState::Playing);
         }
+        true
     }
-    pub fn set_paused(&self) {
-        self.state
-            .store(VoiceState::Paused as u8, Ordering::Release);
+    pub fn set_paused(&self) -> bool {
+        if !self.transition_from_nonterminal(VoiceState::Paused) {
+            return false;
+        }
         if let Some(stream) = &self.stream {
             stream.set_playback_state(StreamPlaybackState::Paused);
         }
+        true
     }
     pub fn set_stopped(&self) {
         if let Some(stream) = &self.stream {
@@ -742,7 +769,7 @@ impl Voice {
 
 #[cfg(test)]
 mod tests {
-    use super::{Voice, VoiceState};
+    use super::{StreamPlaybackState, Voice, VoiceState};
     use std::sync::Arc;
 
     #[test]
@@ -753,5 +780,38 @@ mod tests {
         assert!(voice.complete_once());
         assert_eq!(voice.voice_state(), VoiceState::Stopped);
         assert!(!voice.complete_once());
+    }
+
+    #[test]
+    fn stopped_voice_cannot_be_resumed_or_paused_again() {
+        let source = crate::cue::media_decode::streaming_tests::test_source(
+            StreamPlaybackState::Paused,
+            false,
+            0,
+        );
+        let voice = Voice::new_stream(Arc::clone(&source), 1.0, 0.0);
+        voice.set_paused();
+        voice.set_stopped();
+
+        assert!(!voice.set_paused(), "late Pause must not resurrect a stopped voice");
+        assert!(!voice.set_playing(), "late Resume must not resurrect a stopped voice");
+        assert_eq!(voice.voice_state(), VoiceState::Stopped);
+        assert!(source.is_cancelled());
+        assert_eq!(source.diagnostics().state, StreamPlaybackState::Paused);
+    }
+
+    #[test]
+    fn paused_stream_voice_can_still_resume_normally() {
+        let source = crate::cue::media_decode::streaming_tests::test_source(
+            StreamPlaybackState::Paused,
+            true,
+            8,
+        );
+        let voice = Voice::new_stream(Arc::clone(&source), 1.0, 0.0);
+        voice.set_paused();
+
+        assert!(voice.set_playing());
+        assert_eq!(voice.voice_state(), VoiceState::Playing);
+        assert_eq!(source.diagnostics().state, StreamPlaybackState::Playing);
     }
 }

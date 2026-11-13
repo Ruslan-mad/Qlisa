@@ -1,0 +1,20 @@
+{
+  "derivation": "Decoded MP3 to WAV PCM16 stereo at 48 kHz. No gain normalization, trimming, fades, or other processing.",
+  "derived_file": "notification_1.wav",
+  "upstream": "User-provided source; no public URL",
+  "encoding": "PCM signed 16-bit little-endian",
+  "peak_dbfs": -12.199292,
+  "notes": "Source has about 0.18 s leading silence and 0.88 s trailing silence below -55 dBFS; retained as provided.",
+  "channel_layout": "stereo",
+  "duration_seconds": 6.414146,
+  "derived_sha256": "67a4532ace72aef8fa2a4b5bbba5aa9b23145bdafbf70e028b5b3c6de961408c",
+  "rms_dbfs": -29.646593,
+  "sample_rate_hz": 48000,
+  "source_type": "user_provided",
+  "channels": 2,
+  "source_author": "not provided",
+  "source_license": "not specified",
+  "source_file": "zakoncheno.mp3",
+  "conversion_command": "ffmpeg -i zakoncheno.mp3 -ar 48000 -ac 2 -c:a pcm_s16le notification_1.wav",
+  "source_sha256": "629083a49b40fa53c5b0018e354d696ad8b1ad20bdbb965210ffb18a8085d412"
+}

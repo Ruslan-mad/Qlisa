@@ -47,6 +47,66 @@
   font-weight: 500;
 }
 
+.cart-cue-inspector-button {
+  display: grid;
+  flex: 0 0 28px;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  appearance: none;
+  border: 1px solid var(--wc-border-strong, var(--wc-border, #31516b));
+  border-radius: 6px;
+  background: var(--wc-bg-surface, #091b2b);
+  color: var(--wc-text-muted, #829bb2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+  transition: color 80ms ease, background-color 80ms ease, border-color 80ms ease, box-shadow 80ms ease;
+}
+
+.cart-cue-inspector-button__icon {
+  pointer-events: none;
+  transform: translateY(0) scale(1);
+  transition: transform 80ms ease;
+}
+
+.cart-cue-inspector-button:hover {
+  border-color: var(--wc-border-strong, #31516b);
+  background: var(--wc-bg-hover, #102a3e);
+  color: var(--wc-text, #d5e5f3);
+}
+
+.cart-cue-inspector-button:active {
+  background: var(--wc-bg-selected, #12354a);
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.3);
+}
+
+.cart-cue-inspector-button:active .cart-cue-inspector-button__icon {
+  transform: translateY(1px) scale(0.9);
+}
+
+.cart-cue-inspector-button:focus-visible {
+  outline: 2px solid var(--wc-accent, #39c9e8);
+  outline-offset: 2px;
+}
+
+.cart-cue-inspector-button[aria-pressed="true"] {
+  border-color: var(--wc-accent, #39c9e8);
+  background: var(--wc-accent-dim, rgba(57, 201, 232, 0.16));
+  color: var(--wc-accent-hover, var(--wc-accent, #39c9e8));
+  box-shadow: inset 0 0 0 1px rgba(57, 201, 232, 0.12);
+}
+
+.cart-cue-inspector-button[aria-pressed="true"]:hover {
+  background: var(--wc-bg-hover, #102a3e);
+  color: var(--wc-accent-hover, var(--wc-accent, #39c9e8));
+}
+
+.cart-cue-inspector-button[aria-pressed="true"]:active {
+  background: var(--wc-bg-selected, #12354a);
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.3);
+}
+
 :root[data-theme="stage"] [data-cue-id]:hover {
   filter: brightness(1.08);
 }
@@ -119,9 +179,10 @@
 
 @media (max-width: 1400px) {
   :root[data-theme="stage"] .stage-transport {
-    height: auto !important;
-    min-height: 96px;
-    flex-wrap: wrap;
+    height: 104px !important;
+    min-height: 104px;
+    flex-wrap: nowrap;
+    overflow-x: hidden;
   }
 
   :root[data-theme="stage"] .stage-transport-button {
@@ -131,7 +192,8 @@
   }
 
   :root[data-theme="stage"] .stage-running-cues {
-    flex: 1 1 180px !important;
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
   }
 
   :root[data-theme="stage"] .stage-master-area {
@@ -139,8 +201,12 @@
     min-width: 0;
   }
 
+  :root[data-theme="stage"] .stage-transport-right .stage-master-area {
+    min-width: 248px;
+  }
+
   :root[data-theme="stage"] .stage-transport-secondary {
-    flex: 1 1 420px;
+    flex: 0 0 auto;
     min-width: 0;
   }
 
@@ -151,11 +217,11 @@
 
 @media (max-width: 900px) {
   :root[data-theme="stage"] .stage-transport {
-    align-items: stretch;
+    align-items: center;
   }
 
   :root[data-theme="stage"] .stage-transport-secondary {
-    flex: 1 1 100%;
+    flex: 0 0 auto;
     min-width: 0;
   }
 
@@ -180,4 +246,31 @@
   color: #fff !important;
   background: #c62828 !important;
   border-color: #ef4444 !important;
+}
+
+.presentation-nav-button {
+  transition: background-color 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+
+.presentation-nav-button:not(:disabled):hover {
+  background: var(--wc-bg-hover) !important;
+  border-color: var(--wc-accent) !important;
+}
+
+.presentation-nav-button:focus-visible {
+  outline: 2px solid var(--wc-accent);
+  outline-offset: 2px;
+}
+
+.presentation-nav-button:not(:disabled):active svg {
+  transform: translateX(1px);
+}
+
+.presentation-nav-button:not(:disabled):active {
+  background: var(--wc-bg-hover) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.presentation-nav-button svg {
+  transition: transform 100ms ease;
 }

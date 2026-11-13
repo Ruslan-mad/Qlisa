@@ -19,7 +19,7 @@ use crossbeam_channel::Receiver;
 
 use common::{
     full_registry, preload_silent_video_audio, recording_context, recording_context_headless,
-    recording_context_with_voice_liveness, CallLog, EngineCall,
+    recording_context_with_video_audio_voice, recording_context_with_voice_liveness, CallLog, EngineCall,
 };
 use inkue_lib::cue::audio_cue::AudioCue;
 use inkue_lib::cue::camera_cue::CameraCue;
@@ -31,7 +31,7 @@ use inkue_lib::cue::image_cue::ImageCue;
 use inkue_lib::cue::registry::CueRegistry;
 use inkue_lib::cue::traits::{Cue, RuntimeState};
 use inkue_lib::cue::wait_cue::WaitCue;
-use inkue_lib::cue::types::{ContinueMode, CueState, CueType, FadeCurve, FadeSpec, GroupMode};
+use inkue_lib::cue::types::{ContinueMode, CueState, CueType, FadeCurve, FadeSpec, GroupMode, PresentationVideoLayout, PresentationVideoMode};
 use inkue_lib::cue::video_cue::VideoCue;
 use inkue_lib::show::cue_list::CueList;
 use inkue_lib::show::transport::Transport;
@@ -71,6 +71,81 @@ fn background_number(reg: &CueRegistry) -> (Box<dyn Cue>, inkue_lib::cue::types:
     number.set_number_master(master_id).unwrap();
     number.set_background_screensaver(true);
     (Box::new(number), master_id, master_id)
+}
+
+#[test]
+fn direct_media_background_flags_protect_stops_and_panic_but_allow_active_cue_stop() {
+    let paired_audio_voice = uuid::Uuid::new_v4();
+    let (ctx, _rx, log) = recording_context_with_video_audio_voice(paired_audio_voice);
+
+    let mut audio = AudioCue::new();
+    audio.loop_count = u32::MAX;
+    audio.accept_preloaded_audio(
+        Arc::new(vec![0.0_f32; 4_800]),
+        1,
+        48_000,
+        Duration::from_secs(30),
+    );
+    audio.go(&ctx).unwrap();
+    let audio_id = audio.id();
+    let audio_voice = audio.playing_voice_id().expect("audio voice");
+    audio.set_background_screensaver(true);
+
+    let mut video = VideoCue::new();
+    video.file_path = Some("virtual/background.mp4".into());
+    video.loop_count = u32::MAX;
+    preload_silent_video_audio(&mut video);
+    video.go(&ctx).unwrap();
+    let video_id = video.id();
+    let video_voice = video.playing_voice_id().expect("video voice");
+    video.set_background_screensaver(true);
+
+    let mut image = ImageCue::new();
+    image.file_path = Some("virtual/background.png".into());
+    image.go(&ctx).unwrap();
+    let image_id = image.id();
+    let image_voice = image.playing_voice_id().expect("image voice");
+    image.set_background_screensaver(true);
+
+    let mut lists = vec![list_of(vec![Box::new(audio), Box::new(video), Box::new(image)])];
+    let mut transport = Transport::new(ctx);
+    transport.pause_cue_in_workspace(&mut lists, &video_id).unwrap();
+
+    transport.stop_all(&mut lists[0]).unwrap();
+    assert!(lists[0].get_recursive(&audio_id).unwrap().is_running());
+    assert!(lists[0].get_recursive(&video_id).unwrap().is_paused());
+    assert!(lists[0].get_recursive(&image_id).unwrap().is_running());
+
+    // The cue-list selected Stop route is still an ordinary stop. Active Cues
+    // uses the explicit route below when the operator chooses to stop one.
+    transport.stop_cue_in_workspace(&mut lists, &audio_id).unwrap();
+    assert!(lists[0].get_recursive(&audio_id).unwrap().is_running());
+
+    transport.hard_stop_all(&mut lists).unwrap();
+    assert!(lists[0].get_recursive(&audio_id).unwrap().is_running());
+    assert!(lists[0].get_recursive(&video_id).unwrap().is_paused());
+    assert!(lists[0].get_recursive(&image_id).unwrap().is_running());
+    let panic_keep = log.lock().unwrap().iter().find_map(|call| match call {
+        EngineCall::OutputPanicStopExcept { keep_audio, keep_visual } => {
+            Some((keep_audio.clone(), keep_visual.clone()))
+        }
+        _ => None,
+    }).expect("panic uses selective keep lists");
+    assert!(panic_keep.0.contains(&audio_voice));
+    assert!(panic_keep.0.contains(&paired_audio_voice), "attached visual audio voice is preserved");
+    assert!(!panic_keep.0.contains(&video_voice));
+    assert!(!panic_keep.0.contains(&image_voice));
+    assert!(panic_keep.1.contains(&video_voice));
+    assert!(panic_keep.1.contains(&image_voice));
+
+    transport.stop_cue_explicit_in_workspace(&mut lists, &audio_id).unwrap();
+    assert_eq!(lists[0].get_recursive(&audio_id).unwrap().state(), CueState::Standby);
+    assert!(lists[0].get_recursive(&video_id).unwrap().is_paused());
+    assert!(lists[0].get_recursive(&image_id).unwrap().is_running());
+    transport.stop_cue_explicit_in_workspace(&mut lists, &video_id).unwrap();
+    transport.stop_cue_explicit_in_workspace(&mut lists, &image_id).unwrap();
+    assert_eq!(lists[0].get_recursive(&video_id).unwrap().state(), CueState::Standby);
+    assert_eq!(lists[0].get_recursive(&image_id).unwrap().state(), CueState::Standby);
 }
 
 #[test]
@@ -846,6 +921,144 @@ fn sequential_group_holds_the_outer_playhead() {
     // advancing the outer playhead to a sibling.
     let result2 = transport.go(&mut list).unwrap();
     assert_eq!(result2.triggered, vec![group_id], "the second GO is absorbed by the group");
+}
+
+#[test]
+fn presentation_manual_pages_are_exclusive_and_exit_to_the_next_cue() {
+    let (ctx, _rx, log) = recording_context();
+    let mut transport = Transport::new(ctx);
+    let mut presentation = GroupCue::new_presentation();
+    let mut page_ids = Vec::new();
+    for index in 1..=3 {
+        let mut image = ImageCue::new();
+        image.file_path = Some(format!("virtual/page-{index}.png").into());
+        page_ids.push(image.id());
+        presentation.add_child(Box::new(image), -1).unwrap();
+    }
+    let presentation_id = presentation.id();
+    let next = memo(&full_registry(), "next cue", ContinueMode::DoNotContinue, Duration::ZERO);
+    let next_id = next.id();
+    let mut list = list_of(vec![Box::new(presentation), next]);
+
+    transport.go(&mut list).unwrap();
+    assert_eq!(list.get_recursive(&page_ids[0]).unwrap().state(), CueState::Running);
+    transport.go(&mut list).unwrap();
+    assert_eq!(list.get_recursive(&page_ids[0]).unwrap().state(), CueState::Standby);
+    assert_eq!(list.get_recursive(&page_ids[1]).unwrap().state(), CueState::Running);
+    transport.go(&mut list).unwrap();
+    assert_eq!(list.get_recursive(&page_ids[1]).unwrap().state(), CueState::Standby);
+    assert_eq!(list.get_recursive(&page_ids[2]).unwrap().state(), CueState::Running);
+    assert_eq!(list.playhead_cue_id, Some(next_id), "firing the final page releases the outer playhead");
+
+    transport.go(&mut list).unwrap();
+    assert_eq!(list.get(&presentation_id).unwrap().state(), CueState::Standby);
+    assert_eq!(list.get_recursive(&page_ids[2]).unwrap().state(), CueState::Standby);
+    assert_eq!(list.get(&next_id).unwrap().state(), CueState::Completed);
+    assert!(log.lock().unwrap().iter().filter(|call| matches!(call, EngineCall::OutputStopContent { .. })).count() >= 3);
+}
+
+#[test]
+fn presentation_children_respect_manual_auto_follow_and_auto_continue() {
+    let (ctx, _rx) = test_context();
+
+    let mut manual = GroupCue::new_presentation();
+    let mut first = WaitCue::new();
+    first.set_user_action_duration(Some(Duration::from_millis(5))).unwrap();
+    first.set_continue_mode(ContinueMode::DoNotContinue);
+    let first_id = first.id();
+    let mut second = WaitCue::new();
+    second.set_continue_mode(ContinueMode::DoNotContinue);
+    let second_id = second.id();
+    manual.add_child(Box::new(first), -1).unwrap();
+    manual.add_child(Box::new(second), -1).unwrap();
+    manual.go(&ctx).unwrap();
+    std::thread::sleep(Duration::from_millis(12));
+    manual.tick(&ctx).unwrap();
+    assert_eq!(manual.child_cues().unwrap()[1].state(), CueState::Standby);
+    manual.go(&ctx).unwrap();
+    assert_eq!(manual.child_cues().unwrap()[0].state(), CueState::Standby);
+    assert_eq!(manual.child_cues().unwrap()[1].state(), CueState::Running);
+    assert_eq!(manual.active_child_id(), None, "the final internal child has no next active child");
+    assert_ne!(first_id, second_id);
+
+    let mut follow = GroupCue::new_presentation();
+    let mut first = WaitCue::new();
+    first.set_user_action_duration(Some(Duration::from_millis(5))).unwrap();
+    first.set_continue_mode(ContinueMode::AutoFollow);
+    first.set_post_wait(Duration::from_millis(10));
+    follow.add_child(Box::new(first), -1).unwrap();
+    follow.add_child(Box::new(WaitCue::new()), -1).unwrap();
+    follow.go(&ctx).unwrap();
+    std::thread::sleep(Duration::from_millis(10));
+    follow.tick(&ctx).unwrap();
+    assert_eq!(follow.child_cues().unwrap()[1].state(), CueState::Standby);
+    std::thread::sleep(Duration::from_millis(12));
+    follow.tick(&ctx).unwrap();
+    assert_eq!(follow.child_cues().unwrap()[1].state(), CueState::Running);
+
+    let mut auto = GroupCue::new_presentation();
+    let mut first = WaitCue::new();
+    first.set_continue_mode(ContinueMode::AutoContinue);
+    first.set_post_wait(Duration::from_millis(10));
+    auto.add_child(Box::new(first), -1).unwrap();
+    auto.add_child(Box::new(WaitCue::new()), -1).unwrap();
+    auto.go(&ctx).unwrap();
+    std::thread::sleep(Duration::from_millis(12));
+    auto.tick(&ctx).unwrap();
+    assert_eq!(auto.child_cues().unwrap()[0].state(), CueState::Standby, "exclusive presentation transition stops the previous page");
+    assert_eq!(auto.child_cues().unwrap()[1].state(), CueState::Running);
+}
+
+#[test]
+fn presentation_as_slide_video_holds_image_paused_until_page_change() {
+    let (ctx, _rx) = test_context();
+    let mut presentation = GroupCue::new_presentation();
+    let mut image = ImageCue::new();
+    image.file_path = Some("virtual/page.png".into());
+    let image_id = image.id();
+    let mut video = VideoCue::new();
+    video.file_path = Some("virtual/page-video.mp4".into());
+    video.presentation_video_imported = true;
+    video.presentation_video_layout_supported = true;
+    video.presentation_video_mode = PresentationVideoMode::AsSlide;
+    video.presentation_video_layout = Some(PresentationVideoLayout {
+        slide_width: 12_192_000,
+        slide_height: 6_858_000,
+        x: 0.1,
+        y: 0.1,
+        width: 0.4,
+        height: 0.4,
+        rotation: 0,
+        crop_left: 0.0,
+        crop_top: 0.0,
+        crop_right: 0.0,
+        crop_bottom: 0.0,
+    });
+    preload_silent_video_audio(&mut video);
+    let video_id = video.id();
+    let mut next = ImageCue::new();
+    next.file_path = Some("virtual/page-2.png".into());
+    let next_id = next.id();
+    presentation.add_child(Box::new(image), -1).unwrap();
+    presentation.add_child(Box::new(video), -1).unwrap();
+    presentation.add_child(Box::new(next), -1).unwrap();
+
+    presentation.go(&ctx).unwrap();
+    presentation.go(&ctx).unwrap();
+    assert_eq!(presentation.child_cues().unwrap()[0].state(), CueState::Paused);
+    assert_eq!(presentation.child_cues().unwrap()[1].state(), CueState::Running);
+    presentation.pause(&ctx).unwrap();
+    presentation.resume(&ctx).unwrap();
+    assert_eq!(presentation.child_cues().unwrap()[0].state(), CueState::Paused, "parent resume must not restart the image duration under the video");
+    assert_eq!(presentation.child_cues().unwrap()[1].state(), CueState::Running);
+
+    presentation.go(&ctx).unwrap();
+    assert_eq!(presentation.child_cues().unwrap()[0].state(), CueState::Standby);
+    assert_eq!(presentation.child_cues().unwrap()[1].state(), CueState::Standby);
+    assert_eq!(presentation.child_cues().unwrap()[2].state(), CueState::Running);
+    assert_eq!(presentation.active_child_id(), None, "page change must release the final internal child slot only when no next child exists");
+    assert_ne!(image_id, video_id);
+    assert_ne!(next_id, video_id);
 }
 
 #[test]

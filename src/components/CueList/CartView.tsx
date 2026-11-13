@@ -15,6 +15,7 @@ import {
 import { AUDIO_EXTS, VIDEO_EXTS, IMAGE_EXTS, MIDI_EXTS, extensionOf } from "../../lib/mediaTypes";
 import { CueTypeIcon } from "../common/CueTypeIcon";
 import { formatDurationMs } from "./formatDuration";
+import { Gear } from "@phosphor-icons/react";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -139,11 +140,13 @@ function DropSlot() {
 
 interface TileProps {
   cue: CueSummary;
+  inspectorActive: boolean;
   onMouseDown: (e: React.MouseEvent) => void;
   onFire: () => void;
+  onOpenInspector: () => void;
 }
 
-function CartTile({ cue, onMouseDown, onFire }: TileProps) {
+function CartTile({ cue, inspectorActive, onMouseDown, onFire, onOpenInspector }: TileProps) {
   const { t } = useLocale();
   const timing = useTimingStore((s) => s.timings[cue.id]);
   const [hovered, setHovered] = useState(false);
@@ -185,7 +188,7 @@ function CartTile({ cue, onMouseDown, onFire }: TileProps) {
       onMouseLeave={() => { setHovered(false); setStopHovered(false); }}
       onMouseDown={onMouseDown}
       onClick={onFire}
-      title={cue.name || t("uiFixes.untitled")}
+      title={`${cue.name || t("uiFixes.untitled")} · ${t("cueList.cardClickStartsCue")}`}
       style={{
         position: "relative",
         background: statusTint,
@@ -218,8 +221,21 @@ function CartTile({ cue, onMouseDown, onFire }: TileProps) {
         <span style={{ fontSize: 10, color: "var(--wc-text-faint)", fontFamily: "monospace", lineHeight: 1 }}>
           {cue.number ?? "–"}
         </span>
-        <span style={{ display: "flex", alignItems: "center", lineHeight: 1, opacity: 0.9 }}>
-          <CueTypeIcon type={cue.cue_type} size={18} tone="neutral" />
+        <span style={{ display: "flex", alignItems: "center", gap: 4, lineHeight: 1 }}>
+          <span style={{ display: "flex", alignItems: "center", opacity: 0.9 }}>
+            <CueTypeIcon type={cue.cue_type} size={18} tone="neutral" />
+          </span>
+          <button
+            type="button"
+            className="cart-cue-inspector-button"
+            aria-pressed={inspectorActive}
+            aria-label={`${cue.name || t("uiFixes.untitled")} · ${t("inspector.inspector")}`}
+            title={`${cue.name || t("uiFixes.untitled")} · ${t("inspector.inspector")}`}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); onOpenInspector(); }}
+          >
+            <Gear className="cart-cue-inspector-button__icon" size={16} weight="regular" aria-hidden="true" />
+          </button>
         </span>
       </div>
 
@@ -308,7 +324,7 @@ function CartTile({ cue, onMouseDown, onFire }: TileProps) {
 // CartView
 // ---------------------------------------------------------------------------
 
-export function CartView({ onRefresh }: { onRefresh: () => void }) {
+export function CartView({ onRefresh, onOpenInspector, inspectedCueId }: { onRefresh: () => void; onOpenInspector: (cue: CueSummary) => void; inspectedCueId: string | null }) {
   const { t } = useLocale();
   const { cues } = useWorkspaceStore();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -608,6 +624,8 @@ export function CartView({ onRefresh }: { onRefresh: () => void }) {
           <CartTile
             key={item.id}
             cue={item}
+            inspectorActive={inspectedCueId === item.id}
+            onOpenInspector={() => onOpenInspector(item)}
             onMouseDown={(e) => {
               const originalIndex = cues.findIndex(c => c.id === item.id);
               startTileDrag(e, item.id, originalIndex);

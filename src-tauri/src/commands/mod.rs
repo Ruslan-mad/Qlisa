@@ -39,6 +39,7 @@ pub mod cue_cmds;
 pub mod cue_list_cmds;
 pub mod device_cmds;
 pub mod diagnostics_cmds;
+pub mod document_cmds;
 pub mod health_cmds;
 pub mod input_cmds;
 pub mod light_cmds;

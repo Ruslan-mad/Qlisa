@@ -234,6 +234,7 @@ pub struct LiveAudioParams {
     /// on pan routing.  `update_cue` resolves the columns against the cue's
     /// Output Patch, exactly as the GO path does.
     pub level_matrix: Option<Vec<Vec<f64>>>,
+    pub gain_envelope: Option<crate::cue::gain_envelope::GainEnvelope>,
 }
 
 /// Persisted audio settings that can safely be changed on an existing cue
@@ -245,10 +246,11 @@ pub struct LiveAudioPatch {
     pub muted: Option<bool>,
     pub pan: Option<f32>,
     pub level_matrix: Option<Option<Vec<Vec<f64>>>>,
+    pub gain_envelope: Option<Option<crate::cue::gain_envelope::GainEnvelope>>,
 }
 
 /// Persisted visual settings which the output engine can apply to an existing
-/// Video/Image/Camera voice without replacing its cue or worker.
+/// visual cue without replacing its cue or worker.
 #[derive(Debug, Clone, Default)]
 pub struct LiveVisualPatch {
     pub geometry: Option<crate::engine::output_engine::VideoGeometry>,
@@ -341,12 +343,19 @@ pub trait Cue: Send {
         None
     }
 
+    /// Additional user media references owned by a cue with multiple assets.
+    fn additional_media_file_paths(&self) -> Vec<&std::path::Path> { Vec::new() }
+
     /// Read-only status for a managed network input owned by this cue.
     fn network_input_diagnostics(
         &self,
     ) -> Option<crate::engine::network_io::NetworkInputRuntimeDiagnostics> {
         None
     }
+
+    /// Current dimensions of an already-running live video source, when it
+    /// exposes them without opening or polling a new capture session.
+    fn live_source_dimensions(&self) -> Option<(u32, u32)> { None }
 
     /// Memo Cue only: the note it carries.  A Memo has no file, so the cue
     /// list shows this in the Target column instead — which is the whole point
@@ -502,6 +511,11 @@ pub trait Cue: Send {
     /// Total duration of the cue's action, if known in advance.
     /// Returns `None` for open-ended cues (e.g., looping audio).
     fn duration(&self) -> Option<Duration>;
+
+    /// Duration used only to auto-complete a cue. Most cues complete at their
+    /// configured duration; persistent timers can opt out while preserving it
+    /// for UI and group layout.
+    fn automatic_completion_duration(&self) -> Option<Duration> { self.duration() }
 
     /// Update a user-configured action duration without replacing the cue
     /// object.  Only cue types whose duration is an authored property (Wait,
@@ -854,6 +868,18 @@ pub trait Cue: Send {
     /// uninterrupted.  Default is a no-op.
     fn restore_runtime_state(&mut self, _snap: RuntimeState) {}
 
+    /// Cue-specific volatile state that must survive an inspector rebuild.
+    /// Persisted settings belong in `serialize`; this hook is for live clocks,
+    /// sound-once markers, and similar execution state only.
+    fn runtime_extension(&self) -> Option<Value> { None }
+
+    /// Restore a value returned by `runtime_extension` after a live rebuild.
+    fn restore_runtime_extension(&mut self, _value: Value) {}
+
+    /// Reapply a live visual surface after a persisted cue rebuild. Most cues
+    /// have no independently-owned surface to refresh.
+    fn refresh_runtime_after_rebuild(&mut self, _context: &CueContext) -> Result<()> { Ok(()) }
+
     /// Live audio parameters to push to the cue's currently-playing voice after
     /// an inspector edit (volume / pan), so changes apply without restarting.
     /// Returns `None` when the cue has no live voice.  Default is `None`.
@@ -865,14 +891,13 @@ pub trait Cue: Send {
     /// only for cue types and fields it has already validated.
     fn apply_live_audio_patch(&mut self, _patch: LiveAudioPatch) {}
 
-    /// Per-cue visual geometry (Video / Image cues only).  Used by `update_cue`
-    /// to live-apply Geometry-tab edits to the content currently on the output
-    /// window.  Default is `None` (no visual output).
+    /// Per-cue visual geometry for slot-backed visuals and ASS overlays.
+    /// Default is `None` (no visual output).
     fn visual_geometry(&self) -> Option<crate::engine::output_engine::VideoGeometry> {
         None
     }
 
-    /// Stable output ID to geometry overrides. Missing entries use legacy geometry.
+    /// Stable output ID to geometry overrides. Missing entries use the fallback.
     fn visual_geometry_by_output(&self) -> Option<std::collections::HashMap<String, crate::engine::output_engine::VideoGeometry>> {
         None
     }
@@ -888,6 +913,10 @@ pub trait Cue: Send {
     /// Persist live-safe visual settings in place. The command layer applies
     /// the resulting geometry/layer state to an existing output voice.
     fn apply_live_visual_patch(&mut self, _patch: LiveVisualPatch) {}
+
+    /// Refresh a live visual after applying a safe in-place visual patch.
+    /// Overlay cues redraw without rebuilding their clock or execution state.
+    fn refresh_live_visual(&mut self, _context: &CueContext) {}
 
     // -----------------------------------------------------------------------
     // Group support
@@ -1017,6 +1046,18 @@ pub trait Cue: Send {
     /// frontend derives activity from each child's own `state()` instead).
     fn active_child_id(&self) -> Option<CueId> {
         None
+    }
+
+    /// Current direct slide of an active Presentation. Unlike `active_child_id`,
+    /// this identifies the slide already on screen, not the next slide to fire.
+    fn presentation_current_child_id(&self) -> Option<CueId> {
+        None
+    }
+
+    /// Move an active Presentation to the previous or next enabled direct child.
+    /// Other cue types return an explicit unsupported error.
+    fn step_presentation(&mut self, _context: &CueContext, _direction: &str) -> anyhow::Result<()> {
+        anyhow::bail!("Cue does not support presentation navigation")
     }
 
     /// Point a Sequential [`GroupCue`]'s internal playhead at `child_id` so the

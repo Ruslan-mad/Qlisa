@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import type { CueSummary, MediaConversionImageFormat, MediaConversionJob, MediaConversionMode, MediaConversionQuality, MediaConversionResolution, MediaInfo } from "../../lib/types";
 import { cancelMediaConversion, getMediaConversionStatus, getMediaInfo, openMediaOutputFolder, replaceCueMedia, restoreCueMedia, startMediaConversion } from "../../lib/commands";
 import { useLocale } from "../../i18n";
+import { dialogActionButtonStyle, dialogActionFooterStyle } from "../common/dialogActionStyles";
 import { useMediaConversionStore } from "../../stores/mediaConversionStore";
-import { conversionProgress, formatMediaBytes, formatMediaDuration, mediaInfoFromCue } from "./mediaConversionModel";
+import { conversionProgress, findCompletedMediaOutputJob, formatMediaBytes, formatMediaDuration, mediaConversionBatchState, mediaInfoFromCue, resolveMediaConversionEnqueueResults, type MediaConversionEnqueueFailure } from "./mediaConversionModel";
 
 export function MediaConverterDialog({
   cue,
@@ -42,14 +43,21 @@ export function MediaConverterDialog({
   const [batchJobs, setBatchJobs] = useState<MediaConversionJob[]>(() => initialJobs);
   const [loading, setLoading] = useState(!infoOnly);
   const [error, setError] = useState<string | null>(null);
+  const [enqueueFailures, setEnqueueFailures] = useState<MediaConversionEnqueueFailure[]>([]);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const jobs = useMemo(() => isBatch ? batchJobs : (job ? [job] : []), [batchJobs, isBatch, job]);
-  const busy = jobs.some((item) => item.status === "queued" || item.status === "running");
+  const batchState = mediaConversionBatchState(selectedCues.length, jobs, enqueueFailures);
+  const busy = batchState.busy;
   const completed = !isBatch && job?.status === "completed";
-  const batchCompleted = isBatch && jobs.length === selectedCues.length && jobs.every((item) => item.status === "completed");
-  const batchFinished = isBatch && jobs.length === selectedCues.length && !busy;
+  const batchCompleted = isBatch && batchState.completed;
+  const batchFinished = isBatch && batchState.finished;
   const batchHasCompleted = isBatch && jobs.some((item) => item.status === "completed" && !!item.output_path);
+  const openableJob = findCompletedMediaOutputJob(jobs);
+  const retryCueIds = [...new Set([
+    ...enqueueFailures.map((failure) => failure.cue_id),
+    ...jobs.filter((item) => item.status === "failed" || item.status === "cancelled").flatMap((item) => item.cue_id ? [item.cue_id] : []),
+  ])];
   const title = infoOnly ? t("mediaConversion.infoTitle") : t("mediaConversion.title");
   const isImage = cue.cue_type === "image";
   const isAudio = cue.cue_type === "audio";
@@ -105,8 +113,8 @@ export function MediaConverterDialog({
 
   const resolutionOptions = useMemo(() => [
     ["original", t("mediaConversion.original")],
-    ["1080p", "1080p"],
-    ["720p", "720p"],
+    ["1080p", "До 1080px (макс. сторона)"],
+    ["720p", "До 720px (макс. сторона)"],
   ] as const, [t]);
   const compatibilityState = loading || !info.compatibility_known ? "unknown" : info.compatibility_status === "recommended" ? "recommended" : info.compatible ? "compatible" : "unsupported";
   const elapsedMs = startedAt == null ? 0 : Math.max(0, now - startedAt);
@@ -120,12 +128,19 @@ export function MediaConverterDialog({
     ? `${(progress * info.duration_ms / elapsedMs).toFixed(1)}×`
     : "—";
 
-  const start = async () => {
+  const start = async (retryCueIds?: readonly string[]) => {
     setError(null);
     try {
       const qualityLevel = quality === "high" ? 1 : quality === "low" ? 3 : 2;
       const maxResolution = resolution === "original" ? null : Number.parseInt(resolution, 10);
-      const requests = selectedCues.filter((item) => item.file_path).map((item) => startMediaConversion({
+      const requestedCues = retryCueIds
+        ? selectedCues.filter((item) => retryCueIds.includes(item.id))
+        : selectedCues;
+      const missingPathFailures: MediaConversionEnqueueFailure[] = requestedCues
+        .filter((item) => !item.file_path)
+        .map((item) => ({ cue_id: item.id, cue_name: item.name, error: "Media file path is missing." }));
+      const requestCues = requestedCues.filter((item) => !!item.file_path);
+      const requests = requestCues.map((item) => startMediaConversion({
         cue_id: item.id,
         input_path: item.file_path ?? "",
         mode,
@@ -134,12 +149,23 @@ export function MediaConverterDialog({
         image_format: item.cue_type === "image" ? imageFormat : null,
       }));
       const results = await Promise.allSettled(requests);
-      const nextJobs = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-      const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-      if (failures.length) setError(`${failures.length} ${failures.length === 1 ? "cue" : "cue"} не удалось поставить в очередь.`);
+      const { jobs: nextJobs, failures: rejectedFailures } = resolveMediaConversionEnqueueResults(requestCues, results);
+      const failures = [...missingPathFailures, ...rejectedFailures];
       nextJobs.forEach(upsert);
-      if (isBatch) setBatchJobs(nextJobs);
-      else setJob(nextJobs[0] ?? null);
+      if (isBatch) {
+        const retriedIds = new Set(requestedCues.map((item) => item.id));
+        setBatchJobs((current) => [
+          ...current.filter((item) => item.cue_id == null || !retriedIds.has(item.cue_id)),
+          ...nextJobs,
+        ]);
+        setEnqueueFailures((current) => [
+          ...current.filter((item) => !retriedIds.has(item.cue_id)),
+          ...failures,
+        ]);
+      } else {
+        setJob(nextJobs[0] ?? null);
+        setEnqueueFailures(failures);
+      }
       setStartedAt(Date.now());
       setNow(Date.now());
     } catch (reason) {
@@ -262,9 +288,13 @@ export function MediaConverterDialog({
               <span>{Math.round(progress * 100)}%</span>
             </div>
             <div style={progressTrack}><div style={{ ...progressFill, width: `${progress * 100}%` }} /></div>
-            {isBatch && <div style={{ ...batchList, maxHeight: 120, overflowY: "auto" }}>{selectedCues.map((item) => {
+            {isBatch && <div style={{ ...batchList, maxHeight: 160, overflowY: "auto" }}>{selectedCues.map((item) => {
               const itemJob = jobs.find((candidate) => candidate.cue_id === item.id);
-              return <div key={item.id} style={batchRow}><span>{item.name || item.file_path?.split(/[\\/]/).pop() || item.id}</span><span>{itemJob?.status ?? "—"}</span></div>;
+              const enqueueFailure = enqueueFailures.find((failure) => failure.cue_id === item.id);
+              return <div key={item.id} style={batchRow}>
+                <span>{item.name || item.file_path?.split(/[\\/]/).pop() || item.id}{(itemJob?.error || enqueueFailure) && <div style={errorText}>{enqueueFailure?.error ?? itemJob?.error}</div>}</span>
+                <span>{itemJob?.status ?? (enqueueFailure ? "failed" : "—")}</span>
+              </div>;
             })}</div>}
             {busy && !isBatch && <div style={runStats}><span>{formatMediaDuration(displayElapsedMs)} / {formatMediaDuration(displayTotalMs)}</span><span>{t("mediaConversion.speed")}: {speed}</span></div>}
             {(completed || batchCompleted) && !isBatch && <div style={metaGrid}>
@@ -273,15 +303,18 @@ export function MediaConverterDialog({
               <Meta label={t("mediaConversion.saving")} value={sourceSize && job?.new_size ? `${Math.max(0, Math.round((1 - job.new_size / sourceSize) * 100))}%` : "—"} />
             </div>}
             {!isBatch && job?.error && <div style={errorText}>{job.error}</div>}
+            {!isBatch && enqueueFailures.map((failure) => <div key={failure.cue_id} style={errorText}>{failure.cue_name}: {failure.error}</div>)}
           </section>
         )}
 
+        {!jobs.length && enqueueFailures.map((failure) => <div key={failure.cue_id} role="alert" style={errorText}>{failure.cue_name}: {failure.error}</div>)}
         {error && <div role="alert" style={errorText}>{error}</div>}
         <div style={footer}>
           <button type="button" onClick={onClose} style={secondary}>{busy ? t("mediaConversion.background") : t("common.close")}</button>
           {!infoOnly && !jobs.length && <button type="button" onClick={() => void start()} style={primary}>{t("mediaConversion.start")}</button>}
+          {!infoOnly && !busy && retryCueIds.length > 0 && jobs.length > 0 && <button type="button" onClick={() => void start(retryCueIds)} style={primary}>{t("common.retry")}</button>}
           {busy && <button type="button" onClick={() => void cancel()} style={danger}>{t("mediaConversion.cancel")}</button>}
-          {(completed || batchFinished) && jobs.some((item) => item.output_path) && <button type="button" onClick={() => void openMediaOutputFolder((jobs.find((item) => item.output_path) ?? jobs[0]).id)} style={secondary}>{t("mediaConversion.openFolder")}</button>}
+          {(completed || batchFinished) && openableJob && <button type="button" onClick={() => void openMediaOutputFolder(openableJob.id)} style={secondary}>{t("mediaConversion.openFolder")}</button>}
           {jobs.some((item) => item.status === "completed" && item.applied_to_cue) && <button type="button" onClick={() => void restore()} style={secondary}>{t("mediaConversion.restoreOriginal")}{isBatch ? ` (${jobs.filter((item) => item.status === "completed" && item.applied_to_cue).length})` : ""}</button>}
           {(completed || (batchFinished && batchHasCompleted)) && <button type="button" onClick={() => void replace()} style={primary}>{isBatch ? `${t("mediaConversion.replace")} (${jobs.filter((item) => item.status === "completed" && item.output_path).length})` : t("mediaConversion.replace")}</button>}
         </div>
@@ -299,7 +332,7 @@ function ModeButton({ active, onClick, children }: { active: boolean; onClick: (
 }
 
 const overlay: React.CSSProperties = { position: "fixed", inset: 0, zIndex: 10000, background: "rgba(0,0,0,.62)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 };
-const dialog: React.CSSProperties = { width: 430, maxWidth: "100%", maxHeight: "calc(100vh - 32px)", overflowY: "auto", background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)", borderRadius: 8, boxShadow: "0 18px 60px rgba(0,0,0,.65)", padding: 14 };
+const dialog: React.CSSProperties = { width: 430, maxWidth: "100%", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxSizing: "border-box", background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)", borderRadius: 8, boxShadow: "0 18px 60px rgba(0,0,0,.65)", padding: 14 };
 const header: React.CSSProperties = { display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 12 };
 const titleStyle: React.CSSProperties = { color: "var(--wc-text-bright)", fontSize: 14, fontWeight: 600 };
 const fileName: React.CSSProperties = { color: "var(--wc-text)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
@@ -314,8 +347,8 @@ const batchList: React.CSSProperties = { marginTop: 8, borderTop: "1px solid var
 const batchRow: React.CSSProperties = { display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", borderBottom: "1px solid var(--wc-border)" };
 const label: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 4, color: "var(--wc-text-muted)", fontSize: 11 };
 const input: React.CSSProperties = { width: "100%", boxSizing: "border-box", color: "var(--wc-text)", background: "var(--wc-bg-deepest)", border: "1px solid var(--wc-border-strong)", borderRadius: 4, padding: "5px 6px" };
-const footer: React.CSSProperties = { display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 14 };
-const secondary: React.CSSProperties = { color: "var(--wc-text)", background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)", borderRadius: 4, padding: "6px 10px", cursor: "pointer", fontSize: 12 };
+const footer: React.CSSProperties = { ...dialogActionFooterStyle, gap: 6, marginTop: 14 };
+const secondary: React.CSSProperties = { ...dialogActionButtonStyle, color: "var(--wc-text)", background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)", borderRadius: 4, cursor: "pointer", fontSize: 12 };
 const primary: React.CSSProperties = { ...secondary, background: "var(--wc-accent)", color: "var(--wc-accent-fg)", borderColor: "var(--wc-accent)" };
 const danger: React.CSSProperties = { ...secondary, color: "#fecaca", borderColor: "#b91c1c" };
 const activeMode: React.CSSProperties = { background: "var(--wc-accent)", color: "var(--wc-accent-fg)", borderColor: "var(--wc-accent)" };

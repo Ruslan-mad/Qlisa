@@ -106,6 +106,14 @@ fn collect_protected_voices(cue: &dyn crate::cue::traits::Cue, inherited: bool, 
     }
     if !protected { return; }
     let ids = cue.all_voice_ids();
+    if cue.cue_type() == CueType::Timer {
+        // Timer overlays use the cue UUID as their runtime owner key. Keep it
+        // in the visual set so the output-engine panic-stop does not erase an
+        // overlay protected by a background Group or Number.
+        visual.push(cue.id());
+        audio.extend(ids);
+        return;
+    }
     if matches!(cue.cue_type(), CueType::Video | CueType::Image | CueType::Camera | CueType::Text | CueType::Browser) {
         for id in &ids {
             visual.push(*id);
@@ -926,6 +934,7 @@ impl Transport {
         // (only the Text Cue opts in — visual cues are layers and never
         // auto-stop each other).  If a visual type ever opts back in, it only
         // stops when the incoming cue is also visual.
+        let incoming_is_timer = cue_lists[list_index].get(&cue_id).is_some_and(|c| c.cue_type() == CueType::Timer);
         let incoming_is_visual = cue_lists[list_index]
             .get(&cue_id)
             .map(|c| c.is_visual())
@@ -935,6 +944,7 @@ impl Transport {
             .cues
             .iter()
             .filter(|c| {
+                if incoming_is_timer { return false; }
                 if !c.is_running() || c.id() == cue_id || !c.stop_on_next_go() {
                     return false;
                 }
@@ -1466,7 +1476,47 @@ impl Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use crossbeam_channel::unbounded;
     use uuid::Uuid;
+
+    use crate::{
+        cue::{group_cue::GroupCue, timer_cue::TimerCue, traits::{Cue, RuntimeState}, types::CueState},
+        engine::{audio_engine::AudioEngine, dmx_engine::DmxEngine, engine_traits::OutputEngineApi, output_engine::ContentRequest},
+        preferences::MachineAudioConfig,
+    };
+
+    struct NullOutput;
+    impl OutputEngineApi for NullOutput {
+        fn show_content(&self, _req: ContentRequest<'_>) -> Result<Uuid> { anyhow::bail!("unused") }
+        fn stop_content(&self, _voice_id: Uuid, _visual_fade_ms: u32, _audio_fade_ms: u32) {}
+        fn hard_stop_current(&self) {}
+        fn panic_stop(&self) {}
+        fn video_audio_voice(&self, _voice_id: Uuid) -> Option<Uuid> { None }
+        fn resync_audio_to_video(&self, _voice_id: Uuid) {}
+        fn get_voice_opacity(&self, _voice_id: Uuid) -> f32 { 1.0 }
+        fn set_voice_opacity(&self, _voice_id: Uuid, _opacity: f32) {}
+        fn stop_voice(&self, _voice_id: Uuid, _fade_ms: u32) -> Result<()> { Ok(()) }
+        fn pause_voice(&self, _voice_id: Uuid) -> Result<()> { Ok(()) }
+        fn resume_voice(&self, _voice_id: Uuid) -> Result<()> { Ok(()) }
+        fn seek_voice_ms(&self, _voice_id: Uuid, _position_ms: u64) {}
+        fn show_text_overlay(&self, _ass_text: &str, _screen_index: Option<u32>) {}
+        fn clear_text_overlay(&self) {}
+        fn begin_eof_fade_out(&self, _voice_id: Uuid, _fade_ms: u32) -> bool { false }
+        fn devamp_voice(&self, _voice_id: Uuid, _stop_at_end: bool) {}
+        fn start_preloaded(&self, _voice_id: Uuid) -> bool { false }
+    }
+
+    fn test_context() -> CueContext {
+        let (events, _receiver) = unbounded();
+        CueContext::new(
+            AudioEngine::new_silent(&MachineAudioConfig::default()), Arc::new(NullOutput), events, 0,
+            Vec::new(), None, None, Vec::new(), Arc::new(DmxEngine::new()),
+            Vec::new(), Vec::new(), Vec::new(), 256,
+        )
+    }
 
     #[test]
     fn persisted_number_flow_targets_exclude_the_number_tree() {
@@ -1478,5 +1528,30 @@ mod tests {
         assert!(!is_external_number_flow_target(&source_tree_ids, number_id));
         assert!(!is_external_number_flow_target(&source_tree_ids, nested_action_id));
         assert!(is_external_number_flow_target(&source_tree_ids, external_id));
+    }
+
+    #[test]
+    fn protected_number_keeps_nested_timer_overlay_and_signal_voice() {
+        let mut timer = TimerCue::new();
+        let timer_id = timer.id();
+        let sound_id = Uuid::new_v4();
+        timer.restore_runtime_state(RuntimeState {
+            state: CueState::Running,
+            voice_id: Some(sound_id),
+            started_at: None,
+            action_started_at: None,
+        });
+        let mut nested = GroupCue::new();
+        nested.children.push(Box::new(timer));
+        let mut number = GroupCue::new_number();
+        number.set_background_screensaver(true);
+        number.children.push(Box::new(nested));
+
+        let mut audio = Vec::new();
+        let mut visual = Vec::new();
+        collect_protected_voices(&number, false, &test_context(), &mut audio, &mut visual);
+
+        assert!(visual.contains(&timer_id), "Timer owner UUID must reach panic_stop_except keep_visual");
+        assert!(audio.contains(&sound_id), "active Timer signal voice must reach keep_audio");
     }
 }

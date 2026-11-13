@@ -11,14 +11,14 @@
 //! `context.{audio,output,dmx}_engine.*` from the cue and transport layers; the
 //! event loop keeps its own concrete engine handles and is unaffected.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use uuid::Uuid;
 
 use super::audio_engine::{AudioEngine, SyntheticFeedProducer};
 use super::dmx_engine::{ChannelWidth, DmxEngine};
-use super::output_engine::{ContentRequest, OutputEngine};
+use super::output_engine::{ContentRequest, OutputEngine, VideoGeometry};
 use super::ring_command::{FadeCurve, VoiceId};
 use super::voice::Voice;
 
@@ -37,6 +37,7 @@ pub trait AudioEngineApi: Send + Sync {
     /// Release the voice's current slice loop (Devamp Cue).
     fn devamp_voice(&self, voice_id: VoiceId, stop_at_end: bool) -> Result<()>;
     fn set_voice_gain(&self, voice_id: VoiceId, gain: f32) -> Result<()>;
+    fn set_voice_gain_envelope(&self, _voice_id: VoiceId, _envelope: crate::cue::gain_envelope::GainEnvelopeRt) -> Result<()> { Ok(()) }
     fn set_voice_muted(&self, voice_id: VoiceId, muted: bool) -> Result<()>;
     fn get_voice_gain(&self, voice_id: VoiceId) -> f32;
     fn set_voice_pan(&self, voice_id: VoiceId, pan: f32) -> Result<()>;
@@ -140,6 +141,9 @@ impl AudioEngineApi for AudioEngine {
     }
     fn set_voice_gain(&self, voice_id: VoiceId, gain: f32) -> Result<()> {
         AudioEngine::set_voice_gain(self, voice_id, gain)
+    }
+    fn set_voice_gain_envelope(&self, voice_id: VoiceId, envelope: crate::cue::gain_envelope::GainEnvelopeRt) -> Result<()> {
+        AudioEngine::set_voice_gain_envelope(self, voice_id, envelope)
     }
     fn set_voice_muted(&self, voice_id: VoiceId, muted: bool) -> Result<()> {
         AudioEngine::set_voice_muted(self, voice_id, muted)
@@ -459,6 +463,45 @@ pub trait OutputEngineApi: Send + Sync {
             }
         }
     }
+    fn show_text_overlay_with_geometry_for_outputs(
+        &self,
+        ass_text: &str,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        screen_index: Option<u32>,
+        geometry: &VideoGeometry,
+        geometry_by_output: &HashMap<String, VideoGeometry>,
+    ) {
+        let _ = (geometry, geometry_by_output);
+        self.show_text_overlay_for_outputs(ass_text, output_id, output_ids, screen_index);
+    }
+    /// Show a separately-owned timer overlay. Production outputs assign one
+    /// OSD id per owner; default implementations retain compatibility for
+    /// lightweight integrations.
+    fn show_timer_overlay_for_outputs(
+        &self, _owner: Uuid, ass_text: &str, output_id: Option<&str>,
+        output_ids: &[String], screen_index: Option<u32>,
+    ) {
+        self.show_text_overlay_for_outputs(ass_text, output_id, output_ids, screen_index);
+    }
+    fn show_timer_overlay_with_geometry_for_outputs(
+        &self,
+        owner: Uuid,
+        ass_text: &str,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        screen_index: Option<u32>,
+        geometry: &VideoGeometry,
+        geometry_by_output: &HashMap<String, VideoGeometry>,
+    ) {
+        let _ = (geometry, geometry_by_output);
+        self.show_timer_overlay_for_outputs(owner, ass_text, output_id, output_ids, screen_index);
+    }
+    fn clear_timer_overlay_for_outputs(
+        &self, _owner: Uuid, output_id: Option<&str>, output_ids: &[String],
+    ) {
+        self.clear_text_overlay_for_outputs(output_id, output_ids);
+    }
     fn clear_text_overlay(&self);
     /// Clear an overlay on one named output. Compatibility implementations
     /// may keep targeting their legacy default surface.
@@ -634,6 +677,42 @@ impl OutputEngineApi for OutputEngine {
         screen_index: Option<u32>,
     ) {
         OutputEngine::show_text_overlay_on_output(self, ass_text, output_id, screen_index)
+    }
+    fn show_text_overlay_with_geometry_for_outputs(
+        &self,
+        ass_text: &str,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        screen_index: Option<u32>,
+        geometry: &VideoGeometry,
+        geometry_by_output: &HashMap<String, VideoGeometry>,
+    ) {
+        OutputEngine::show_text_overlay_with_geometry_for_outputs(
+            self, ass_text, output_id, output_ids, screen_index, geometry, geometry_by_output,
+        )
+    }
+    fn show_timer_overlay_for_outputs(
+        &self, owner: Uuid, ass_text: &str, output_id: Option<&str>,
+        output_ids: &[String], screen_index: Option<u32>,
+    ) {
+        OutputEngine::show_timer_overlay_on_outputs(self, owner, ass_text, output_id, output_ids, screen_index)
+    }
+    fn show_timer_overlay_with_geometry_for_outputs(
+        &self,
+        owner: Uuid,
+        ass_text: &str,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        screen_index: Option<u32>,
+        geometry: &VideoGeometry,
+        geometry_by_output: &HashMap<String, VideoGeometry>,
+    ) {
+        OutputEngine::show_timer_overlay_with_geometry_for_outputs(
+            self, owner, ass_text, output_id, output_ids, screen_index, geometry, geometry_by_output,
+        )
+    }
+    fn clear_timer_overlay_for_outputs(&self, owner: Uuid, _output_id: Option<&str>, output_ids: &[String]) {
+        OutputEngine::clear_timer_overlay_on_outputs(self, owner, _output_id, output_ids)
     }
     fn clear_text_overlay(&self) {
         OutputEngine::clear_text_overlay(self)

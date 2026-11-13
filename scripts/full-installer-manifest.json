@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "kitId": "win-x64-2026.11.14.1",
   "runtimeFiles": [
     {
       "fileName": "ffmpeg.exe",

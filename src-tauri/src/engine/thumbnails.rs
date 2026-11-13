@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
 
-use super::mpv_sys::{MpvLib, MPV_EVENT_END_FILE, MPV_EVENT_SHUTDOWN};
+use super::mpv_sys::{path_to_mpv_url, MpvLib, MPV_EVENT_END_FILE, MPV_EVENT_SHUTDOWN};
 use super::media_cache::CacheScope;
 
 /// Thumbnail width in pixels (height follows the aspect ratio).
@@ -279,7 +279,7 @@ fn render_frames_into(
         opt(
             ctx,
             "vo-image-outdir",
-            &out_dir.to_string_lossy().replace('\\', "/"),
+            &path_to_mpv_url(out_dir),
         );
         opt(ctx, "audio", "no");
         opt(ctx, "hwdec", "no");
@@ -293,7 +293,7 @@ fn render_frames_into(
             return Err(anyhow!("mpv_initialize() failed for thumbnail"));
         }
 
-        let path_str = path.to_string_lossy().replace('\\', "/");
+        let path_str = path_to_mpv_url(path);
         let path_cstr = match CString::new(path_str.as_str()) {
             Ok(c) => c,
             Err(_) => {

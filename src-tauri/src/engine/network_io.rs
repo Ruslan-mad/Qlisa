@@ -573,6 +573,14 @@ impl BgraFrameMailbox {
         (*current > sequence).then(|| (*current, frame.clone()))
     }
 
+    /// Return dimensions for the already-published frame without cloning its
+    /// pixel buffer. This is a read-only hint for active source geometry.
+    pub fn latest_dimensions(&self) -> Option<(u32, u32)> {
+        let latest = self.latest.lock().ok()?;
+        let frame = &latest.as_ref()?.1;
+        (frame.width > 0 && frame.height > 0).then_some((frame.width, frame.height))
+    }
+
     /// Legacy single-consumer convenience. New rendering code must use a
     /// sequence cursor via [`Self::latest_after`] so it cannot steal frames
     /// from another output destination.
@@ -6221,6 +6229,15 @@ mod tests {
         assert!(second_for_a > first_sequence);
         assert_eq!(frame_for_a.data, vec![5, 6, 7, 8]);
         assert_eq!(frame_for_b.data, frame_for_a.data);
+    }
+
+    #[test]
+    fn mailbox_exposes_latest_source_dimensions_without_consuming_pixels() {
+        let mailbox = BgraFrameMailbox::default();
+        assert_eq!(mailbox.latest_dimensions(), None);
+        mailbox.publish(BgraFrame { width: 720, height: 1280, stride: 2880, data: vec![0; 2880 * 1280] });
+        assert_eq!(mailbox.latest_dimensions(), Some((720, 1280)));
+        assert_eq!(mailbox.latest_after(0).unwrap().1.width, 720);
     }
 
     /// Requires the optional NDI Runtime installed on a Windows test

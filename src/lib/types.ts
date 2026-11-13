@@ -8,6 +8,12 @@ export interface MediaRuntimeStatus {
   libmpv: boolean;
   ready: boolean;
   version?: string;
+  state: "missing" | "ready" | "update-available" | "repair-required";
+  installed_kit_id?: string | null;
+  recommended_kit_id: string;
+  update_available: boolean;
+  repair_reason?: string | null;
+  operation_pending: boolean;
 }
 
 export interface MediaRuntimeProgress {
@@ -16,7 +22,7 @@ export interface MediaRuntimeProgress {
   message?: string;
 }
 
-export type CueType = "audio" | "memo" | "wait" | "group" | "number" | "fade" | "stop" | "devamp" | "video" | "image" | "osc" | "midi" | "midi_file" | "light" | "mic" | "timecode" | "text" | "camera" | "browser" | "script" | CommandCueType;
+export type CueType = "audio" | "memo" | "wait" | "timer" | "group" | "presentation" | "number" | "fade" | "stop" | "devamp" | "video" | "image" | "osc" | "midi" | "midi_file" | "light" | "mic" | "timecode" | "text" | "camera" | "browser" | "script" | CommandCueType;
 
 /** Cues whose action is performed on *other* cues (QLab's control cues).
  *  Distinct types — own colour, own row label, 1:1 with QLab on import — over
@@ -49,7 +55,9 @@ export const CUE_TYPE_COLORS: Record<CueType, string> = {
   stop:     "#ef4444",
   fade:     "#ec4899",
   wait:     "#fb923c",
+  timer:    "#f97316",
   group:    "#fde047",
+  presentation: "#f472b6",
   number:   "#f59e0b",
   midi:     "var(--wc-accent)", // the green audio used to be
   midi_file: "#2dd4bf",         // teal — a MIDI cue, but one that has a length
@@ -289,12 +297,24 @@ export interface CueSummary {
   cached_duration_ms?: number | null;
   /** For Group cues: direct child cue summaries (recursive). */
   children?: CueSummary[];
+  /** For Presentation cues: number of imported static pages. */
+  page_count?: number;
   /** For Group cues: playback mode. */
   group_mode?: GroupMode;
   /** For Playlist Group cues: whether the playlist loops (wraps last → first). */
   playlist_loop?: boolean;
+  /** Present only on videos imported from a Presentation. */
+  presentation_video_imported?: boolean;
+  presentation_video_mode?: "fullscreen" | "as_slide";
+  /** Whether the imported slide geometry can be restored by the current output adapter. */
+  presentation_video_layout_supported?: boolean;
+  /** Human-readable reason when slide geometry cannot be restored. */
+  presentation_video_layout_error?: string | null;
+  presentation_video_layout?: PresentationVideoLayout | null;
   /** For running Sequential/Playlist Group cues: ID of the currently active child. */
   active_child_id?: string;
+  /** Runtime-only current slide for Presentation navigation. */
+  presentation_current_child_id?: string | null;
   /** Number-only master and timed action metadata. */
   number_master_id?: string | null;
   number_master_type?: CueType | null;
@@ -304,8 +324,22 @@ export interface CueSummary {
   number_start_stop_mode?: NumberStartStopMode;
   number_start_stop_ids?: string[];
   number_finish_start_ids?: string[];
-  /** True when a Number resists ordinary transport stops. */
+  /** True when this cue resists ordinary transport stops. */
   background_screensaver?: boolean;
+}
+
+export interface PresentationVideoLayout {
+  slide_width: number;
+  slide_height: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  crop_left: number;
+  crop_top: number;
+  crop_right: number;
+  crop_bottom: number;
 }
 
 export type MediaConversionMode = "optimize" | "size";
@@ -443,6 +477,7 @@ export interface AudioCueData extends CueSummary {
   /** Crosspoint levels in dB, `[input channel][patch channel]`. `null` = the
    *  cue routes with Pan instead. Replaces pan when set. */
   level_matrix?: number[][] | null;
+  gain_envelope?: GainEnvelopePoint[] | null;
   fade_in_ms: number | null;
   fade_in_curve: FadeCurve | null;
   fade_out_ms: number | null;
@@ -453,6 +488,11 @@ export interface AudioCueData extends CueSummary {
   output_patch_id: string | null;
   rate: number;
   slices: SliceList;
+}
+
+export interface GainEnvelopePoint {
+  time_ms: number;
+  gain: number;
 }
 
 /** How the source frame is mapped onto the output surface. */
@@ -467,9 +507,9 @@ export interface VideoGeometry {
   pan_y: number;
   /** Linear scale factor (1.0 = 100%). */
   scale: number;
-  /** Clockwise rotation in degrees (0–359). */
+  /** Clockwise rotation in degrees (0–360; 360 is equivalent to 0). */
   rotation: number;
-  /** Crop per edge as a fraction of the source size (0..0.45 each). */
+  /** Clip per edge as a fraction of the full source size (0..1 each). */
   crop_left: number;
   crop_right: number;
   crop_top: number;
@@ -521,6 +561,7 @@ export interface VideoCueData extends CueSummary {
   muted: boolean;
   /** Crosspoint levels in dB for the video's audio track. See AudioCueData. */
   level_matrix?: number[][] | null;
+  gain_envelope?: GainEnvelopePoint[] | null;
   /** Audio track fade-in. */
   fade_in_ms: number | null;
   fade_in_curve: FadeCurve | null;
@@ -572,6 +613,11 @@ export interface TextCueData extends CueSummary {
   text_color: string;
   /** Position on the output surface. */
   position: TextPosition;
+  /** Optional visual transform; older shows keep the Text position grid only. */
+  geometry?: VideoGeometry;
+  geometry_by_output?: Record<string, VideoGeometry>;
+  /** Read-only effective OSD margin for each output used by the preview. */
+  _overlay_margin_by_output?: Record<string, number>;
   /** Stable named destination; null uses display.default_output_id. */
   output_id?: string | null;
   output_ids?: string[];
@@ -635,6 +681,8 @@ export interface CameraCueData extends CueSummary {
   level_matrix?: number[][] | null;
   output_patch_id: string | null;
   source: CameraSource;
+  /** Read-only dimensions for a running source, omitted when no frame is available. */
+  _live_source_dimensions?: { width: number; height: number } | null;
   /** Visual (GL overlay) fade-in from black. */
   video_fade_in_ms: number | null;
   video_fade_in_curve: FadeCurve | null;
@@ -729,6 +777,32 @@ export interface WaitCueData extends CueSummary {
   notes: string;
   /** The configured wait duration in milliseconds. */
   wait_duration_ms: number;
+}
+
+export interface TimerCueData extends CueSummary {
+  timer_duration_ms: number;
+  mode: "countdown" | "countup";
+  format: "seconds" | "minutes_seconds";
+  font: string;
+  font_size: number;
+  text_color: string;
+  /** Optional visual transform; absent geometry uses the centered timer default. */
+  geometry?: VideoGeometry;
+  geometry_by_output?: Record<string, VideoGeometry>;
+  /** Read-only effective OSD margin for each output used by the preview. */
+  _overlay_margin_by_output?: Record<string, number>;
+  output_id: string | null;
+  output_ids: string[];
+  screen_index: number | null;
+  sound_start: boolean;
+  sound_end: boolean;
+  sound_start_preset: string;
+  sound_end_preset: string;
+  sound_start_path: string | null;
+  sound_end_path: string | null;
+  sound_volume: number;
+  sound_patch_id: string | null;
+  finish_and_hide: boolean;
 }
 
 /** Full cue data returned by get_cue for a Stop Cue. */
@@ -840,6 +914,8 @@ export interface WorkspaceCueCatalogEntry {
   /** True only on a screensaver cue; consumers inherit it through the tree. */
   background_screensaver?: boolean;
   is_disabled: boolean;
+  /** Runtime-only current slide for Presentation navigation. */
+  presentation_current_child_id?: string | null;
   output_patch_name?: string | null;
   children?: WorkspaceCueCatalogEntry[];
 }
@@ -1739,6 +1815,8 @@ export interface CueTimeUpdateEvent {
   wait_phase?: "pre_wait" | "post_wait" | null;
   wait_elapsed_ms?: number | null;
   wait_duration_ms?: number | null;
+  /** TimerCue's existing runtime zero latch; absent for all other cue types. */
+  timer_zero_reached?: boolean;
 }
 
 /** Operator-local headphone preview timing. This never represents the show

@@ -302,6 +302,7 @@ struct CueTimeSnapshot {
     wait_phase: Option<&'static str>,
     wait_elapsed_ms: Option<u64>,
     wait_duration_ms: Option<u64>,
+    timer_zero_reached: Option<bool>,
 }
 
 fn collect_time_snapshots(
@@ -338,6 +339,12 @@ fn collect_time_snapshots(
                 wait_phase,
                 wait_elapsed_ms,
                 wait_duration_ms,
+                // TimerCue's sticky runtime marker distinguishes a held zero
+                // from pre-wait and from a duration edited after completion.
+                timer_zero_reached: (cue.cue_type() == crate::cue::types::CueType::Timer)
+                    .then(|| cue.runtime_extension()
+                        .and_then(|runtime| runtime.get("zero_reached").and_then(serde_json::Value::as_bool))
+                        .unwrap_or(false)),
             });
         }
         if let Some((child_id, wait_elapsed, wait_duration)) = cue.pending_child_post_wait() {
@@ -377,6 +384,7 @@ fn merge_wait_snapshot(
         wait_phase: Some("post_wait"),
         wait_elapsed_ms,
         wait_duration_ms,
+        timer_zero_reached: None,
     });
 }
 
@@ -404,6 +412,7 @@ fn append_wait_clear_snapshots(
             wait_phase: None,
             wait_elapsed_ms: None,
             wait_duration_ms: None,
+            timer_zero_reached: None,
         });
     }
     *previous_wait_ids = current_wait_ids;
@@ -1094,6 +1103,7 @@ fn tick(
                     wait_phase: None,
                     wait_elapsed_ms: None,
                     wait_duration_ms: None,
+                    timer_zero_reached: None,
                 });
                 false
             }
@@ -1109,6 +1119,7 @@ fn tick(
                     wait_phase: None,
                     wait_elapsed_ms: None,
                     wait_duration_ms: None,
+                    timer_zero_reached: None,
                 });
                 false
             }
@@ -1217,7 +1228,7 @@ fn tick(
                     continue;
                 }
                 let time_done = cue
-                    .duration()
+                    .automatic_completion_duration()
                     .map(|d| cue.action_elapsed() >= d)
                     .unwrap_or(false);
                 let group_done = cue.is_complete();
@@ -1525,6 +1536,7 @@ fn tick(
             wait_phase: Some("post_wait"),
             wait_elapsed_ms: Some(duration_ms.saturating_sub(remaining_ms)),
             wait_duration_ms: Some(duration_ms),
+            timer_zero_reached: None,
         });
     }
 
@@ -1682,19 +1694,20 @@ fn tick(
     }
 
     for snapshot in &time_snapshots {
-        let _ = handle.emit(
-            "cue-time-update",
-            serde_json::json!({
-                "cue_id": snapshot.cue_id,
-                "elapsed_ms": snapshot.elapsed_ms,
-                "action_elapsed_ms": snapshot.action_elapsed_ms,
-                "remaining_ms": snapshot.remaining_ms,
-                "media_position_ms": snapshot.media_position_ms,
-                "wait_phase": snapshot.wait_phase,
-                "wait_elapsed_ms": snapshot.wait_elapsed_ms,
-                "wait_duration_ms": snapshot.wait_duration_ms,
-            }),
-        );
+        let mut payload = serde_json::json!({
+            "cue_id": snapshot.cue_id,
+            "elapsed_ms": snapshot.elapsed_ms,
+            "action_elapsed_ms": snapshot.action_elapsed_ms,
+            "remaining_ms": snapshot.remaining_ms,
+            "media_position_ms": snapshot.media_position_ms,
+            "wait_phase": snapshot.wait_phase,
+            "wait_elapsed_ms": snapshot.wait_elapsed_ms,
+            "wait_duration_ms": snapshot.wait_duration_ms,
+        });
+        if let Some(timer_zero_reached) = snapshot.timer_zero_reached {
+            payload["timer_zero_reached"] = serde_json::json!(timer_zero_reached);
+        }
+        let _ = handle.emit("cue-time-update", payload);
     }
 
     // Emit cue-list-refresh when a sequential group's active child changed.
@@ -2003,6 +2016,7 @@ fn format_timer(ms: u64, show_ms: bool) -> String {
             wait_phase: None,
             wait_elapsed_ms: None,
             wait_duration_ms: None,
+            timer_zero_reached: None,
         }];
 
         merge_wait_snapshot(
@@ -2037,6 +2051,7 @@ fn format_timer(ms: u64, show_ms: bool) -> String {
             wait_phase: None,
             wait_elapsed_ms: None,
             wait_duration_ms: None,
+            timer_zero_reached: None,
         }];
 
         append_wait_clear_snapshots(&mut snapshots, &mut previous_wait_ids);

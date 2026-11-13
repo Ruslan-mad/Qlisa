@@ -9,7 +9,7 @@
 //! Multi-line text is supported (newlines converted to ASS `\N`).
 //! `display_duration_ms` enables auto-complete after a fixed duration.
 
-use std::time::{Duration, Instant};
+use std::{collections::HashMap, time::{Duration, Instant}};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -137,6 +137,10 @@ pub struct TextCue {
     /// Stable named destination; None uses workspace default.
     pub output_id: Option<String>,
     pub output_ids: Vec<String>,
+    /// Pan/scale geometry for the ASS overlay; identity keeps legacy placement.
+    pub geometry: crate::engine::output_engine::VideoGeometry,
+    /// Optional per-output overrides keyed by stable output ID.
+    pub geometry_by_output: HashMap<String, crate::engine::output_engine::VideoGeometry>,
     /// Auto-complete after this duration.  `None` = hold until stopped.
     pub display_duration_ms: Option<u64>,
 
@@ -171,6 +175,8 @@ impl TextCue {
             screen_index: None,
             output_id: None,
             output_ids: Vec::new(),
+            geometry: crate::engine::output_engine::VideoGeometry::default(),
+            geometry_by_output: HashMap::new(),
             display_duration_ms: None,
             is_disabled: false,
             in_pre_wait: false,
@@ -188,27 +194,22 @@ impl TextCue {
             return Ok(());
         }
 
-        let ass_text = build_ass_text(
-            &self.text,
-            &self.font,
-            self.font_size,
-            &self.text_color,
-            self.position,
-        );
-        // A named output owns its monitor selection.  The legacy workspace
-        // screen preference is only a fallback for cues targeting the default.
-        let screen = if self.output_id.is_some() {
-            None
-        } else {
-            self.screen_index.or(context.output_screen)
-        };
-        context.output_engine.show_text_overlay_for_outputs(&ass_text, self.output_id.as_deref(), &self.output_ids, screen);
+        self.render_overlay(context);
 
         self.action_started_at = Some(Instant::now());
         self.action_elapsed_before_pause = Duration::ZERO;
         self.in_pre_wait = false;
         context.emit(CueEvent::ActionStarted { cue_id: self.id });
         Ok(())
+    }
+
+    fn render_overlay(&self, context: &CueContext) {
+        let ass_text = build_ass_text(&self.text, &self.font, self.font_size, &self.text_color, self.position);
+        let screen = if self.output_id.is_some() { None } else { self.screen_index.or(context.output_screen) };
+        context.output_engine.show_text_overlay_with_geometry_for_outputs(
+            &ass_text, self.output_id.as_deref(), &self.output_ids, screen,
+            &self.geometry, &self.geometry_by_output,
+        );
     }
 }
 
@@ -370,6 +371,33 @@ impl Cue for TextCue {
         self.display_duration_ms.map(Duration::from_millis)
     }
 
+    fn visual_geometry(&self) -> Option<crate::engine::output_engine::VideoGeometry> {
+        Some(self.geometry)
+    }
+
+    fn visual_geometry_by_output(&self) -> Option<HashMap<String, crate::engine::output_engine::VideoGeometry>> {
+        Some(self.geometry_by_output.clone())
+    }
+
+    fn apply_live_visual_patch(&mut self, patch: crate::cue::traits::LiveVisualPatch) {
+        if let Some(geometry) = patch.geometry { self.geometry = geometry; }
+        if let Some(overrides) = patch.geometry_by_output { self.geometry_by_output = overrides; }
+    }
+
+    fn refresh_live_visual(&mut self, context: &CueContext) {
+        if matches!(self.state, CueState::Running | CueState::Paused)
+            && !self.in_pre_wait
+            && !self.text.trim().is_empty()
+        {
+            self.render_overlay(context);
+        }
+    }
+
+    fn refresh_runtime_after_rebuild(&mut self, context: &CueContext) -> Result<()> {
+        self.refresh_live_visual(context);
+        Ok(())
+    }
+
     fn set_user_action_duration(&mut self, duration: Option<Duration>) -> Result<()> {
         self.display_duration_ms = duration
             .map(|duration| u64::try_from(duration.as_millis()).map_err(|_| anyhow::anyhow!("Text duration is too large")))
@@ -398,6 +426,7 @@ impl Cue for TextCue {
     fn continue_mode(&self) -> ContinueMode {
         self.continue_mode
     }
+
     fn set_continue_mode(&mut self, mode: ContinueMode) {
         self.continue_mode = mode;
     }
@@ -460,6 +489,8 @@ impl Cue for TextCue {
             "screen_index": self.screen_index,
             "output_id": self.output_id,
             "output_ids": self.output_ids,
+            "geometry": self.geometry,
+            "geometry_by_output": self.geometry_by_output,
             "display_duration_ms": self.display_duration_ms,
             "is_disabled": self.is_disabled,
         })
@@ -535,6 +566,12 @@ impl CueFactory for TextCueFactory {
             .map(str::to_owned);
         cue.output_ids = value.get("output_ids").and_then(|v| v.as_array()).map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
         if cue.output_ids.is_empty() { if let Some(id) = cue.output_id.clone() { cue.output_ids.push(id); } }
+        if let Some(geometry) = value.get("geometry") {
+            if let Ok(geometry) = serde_json::from_value(geometry.clone()) { cue.geometry = geometry; }
+        }
+        if let Some(overrides) = value.get("geometry_by_output") {
+            if let Ok(overrides) = serde_json::from_value(overrides.clone()) { cue.geometry_by_output = overrides; }
+        }
         if let Some(ms) = value.get("display_duration_ms").and_then(|v| v.as_u64()) {
             cue.display_duration_ms = Some(ms);
         }
@@ -651,5 +688,24 @@ mod tests {
         assert_eq!(rebuilt.name(), "Test Text");
         assert_eq!(rebuilt.cue_type(), CueType::Text);
         assert_eq!(rebuilt.duration(), Some(Duration::from_millis(3000)));
+    }
+
+    #[test]
+    fn geometry_roundtrips_and_legacy_text_defaults_to_identity() {
+        let factory = TextCueFactory;
+        let mut cue = TextCue::new();
+        cue.geometry = crate::engine::output_engine::VideoGeometry { pan_x: 0.2, scale: 1.25, ..Default::default() };
+        cue.geometry_by_output.insert(
+            "ndi-program".into(),
+            crate::engine::output_engine::VideoGeometry { pan_y: -0.3, ..Default::default() },
+        );
+        let rebuilt = factory.from_json(cue.serialize()).unwrap();
+        assert_eq!(rebuilt.serialize()["geometry"]["pan_x"], 0.2);
+        assert_eq!(rebuilt.serialize()["geometry_by_output"]["ndi-program"]["pan_y"], -0.3);
+
+        let legacy = factory.from_json(json!({ "type": "text", "position": "bottom_center" })).unwrap();
+        assert_eq!(legacy.serialize()["position"], "bottom_center");
+        assert_eq!(legacy.serialize()["geometry"]["pan_x"], 0.0);
+        assert_eq!(legacy.serialize()["geometry"]["scale"], 1.0);
     }
 }

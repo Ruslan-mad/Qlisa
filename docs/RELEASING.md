@@ -27,7 +27,7 @@ Actions workflow are separate checks.
   wrapper exists before using it. Do not copy its credential store into the
   repository or pass the password on a command line.
 - `scripts/runtime-manifest.json` and `scripts/full-installer-manifest.json`
-  with pinned archive URLs, file hashes, and installer hashes. The full
+  with approved versioned runtime asset URLs, package/file hashes, and installer hashes. The full
   installer needs matching local FFmpeg, ffprobe, libmpv, and Vulkan inputs.
   `scripts/prepare-full-installer.ps1` validates and stages them under ignored
   `src-tauri/target/`. It uses a matching local runtime cache or `src-tauri/vendor/`
@@ -47,6 +47,22 @@ each installer when `bundle.createUpdaterArtifacts` is `true`.
 Keep an encrypted backup of the private signing key outside the repository.
 Losing this key prevents updates for users who trust the configured public
 key.
+
+## Publish a Windows runtime kit
+
+Publish each kit under a new immutable tag named
+`media-runtime-win-x64-<date>.<sequence>`. Mark the GitHub Release as a
+prerelease and set `make_latest=false`. Never overwrite or delete a published
+runtime tag or its assets. Do not upload `latest.json` or move the app's
+`/releases/latest` pointer: it must continue to identify the current Qlisa app
+release (currently v1.5.20), because the Tauri updater reads that feed.
+
+Before the next app release, add the new kit to `approvedKits` while retaining
+older compatible kits, set `recommendedKitId`, and update the full-installer
+`kitId` and runtime file hashes. Record SHA-256 values for each ZIP and every
+runtime file. Verify the versioned asset URLs with
+`node scripts/runtime-download-check.mjs` before building the app. The current
+runtime release is [media-runtime-win-x64-2026.11.14.1](https://github.com/Ruslan-mad/Qlisa/releases/tag/media-runtime-win-x64-2026.11.14.1).
 
 ## Prepare a local build
 

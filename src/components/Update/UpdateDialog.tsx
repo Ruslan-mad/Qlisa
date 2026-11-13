@@ -5,6 +5,7 @@ import { useUpdateStore } from "../../stores/updateStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { flattenActiveCues } from "../ActiveCues/activeCueModel";
 import { useLocale } from "../../i18n";
+import { dialogActionButtonStyle, dialogActionFooterStyle } from "../common/dialogActionStyles";
 
 /** Render `**bold**` spans of a markdown line as JSX (no dependency). */
 function inlineBold(text: string): React.ReactNode {
@@ -85,7 +86,7 @@ export function UpdateDialog() {
       style={{
         position: "fixed", inset: 0, zIndex: 100000,
         background: "rgba(0,0,0,0.6)",
-        display: "flex", alignItems: "center", justifyContent: "center",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
       }}
       onClick={busy ? undefined : dismiss}
     >
@@ -93,7 +94,7 @@ export function UpdateDialog() {
         onClick={(e) => e.stopPropagation()}
         style={{
           background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)",
-          borderRadius: 12, padding: "24px 28px", width: 440,
+          borderRadius: 12, padding: "20px 22px", width: 440, maxWidth: "calc(100vw - 32px)", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxSizing: "border-box",
           boxShadow: "0 16px 48px rgba(0,0,0,0.8)",
         }}
       >
@@ -167,14 +168,14 @@ export function UpdateDialog() {
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <div style={dialogActionFooterStyle}>
           <button
             onClick={dismiss}
             disabled={busy}
             style={{
               background: "transparent", border: "1px solid var(--wc-border-strong)",
               borderRadius: 6, color: "var(--wc-text)", cursor: busy ? "default" : "pointer",
-              fontSize: 13, padding: "6px 16px", opacity: busy ? 0.5 : 1,
+              ...dialogActionButtonStyle, fontSize: 13, opacity: busy ? 0.5 : 1,
             }}
           >
             {t("systemUi.later")}
@@ -187,7 +188,7 @@ export function UpdateDialog() {
             style={{
               background: "var(--wc-accent)", border: "1px solid var(--wc-accent-hover)",
               borderRadius: 6, color: "var(--wc-accent-fg)", cursor: busy ? "default" : "pointer",
-              fontSize: 13, fontWeight: 600, padding: "6px 16px", opacity: busy ? 0.5 : 1,
+              ...dialogActionButtonStyle, fontSize: 13, fontWeight: 600, opacity: busy ? 0.5 : 1,
             }}
           >
             {status === "error" ? t("common.retry") : installBlock ? t("systemUi.downloadUpdate") : t("systemUi.installRestart")}

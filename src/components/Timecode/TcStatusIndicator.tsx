@@ -50,6 +50,7 @@ export function TcStatusIndicator() {
 
   return (
     <div
+      className="stage-transport-timecode-status"
       style={{
         display: "flex",
         alignItems: "center",
@@ -72,10 +73,11 @@ export function TcStatusIndicator() {
           transition: "background 0.3s",
         }}
       />
-      <span style={{ fontFamily: "monospace", fontSize: 11, color: running ? "var(--wc-text)" : "var(--wc-text-muted)" }}>
+      <span className="stage-transport-timecode-full" style={{ fontFamily: "monospace", fontSize: 11, color: running ? "var(--wc-text)" : "var(--wc-text-muted)" }}>
         {formatTc(pos)}
       </span>
-      <span style={{ fontSize: 10, color: "var(--wc-text-faint)" }}>{pos.rate}</span>
+      <span className="stage-transport-timecode-compact">TC</span>
+      <span className="stage-transport-timecode-rate" style={{ fontSize: 10, color: "var(--wc-text-faint)" }}>{pos.rate}</span>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 # Updater testing
 
-Qlisa uses the Tauri updater to update the application. The media runtime is independent: `ffmpeg.exe`, `ffprobe.exe`, and `libmpv-2.dll` are downloaded from pinned upstream URLs, hash-checked, and stored in `%LOCALAPPDATA%\Qlisa\runtime`. They are not bundled in the NSIS installer or updater artifact.
+Qlisa uses the Tauri updater to update the application. The media runtime is independent: `ffmpeg.exe`, `ffprobe.exe`, and `libmpv-2.dll` come from versioned, pinned Qlisa runtime release assets and are stored in `%LOCALAPPDATA%\Qlisa\runtime`. The full installer embeds the recommended kit. Compact app updates preserve the installed kit and do not update it automatically. An empty runtime cache is populated on first launch; updates and repairs require an explicit operator action. Runtime components are not bundled in the compact updater artifact.
 
 ## Required local test
 
@@ -11,6 +11,7 @@ Before a public binary release, run the signed local loopback test in [UPDATER_T
 - The runtime downloads into LocalAppData and stays outside Program Files.
 - The update accepts a valid signature, rejects an invalid signature, restarts the app, and preserves test settings and workspace data.
 - Runtime files remain available after the Qlisa update, and the second launch does not download them again.
+- A compatible older kit remains active after an app update until the operator chooses Update components. A missing kit installs on first launch; a damaged kit waits for explicit repair.
 
 The previous local 1.5.3 → 1.5.4 test passed. The new 1.5.5 → 1.5.6 per-machine test is pending. Do not describe the updater as verified for this installation model until the new test passes.
 

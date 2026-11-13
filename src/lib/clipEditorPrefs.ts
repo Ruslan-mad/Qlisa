@@ -1,16 +1,18 @@
-import type { DisplayPreferences, PreviewPlayheadEvent } from "./types";
+import type { CueSummary, DisplayPreferences, PreviewPlayheadEvent } from "./types";
 
-export type ClipEditorTab = "Preview" | "Live" | "Slice";
+export type ClipEditorTab = "Preview" | "Live";
+/** `Slice` is accepted only as a legacy panel value and maps to Preview. */
 export type ClipEditorPanel = "Preview" | "Slice";
-export const CLIP_EDITOR_TAB_LABELS = { preview: "Preview", live: "Live", slice: "Slice" } as const;
+export const CLIP_EDITOR_TAB_LABELS = { preview: "Preview", live: "Live" } as const;
 export type ClipEditorVisibility = Pick<DisplayPreferences, "show_live_panel" | "show_slice_panel"> & {
   clip_editor_active_tab?: "Live" | "Slice";
-  clip_editor_active_tab_v2?: ClipEditorTab | null;
+  clip_editor_active_tab_v2?: ClipEditorTab | "Slice" | null;
 };
 export type NormalizedClipEditorVisibility = {
   show_live_panel: boolean;
-  show_slice_panel: boolean;
-  clip_editor_active_tab: "Live" | "Slice";
+  /** Deprecated compatibility field; canonical state always writes false. */
+  show_slice_panel: false;
+  clip_editor_active_tab: "Live";
   clip_editor_active_tab_v2: ClipEditorTab;
 };
 
@@ -130,8 +132,8 @@ export function previewPlayheadForCue(
   return cueId && preview?.active && preview.cue_id === cueId ? preview : null;
 }
 
-export function clipEditorDockVisible(showLivePanel: boolean, showSlicePanel: boolean): boolean {
-  return showLivePanel || showSlicePanel;
+export function clipEditorDockVisible(showLivePanel: boolean, _legacyShowSlicePanel = false): boolean {
+  return showLivePanel;
 }
 
 /** Selected cues take precedence over an inspector-opened cue so a click in
@@ -156,29 +158,53 @@ export function resolveClipEditorTargetCueId(
   return resolveClipEditorCueId(selectedCueId, editorCueId);
 }
 
+/** Resolve a Presentation parent to its current media child, then the next
+ * unfinished child, without changing the selected cue. */
+export function resolvePresentationPreviewCueId(presentation: CueSummary): string | null {
+  if (presentation.cue_type !== "presentation") return null;
+  const children = presentation.children ?? [];
+  const media = children.filter((child) =>
+    (child.cue_type === "image" || child.cue_type === "video") && !!child.file_path,
+  );
+  if (media.length === 0) return null;
+
+  // GroupCue.active_child_id is the next child GO will fire. It is not the
+  // child that is currently displayed, so runtime child states take priority.
+  const running = media.filter((child) => child.state === "running");
+  if (running.length > 0) return running[running.length - 1].id;
+
+  // A child can be paused directly while its Presentation stays running. If
+  // there is no running media, keep the last paused layer ahead of the next
+  // child pointer. This also selects the overlaid video in AsSlide mode.
+  const paused = media.filter((child) => child.state === "paused");
+  if (paused.length > 0) return paused[paused.length - 1].id;
+
+  const nextMedia = media.find((child) => child.id === presentation.active_child_id);
+  return nextMedia?.id ?? media.find((child) => child.state !== "completed")?.id ?? media[0].id;
+}
+
 /** Migrate the compatibility mirror from projects written before the two-panel dock. */
 export function normalizeClipEditorVisibility(
   prefs: Partial<ClipEditorVisibility> | null | undefined,
 ): NormalizedClipEditorVisibility {
-  const showLive = prefs?.show_live_panel ?? true;
-  const showSlice = prefs?.show_slice_panel ?? true;
+  const legacySliceVisible = prefs?.show_slice_panel ?? true;
   const requestedV2 = prefs?.clip_editor_active_tab_v2;
   const legacyRequested = prefs?.clip_editor_active_tab;
+  // Old projects had two independent panel flags. If Preview was hidden but
+  // Slice was visible (or its old field was absent and defaulted visible),
+  // keep the unified Preview reachable. A saved Slice tab also migrates to it.
+  const showLive = (prefs?.show_live_panel ?? true)
+    || legacySliceVisible
+    || requestedV2 === "Slice"
+    || legacyRequested === "Slice";
   const active: ClipEditorTab = requestedV2 === "Live"
     ? "Live"
-    : requestedV2 === "Slice" && showSlice
-      ? "Slice"
-      : requestedV2 === "Preview" && showLive
-        ? "Preview"
-        : legacyRequested === "Slice" && showSlice
-          ? "Slice"
-          : showLive
-            ? "Preview"
-            : "Live";
+    : "Preview";
   return {
     show_live_panel: showLive,
-    show_slice_panel: showSlice,
-    clip_editor_active_tab: active === "Slice" ? "Slice" : "Live",
+    show_slice_panel: false,
+    // The legacy enum has no Preview value; `Live` was its old Preview state.
+    clip_editor_active_tab: "Live",
     clip_editor_active_tab_v2: active,
   };
 }
@@ -186,16 +212,17 @@ export function normalizeClipEditorVisibility(
 /** Apply a View-menu toggle and repair the active tab if its panel disappears. */
 export function toggleClipEditorPanel(
   state: NormalizedClipEditorVisibility,
-  panel: ClipEditorPanel,
+  _panel: ClipEditorPanel,
 ): NormalizedClipEditorVisibility {
+  // The old Slice panel now shares Preview's visibility.
   const next = {
     ...state,
-    show_live_panel: panel === "Preview" ? !state.show_live_panel : state.show_live_panel,
-    show_slice_panel: panel === "Slice" ? !state.show_slice_panel : state.show_slice_panel,
+    show_live_panel: !state.show_live_panel,
+    show_slice_panel: false as const,
   };
-  if (next.clip_editor_active_tab_v2 === "Preview" && !next.show_live_panel) next.clip_editor_active_tab_v2 = "Live";
-  if (next.clip_editor_active_tab_v2 === "Slice" && !next.show_slice_panel) next.clip_editor_active_tab_v2 = next.show_live_panel ? "Preview" : "Live";
-  next.clip_editor_active_tab = next.clip_editor_active_tab_v2 === "Slice" ? "Slice" : "Live";
+  if (next.show_live_panel && !state.show_live_panel) next.clip_editor_active_tab_v2 = "Preview";
+  else if (!next.show_live_panel && next.clip_editor_active_tab_v2 === "Preview") next.clip_editor_active_tab_v2 = "Live";
+  next.clip_editor_active_tab = "Live";
   return next;
 }
 

@@ -1,5 +1,44 @@
 {
   "schemaVersion": 1,
+  "recommendedKitId": "win-x64-2026.11.14.1",
+  "approvedKits": [
+    {
+      "id": "win-x64-2026.11.14.1",
+      "architecture": "windows-x86_64",
+      "components": [
+        {
+          "id": "ffmpeg",
+          "version": "9.0.2-full_build-www.gyan.dev",
+          "asset": {
+            "fileName": "ffmpeg-win-x64.zip",
+            "url": "https://github.com/Ruslan-mad/Qlisa/releases/download/media-runtime-win-x64-2026.11.14.1/ffmpeg-win-x64.zip",
+            "sha256": "4dc45608c3e7b7e85039021df2ed014028b19ac775b904c029a3c0a268fff3cc",
+            "format": "zip"
+          },
+          "runtimeFiles": [
+            { "fileName": "ffmpeg.exe", "sha256": "589e50b766d251afdf181dd664d40bd94407e200b019989fd7468c7d118a28d0" },
+            { "fileName": "ffprobe.exe", "sha256": "02264dfa4f56baaa31e443ece8aa16d397f6b008200e7fd184d22b9009e75fd3" }
+          ],
+          "requiredVersionText": "9.0.2-full_build-www.gyan.dev",
+          "requiredProtocols": ["srt"]
+        },
+        {
+          "id": "libmpv",
+          "version": "v0.41.0-1055-g6fd80b200",
+          "asset": {
+            "fileName": "libmpv-win-x64.zip",
+            "url": "https://github.com/Ruslan-mad/Qlisa/releases/download/media-runtime-win-x64-2026.11.14.1/libmpv-win-x64.zip",
+            "sha256": "318aa501c6ab0f684d2c1d603f6d163813778cbcfc271cdd592cdd40aa9fb95f",
+            "format": "zip"
+          },
+          "runtimeFiles": [
+            { "fileName": "libmpv-2.dll", "sha256": "751131f81b5ce485d046ff08d1a44a93c5455be5135d53c0ab19c56780925ff0" }
+          ],
+          "minimumClientApi": { "major": 2, "minor": 5 }
+        }
+      ]
+    }
+  ],
   "purpose": "Pinned Windows runtime configuration and acquisition provenance. The application embeds this manifest to locate and verify runtime downloads; this file also records provenance evidence and is not a compliance attestation.",
   "components": [
     {

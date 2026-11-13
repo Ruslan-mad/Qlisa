@@ -2045,6 +2045,21 @@ impl AudioEngine {
         self.broadcast_command(AudioCommand::SetGain { voice_id, gain })
     }
 
+    /// Replace a voice's source-time automation without replacing the voice.
+    /// The RT callback crossfades to the new curve over about 5 ms.
+    pub fn set_voice_gain_envelope(
+        &self,
+        voice_id: VoiceId,
+        envelope: crate::cue::gain_envelope::GainEnvelopeRt,
+    ) -> Result<()> {
+        let transition_samples = (self.sample_rate().max(1) * 5 / 1000).max(1);
+        self.broadcast_command(AudioCommand::SetGainEnvelope {
+            voice_id,
+            envelope,
+            transition_samples,
+        })
+    }
+
     pub fn set_voice_muted(&self, voice_id: VoiceId, muted: bool) -> Result<()> {
         self.broadcast_command(AudioCommand::SetMuted { voice_id, muted })
     }
@@ -2169,7 +2184,6 @@ impl AudioEngine {
                 (VoiceState::Paused, false) => voice.set_playing(),
                 _ => return false,
             }
-            true
         }).unwrap_or(false)
     }
 
@@ -3063,14 +3077,21 @@ fn fill_buffer_with_meter(
             } else {
                 sample_l
             };
+            // Source-frame position is independent of slice PCM cache offsets,
+            // so authored automation follows the file through slices/seeks.
+            // SAFETY: automation state is callback-owned after submission.
+            let envelope_gain = unsafe {
+                (&mut *voice.inner.gain_envelope.get())
+                    .next_gain(frame_pos_f, voice.sample_rate)
+            };
 
             let out_base = frame * channels;
             // The canonical bus is deliberately upstream of hardware routing:
             // pan/cue gain, patch fader and fade are artistic levels; ASIO
             // offset, physical out_l/out_r and LevelMatrix are device routing.
             // There is no unique stereo inverse for a physical matrix.
-            let program_l = sample_l * gain_l * fade_gain;
-            let program_r = sample_r * gain_r * fade_gain;
+            let program_l = sample_l * gain_l * envelope_gain * fade_gain;
+            let program_r = sample_r * gain_r * envelope_gain * fade_gain;
             if capture_program && !voice.preview_only {
                 program_stereo[frame * 2] += program_l;
                 program_stereo[frame * 2 + 1] += program_r;
@@ -3082,7 +3103,7 @@ fn fill_buffer_with_meter(
             if let Some(matrix) = unsafe { &*matrix_ptr } {
                 // Crosspoint routing replaces pan and the out_l/out_r pair —
                 // those are this same mix, restricted to two channels.
-                let level = matrix_gain * fade_gain;
+                let level = matrix_gain * envelope_gain * fade_gain;
                 for out in 0..matrix.width.min(channels) {
                     let mixed =
                         (sample_l * matrix.gains[0][out] + sample_r * matrix.gains[1][out]) * level;
@@ -3431,6 +3452,15 @@ fn mix_stream_with_meter(
             cursor.current[0] + (cursor.next[0] - cursor.current[0]) * frac,
             cursor.current[1] + (cursor.next[1] - cursor.current[1]) * frac,
         ];
+        // `frame_pos + phase` is the source-file coordinate of the sample
+        // currently being interpolated (not a decoder-ring/cache offset).
+        // SAFETY: automation state is callback-owned after submission.
+        let envelope_gain = unsafe {
+            (&mut *voice.inner.gain_envelope.get()).next_gain(
+                frame_pos as f64 + cursor.phase,
+                source.sample_rate,
+            )
+        };
         cursor.phase += ratio;
         // If a high output rate crosses more than one source frame in a
         // single callback frame, reaching EOF can move `current` to the last
@@ -3463,14 +3493,14 @@ fn mix_stream_with_meter(
             frame_pos = frame_pos.saturating_add(1);
         }
         let out_base = frame * channels;
-        let program_l = sample[0] * gain_l * fade_gain;
-        let program_r = sample[1] * gain_r * fade_gain;
+        let program_l = sample[0] * gain_l * envelope_gain * fade_gain;
+        let program_r = sample[1] * gain_r * envelope_gain * fade_gain;
         if let Some(program) = program_stereo.as_deref_mut() {
             program[frame * 2] += program_l;
             program[frame * 2 + 1] += program_r;
         }
         if let Some(matrix) = unsafe { &*matrix_ptr } {
-            let level = matrix_gain * fade_gain;
+            let level = matrix_gain * envelope_gain * fade_gain;
             for out in 0..matrix.width.min(channels) {
                 let mixed = (sample[0] * matrix.gains[0][out] + sample[1] * matrix.gains[1][out]) * level;
                 add_routed_sample(output, meter_output, out_base + out, mixed);
@@ -3851,19 +3881,41 @@ fn apply_command(
         }
         AudioCommand::Pause { voice_id } => {
             if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
-                let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id, command: crate::engine::ring_command::TransportCommandKind::Pause, frame: v.current_frame() });
-                v.set_paused();
+                if !matches!(v.voice_state(), VoiceState::Stopped | VoiceState::Idle)
+                    && v.set_paused()
+                {
+                    let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id, command: crate::engine::ring_command::TransportCommandKind::Pause, frame: v.current_frame() });
+                }
             }
         }
         AudioCommand::Resume { voice_id } => {
             if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
-                let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id, command: crate::engine::ring_command::TransportCommandKind::Resume, frame: v.current_frame() });
-                v.set_playing();
+                // Resume is only valid for a paused voice. A late mpv reveal
+                // can race Stop; it must not revive the cancelled stream.
+                if v.voice_state() == VoiceState::Paused && v.set_playing() {
+                    let _ = status_prod.try_push(AudioStatus::TransportMarker { voice_id, command: crate::engine::ring_command::TransportCommandKind::Resume, frame: v.current_frame() });
+                }
             }
         }
         AudioCommand::SetGain { voice_id, gain } => {
             if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
                 v.inner.set_gain(gain);
+            }
+        }
+        AudioCommand::SetGainEnvelope { voice_id, envelope, transition_samples } => {
+            if let Some(v) = voices.iter().find(|v| v.id == voice_id) {
+                let frame = v.current_frame() as f64;
+                // SAFETY: The envelope state is written only by this voice's
+                // owning callback, including when an edit arrives while it is
+                // already playing.
+                unsafe {
+                    (&mut *v.inner.gain_envelope.get()).replace(
+                        envelope,
+                        frame,
+                        v.sample_rate,
+                        transition_samples,
+                    );
+                }
             }
         }
         AudioCommand::SetMuted { voice_id, muted } => {
@@ -4055,6 +4107,30 @@ mod tests {
             &period,
         );
         voice.frame_pos.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn render_voice_frames(
+        voice: Arc<Voice>,
+        output_frames: usize,
+        output_sr: u32,
+        command: Option<AudioCommand>,
+    ) -> Vec<f32> {
+        use ringbuf::traits::Producer;
+        let pool = rt_pool(vec![Arc::clone(&voice)]);
+        let feeds: Arc<Mutex<Vec<InputFeed>>> = Arc::new(Mutex::new(Vec::new()));
+        let (mut cmd_prod, mut cmd_cons) = HeapRb::<AudioCommand>::new(16).split();
+        if let Some(command) = command { cmd_prod.try_push(command).unwrap(); }
+        let (mut status_prod, _) = HeapRb::<AudioStatus>::new(16).split();
+        let master = Arc::new(std::sync::atomic::AtomicU32::new(f32::to_bits(1.0)));
+        let period = Arc::new(std::sync::atomic::AtomicU32::new(output_frames as u32));
+        let mut output = vec![0.0_f32; output_frames * 2];
+        let mut program = output.clone();
+        let taps = empty_program_audio_taps();
+        fill_buffer(
+            &mut output, &mut program, 2, output_sr, &pool, &feeds, &taps,
+            &mut cmd_cons, &mut status_prod, &master, &period,
+        );
+        output
     }
 
     #[test]
@@ -4737,6 +4813,111 @@ mod tests {
             assert!((max_delta - expected_delta*scale).abs() < 0.0001, "{format}: unexpected seam discontinuity");
         }
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn source_time_gain_envelope_survives_compact_slice_loop_and_seek() {
+        use crate::cue::gain_envelope::{GainEnvelope, GainEnvelopePoint};
+        let envelope = GainEnvelope { points: vec![
+            GainEnvelopePoint { time_ms: 0, gain: 0.0 },
+            GainEnvelopePoint { time_ms: 4, gain: 1.0 },
+        ] }.to_rt().unwrap();
+        let voice = Arc::new(Voice::new(Arc::new(vec![1.0_f32; 8]), 2, 1_000, 1.0, 0.0));
+        // The samples are compacted to four frames, while the voice playhead
+        // remains in source-file frames 2..6 across two passes.
+        set_slices(&voice, &[(2, 6, 2)]);
+        unsafe {
+            voice.set_initial_gain_envelope(envelope);
+            (*voice.inner.slices.get()).as_mut().unwrap().segments[0].pcm_offset_frames = Some(0);
+        }
+        voice.set_playing();
+        let repeated = render_voice_frames(Arc::clone(&voice), 8, 1_000, None);
+        let expected = [0.5_f32, 0.75, 1.0, 1.0, 0.5, 0.75, 1.0, 1.0];
+        for (index, gain) in expected.iter().enumerate() {
+            assert!((repeated[index * 2] - gain).abs() < 1e-6, "slice pass sample {index}: {}", repeated[index * 2]);
+            assert_eq!(repeated[index * 2], repeated[index * 2 + 1]);
+        }
+
+        let seek_voice = Arc::new(Voice::new(Arc::new(vec![1.0_f32; 20]), 2, 1_000, 1.0, 0.0));
+        unsafe { seek_voice.set_initial_gain_envelope(envelope); }
+        seek_voice.frame_pos.store(3, Ordering::Relaxed);
+        seek_voice.set_playing();
+        let sought = render_voice_frames(seek_voice, 1, 1_000, None);
+        assert!((sought[0] - 0.75).abs() < 1e-6, "seek must sample envelope at source frame 3, got {}", sought[0]);
+    }
+
+    #[test]
+    fn streaming_gain_envelope_uses_file_time_after_trim_seek_and_resampling() {
+        use crate::cue::gain_envelope::{GainEnvelope, GainEnvelopePoint};
+        use crate::cue::media_decode::StreamingAudioSource;
+
+        let source = StreamingAudioSource::test_from_pcm(&[[1.0, 1.0]; 32], true, true);
+        let voice = Arc::new(Voice::new_stream(Arc::clone(&source), 1.0, 0.0));
+        // Simulate a seek to a trimmed file range. The stream ring contains the
+        // PCM available after that seek, while envelope time remains absolute.
+        voice.loop_start_frame.store(4, Ordering::Relaxed);
+        voice.frame_pos.store(4, Ordering::Relaxed);
+        voice.inner.set_rate(1.5);
+        unsafe {
+            *voice.inner.end_frame.get() = Some(20);
+            voice.set_initial_gain_envelope(GainEnvelope { points: vec![
+                GainEnvelopePoint { time_ms: 0, gain: 1.0 },
+                GainEnvelopePoint { time_ms: 1, gain: 0.0 },
+            ] }.to_rt().unwrap());
+        }
+        voice.set_playing();
+
+        // 48 kHz source -> 96 kHz output at 1.5x advances by 0.75 source
+        // frames per output sample. Every expected gain uses source file time.
+        let output = render_voice_frames(voice, 4, 96_000, None);
+        let source_frames = [4.0_f32, 4.75, 5.5, 6.25];
+        for (index, frame) in source_frames.iter().enumerate() {
+            let expected = 1.0 - frame / 48.0;
+            assert!((output[index * 2] - expected).abs() < 1e-5,
+                "stream sample {index} should use source frame {frame}: expected {expected}, got {}", output[index * 2]);
+            assert_eq!(output[index * 2], output[index * 2 + 1]);
+        }
+    }
+
+    #[test]
+    fn boost_envelope_multiplies_pcm_and_stream_samples_exactly_without_limiting() {
+        use crate::cue::gain_envelope::{GainEnvelope, GainEnvelopePoint};
+        use crate::cue::media_decode::StreamingAudioSource;
+        let boost = GainEnvelope { points: vec![GainEnvelopePoint { time_ms: 0, gain: 2.0 }] }.to_rt().unwrap();
+
+        let pcm = Arc::new(Voice::new(Arc::new(vec![0.25_f32; 8]), 2, 48_000, 1.0, 0.0));
+        unsafe { pcm.set_initial_gain_envelope(boost); }
+        pcm.set_playing();
+        let pcm_output = render_voice_frames(Arc::clone(&pcm), 2, 48_000, None);
+        assert_eq!(pcm_output, vec![0.5_f32; 4], "PCM path must apply the full 2x envelope gain");
+
+        let source = StreamingAudioSource::test_from_pcm(&[[0.25_f32, 0.25_f32]; 8], true, true);
+        let stream = Arc::new(Voice::new_stream(Arc::clone(&source), 1.0, 0.0));
+        unsafe { stream.set_initial_gain_envelope(boost); }
+        stream.set_playing();
+        let stream_output = render_voice_frames(stream, 2, 48_000, None);
+        assert_eq!(stream_output, vec![0.5_f32; 4], "stream path must apply the full 2x envelope gain");
+    }
+
+    #[test]
+    fn live_envelope_replacement_crossfades_at_sample_level() {
+        use crate::cue::gain_envelope::{GainEnvelope, GainEnvelopePoint};
+        let unity = GainEnvelope { points: vec![GainEnvelopePoint { time_ms: 0, gain: 1.0 }] }.to_rt().unwrap();
+        let silence = GainEnvelope { points: vec![GainEnvelopePoint { time_ms: 0, gain: 0.0 }] }.to_rt().unwrap();
+        let voice = Arc::new(Voice::new(Arc::new(vec![1.0_f32; 2_000]), 2, 48_000, 1.0, 0.0));
+        unsafe { voice.set_initial_gain_envelope(unity); }
+        voice.set_playing();
+        assert_eq!(render_voice_frames(Arc::clone(&voice), 1, 48_000, None)[0], 1.0);
+        let voice_id = voice.id;
+        let output = render_voice_frames(Arc::clone(&voice), 240, 48_000, Some(AudioCommand::SetGainEnvelope {
+            voice_id,
+            envelope: silence,
+            transition_samples: 240,
+        }));
+        assert!(output[0] < 1.0 && output[0] > 0.99, "first replacement sample stepped: {}", output[0]);
+        let left: Vec<f32> = output.chunks_exact(2).map(|frame| frame[0]).collect();
+        assert!(left.windows(2).all(|pair| pair[1] <= pair[0] + 1e-6), "transition must not jump upward");
+        assert!(left[239].abs() < 1e-6, "5 ms replacement must reach the new curve, got {}", left[239]);
     }
 
     #[test]
@@ -6550,6 +6731,70 @@ mod tests {
 
         assert_eq!(keep.voice_state(), VoiceState::Playing);
         assert_eq!(orphan.voice_state(), VoiceState::Stopped);
+    }
+
+    #[test]
+    fn late_pause_and_resume_commands_cannot_revive_a_stopped_stream_voice() {
+        let source = crate::cue::media_decode::streaming_tests::test_source(
+            crate::cue::media_decode::StreamPlaybackState::Paused,
+            false,
+            0,
+        );
+        let voice = Arc::new(Voice::new_stream(Arc::clone(&source), 1.0, 0.0));
+        voice.set_paused();
+        let voices = vec![Arc::clone(&voice)];
+        let (mut status_prod, _) = HeapRb::<AudioStatus>::new(16).split();
+
+        apply_command(
+            &voices,
+            AudioCommand::Stop {
+                voice_id: voice.id,
+                fade_ms: 500,
+                fade_curve: FadeCurve::Linear,
+            },
+            &mut status_prod,
+        );
+        apply_command(
+            &voices,
+            AudioCommand::Resume { voice_id: voice.id },
+            &mut status_prod,
+        );
+        apply_command(
+            &voices,
+            AudioCommand::Pause { voice_id: voice.id },
+            &mut status_prod,
+        );
+        apply_command(
+            &voices,
+            AudioCommand::Resume { voice_id: voice.id },
+            &mut status_prod,
+        );
+
+        assert_eq!(voice.voice_state(), VoiceState::Stopped);
+        assert!(source.is_cancelled());
+        assert_eq!(run_fill(voice, 480, 48_000), 0);
+        assert_eq!(source.underruns(), 0, "a stale command must not restart the cancelled decoder");
+
+        let live_source = crate::cue::media_decode::streaming_tests::test_source(
+            crate::cue::media_decode::StreamPlaybackState::Paused,
+            true,
+            8,
+        );
+        let live_voice = Arc::new(Voice::new_stream(Arc::clone(&live_source), 1.0, 0.0));
+        live_voice.set_paused();
+        let live_voices = vec![Arc::clone(&live_voice)];
+        apply_command(
+            &live_voices,
+            AudioCommand::Resume { voice_id: live_voice.id },
+            &mut status_prod,
+        );
+        apply_command(
+            &live_voices,
+            AudioCommand::Pause { voice_id: live_voice.id },
+            &mut status_prod,
+        );
+        assert_eq!(live_voice.voice_state(), VoiceState::Paused);
+        assert_eq!(live_source.diagnostics().state, crate::cue::media_decode::StreamPlaybackState::Paused);
     }
 
     #[test]

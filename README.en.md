@@ -92,7 +92,7 @@ Qlisa 1.5.13 added UUID-based commands between Cue Lists. Goto moves the target 
 
 Qlisa 1.5.14 added a configurable status bar and restoration of the main window's position, size, and maximized state. See the [1.5.14 release notes](docs/RELEASE_NOTES_1.5.14.md), [status bar guide](docs/status-bar.md), and [window state note](docs/window-state.md).
 
-Qlisa 1.5.20 is the current release. For a new or offline installation, download the [full installer (390.7 MB)](https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.20/Qlisa_1.5.20_x64-full-setup.exe). To update an installed copy, use the [compact update package (9.62 MB)](https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.20/Qlisa_1.5.20_x64-update-setup.exe); the in-app updater uses this package. The full package includes verified media components, the offline WebView2 installer, and the official NDI Runtime installer. See the [1.5.20 release notes](docs/RELEASE_NOTES_1.5.20.md) and [offline installer QA results](docs/OFFLINE_INSTALLER_QA_1.5.20.md).
+Qlisa 1.5.21 is the current release. For a new or offline installation, download the [full installer](https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.21/Qlisa_1.5.21_x64-full-setup.exe). To update an installed copy, use the [compact update package](https://github.com/Ruslan-mad/Qlisa/releases/download/v1.5.21/Qlisa_1.5.21_x64-update-setup.exe); the in-app updater uses this package. The full package includes the Media Runtime, the offline WebView2 installer, and the official NDI Runtime installer. See the [1.5.21 release notes](docs/RELEASE_NOTES_1.5.21.md) and [offline installer QA results for the previous release](docs/OFFLINE_INSTALLER_QA_1.5.20.md).
 
 Qlisa 1.5.12 also introduced the Stage theme for live operation, with a
 compact Cue List, independently collapsible panels, and large transport
@@ -116,7 +116,7 @@ Qlisa is for **Windows 10 and Windows 11**. The installer installs the app for a
 
 2. Run the installer and complete setup.
 
-3. Start Qlisa. The full installer contains the verified Media Runtime and offline WebView2 installer. If a bundled file fails verification, Qlisa stops preparation and shows an error.
+3. Start Qlisa. The full installer contains the approved Media Runtime kit and offline WebView2 installer. Qlisa verifies and installs the kit when the cache is empty. The full installer also contains a matching kit for offline repair.
 
 The full installer also installs NDI 6 Runtime when a suitable version is missing. Compact updates preserve the runtime cache and installed NDI Runtime.
 
@@ -128,7 +128,7 @@ New projects use the `.qlisa` extension. Qlisa also opens `.inkue` projects; bot
 
 Qlisa checks for app updates through GitHub Releases. The user starts an update from the app. Qlisa delays installation while Cues are playing.
 
-The full installer first verifies the SHA-256 hashes of bundled FFmpeg, ffprobe, libmpv, and the Vulkan loader, then copies them to `%LOCALAPPDATA%\Qlisa\runtime`. This allows setup to start without a network connection. The compact update package omits these large components and preserves the existing cache. If runtime files are missing or damaged, Qlisa verifies pinned upstream archives and downloads the required files. A verification or download error keeps the main window closed.
+The full installer includes the approved Media Runtime kit and can install or repair it without a network connection. The compact update package omits these large components and preserves a compatible kit in `%LOCALAPPDATA%\Qlisa\runtime`. If no kit exists, Qlisa downloads the pinned package from a Qlisa release on first launch. Compatible kits persist across app updates. Install new components manually in Preferences; repair a damaged kit with the explicit Repair action.
 
 See [Windows Media Runtime](docs/windows-network-runtime.md) for details.
 

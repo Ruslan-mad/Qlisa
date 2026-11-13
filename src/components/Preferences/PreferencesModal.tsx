@@ -11,6 +11,7 @@ import { cloneNetworkOutputSettings, cloneOutputTransform, createOutputId, DEFAU
 import { CurveSelect } from "../common/CurveSelect";
 import { Select } from "../common/Select";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
+import { normalizeClipEditorVisibility } from "../../lib/clipEditorPrefs";
 import {
   getAsioOutputPairs,
   getAudioRuntimeStatus,
@@ -608,6 +609,7 @@ function GeneralContent({ prefs, onChange }: {
     { type: "fade", label: "cueTypes.fade" },
     { type: "wait", label: "cueTypes.wait" },
     { type: "group", label: "cueTypes.group" },
+    { type: "presentation", label: "cueTypes.presentation" },
     { type: "number", label: "cueTypes.number" },
     { type: "midi", label: "cueTypes.midi" },
     { type: "midi_file", label: "cueTypes.midiFile" },
@@ -1855,6 +1857,7 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
     }
     const normalizedOutputs = normalizeOutputDestinations(draftOutputs, draftDefaultOutputId, draftOutputScreen);
     const committedDefault = normalizedOutputs.destinations.find((output) => output.id === normalizedOutputs.defaultOutputId)!;
+    const clipEditor = normalizeClipEditorVisibility(draft.display);
     const committedDisplay: DisplayPreferences = {
       ...draftTheme,
       output_screen: committedDefault.monitor,
@@ -1873,9 +1876,10 @@ export function PreferencesModal({ onClose, standalone = false }: Props) {
       // Clip Editor visibility is global UI state, so preserve the current
       // global values while applying the rest of this complete Preferences
       // draft; it is not project content and must not affect dirty state.
-      show_live_panel: draft.display.show_live_panel ?? true,
-      show_slice_panel: draft.display.show_slice_panel ?? true,
-      clip_editor_active_tab: draft.display.clip_editor_active_tab ?? "Live",
+      show_live_panel: clipEditor.show_live_panel,
+      show_slice_panel: false,
+      clip_editor_active_tab: clipEditor.clip_editor_active_tab,
+      clip_editor_active_tab_v2: clipEditor.clip_editor_active_tab_v2,
       status_bar: draftStatusBar,
     };
     const displayPayload: DisplayPreferences = {

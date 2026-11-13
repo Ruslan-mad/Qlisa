@@ -8,9 +8,47 @@
 #![allow(dead_code)]
 
 use std::ffi::{c_char, c_void};
+use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use libloading::{Library, Symbol};
+
+/// Format a filesystem path for a libmpv `loadfile` argument or path option.
+///
+/// Ordinary Windows paths use forward slashes. Windows verbatim paths must
+/// keep their backslashes: turning `\\?\C:\...` into `//?/C:/...` makes
+/// mpv parse it as an invalid URL instead of a local file path.
+pub fn path_to_mpv_url(path: &Path) -> String {
+    let path = path.as_os_str().to_string_lossy();
+    #[cfg(windows)]
+    if path.starts_with(r"\\?\") {
+        return path.into_owned();
+    }
+    path.replace('\\', "/")
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::path_to_mpv_url;
+    use std::path::Path;
+
+    #[test]
+    fn ordinary_windows_path_is_slash_normalized() {
+        assert_eq!(
+            path_to_mpv_url(Path::new(r"C:\Users\demo\page.png")),
+            "C:/Users/demo/page.png"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_disk_and_unc_paths_keep_their_prefix_and_separators() {
+        let disk = r"\\?\C:\Users\demo\page.png";
+        let unc = r"\\?\UNC\server\share\page.png";
+        assert_eq!(path_to_mpv_url(Path::new(disk)), disk);
+        assert_eq!(path_to_mpv_url(Path::new(unc)), unc);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // mpv_format constants
@@ -392,6 +430,19 @@ impl MpvLib {
 
     pub fn load() -> Result<Self> {
         let lib = Self::open_dll()?;
+        #[cfg(windows)]
+        {
+        let api_version_fn: unsafe extern "C" fn() -> u32 = {
+            let symbol: Symbol<unsafe extern "C" fn() -> u32> = unsafe {
+                lib.get(b"mpv_client_api_version\0")
+            }.map_err(|e| anyhow!("libmpv: mpv_client_api_version is unavailable: {e}"))?;
+            *symbol
+        };
+        let api_version = unsafe { api_version_fn() };
+        if !crate::media_runtime::mpv_api_supported(api_version) {
+            anyhow::bail!("libmpv client API {api_version:#010x} is below the approved runtime minimum");
+        }
+        }
 
         // Extract a raw fn pointer from the library.  The Symbol borrows `lib`
         // but the inner fn pointer is Copy and does not carry a lifetime.

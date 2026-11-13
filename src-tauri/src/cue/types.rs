@@ -6,6 +6,55 @@ use uuid::Uuid;
 /// Unique identifier for a cue, backed by a UUID v4.
 pub type CueId = Uuid;
 
+/// How an imported presentation video is placed on its slide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PresentationVideoMode {
+    #[default]
+    Fullscreen,
+    AsSlide,
+}
+
+/// Original Open XML media-shape bounds. Coordinates are normalized to slide size.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PresentationVideoLayout {
+    pub slide_width: u64,
+    pub slide_height: u64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub rotation: u32,
+    pub crop_left: f64,
+    pub crop_top: f64,
+    pub crop_right: f64,
+    pub crop_bottom: f64,
+}
+
+impl PresentationVideoLayout {
+    /// True only for a finite, axis-aligned, uncropped rectangle that the
+    /// output compositor can reproduce without guessing.
+    pub fn supports_exact_as_slide(&self) -> bool {
+        let unit = |value: f64| value.is_finite() && (0.0..=1.0).contains(&value);
+        self.slide_width > 0
+            && self.slide_height > 0
+            && self.slide_width <= 100_000_000
+            && self.slide_height <= 100_000_000
+            && unit(self.x)
+            && unit(self.y)
+            && self.width.is_finite()
+            && self.width > 0.0
+            && self.height.is_finite()
+            && self.height > 0.0
+            && self.x + self.width <= 1.0
+            && self.y + self.height <= 1.0
+            && self.rotation == 0
+            && [self.crop_left, self.crop_top, self.crop_right, self.crop_bottom]
+                .iter()
+                .all(|value| value.is_finite() && *value == 0.0)
+    }
+}
+
 /// All supported cue types. New types can be added here and registered in [`super::registry::CueRegistry`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,6 +65,8 @@ pub enum CueType {
     Group,
     /// A set-list Number with one master Audio/Video cue and timed actions.
     Number,
+    /// A playlist of prepared pages imported from a presentation document.
+    Presentation,
     Fade,
     /// Stops all currently-running cues when triggered.
     Stop,
@@ -37,6 +88,8 @@ pub enum CueType {
     Timecode,
     /// Displays formatted text on the output surface via the mpv subtitle layer.
     Text,
+    /// Displays a timed countdown or count-up over the current output content.
+    Timer,
     /// Shows a live camera / capture / network video feed on the output surface.
     Camera,
     /// Displays an external HTTP(S) page in the shared exclusive browser surface.
@@ -78,6 +131,7 @@ impl std::fmt::Display for CueType {
             CueType::Wait     => write!(f, "wait"),
             CueType::Group    => write!(f, "group"),
             CueType::Number   => write!(f, "number"),
+            CueType::Presentation => write!(f, "presentation"),
             CueType::Fade     => write!(f, "fade"),
             CueType::Stop     => write!(f, "stop"),
             CueType::Video    => write!(f, "video"),
@@ -89,6 +143,7 @@ impl std::fmt::Display for CueType {
             CueType::Mic      => write!(f, "mic"),
             CueType::Timecode => write!(f, "timecode"),
             CueType::Text     => write!(f, "text"),
+            CueType::Timer    => write!(f, "timer"),
             CueType::Camera   => write!(f, "camera"),
             CueType::Browser  => write!(f, "browser"),
             CueType::Devamp   => write!(f, "devamp"),

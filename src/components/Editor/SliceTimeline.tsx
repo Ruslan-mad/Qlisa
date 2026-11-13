@@ -9,12 +9,16 @@
 // - click a segment badge to edit its play count ("inf" or ∞ = vamp)
 
 import { useEffect, useRef, useState } from "react";
-import type { SliceList } from "../../lib/types";
+import type { GainEnvelopePoint, SliceList } from "../../lib/types";
+import type { AudioFadeOverlay, FadeDirection } from "./audioFadeModel";
 import { PLAY_COUNT_INFINITE } from "../../lib/types";
 import type { TrimPainter, TrimView } from "../Inspector/TrimStrip";
 import { TRIM_END_COLOR, TRIM_START_COLOR, useCanvasWidth } from "../Inspector/TrimStrip";
 import { useLocale } from "../../i18n";
 import { useTimelineEditorStore } from "../../stores/timelineEditorStore";
+import { GainEnvelopeOverlay } from "./GainEnvelopeOverlay";
+import { canCommitSliceTimelineGesture, sliceTimelinePointerAction } from "./sliceTimelineInteraction";
+import { formatDurationMs } from "../CueList/formatDuration";
 
 const SLICE_COLOR = "#facc15";
 
@@ -58,13 +62,24 @@ function drawSliceMarker(ctx: CanvasRenderingContext2D, x: number, height: numbe
   ctx.fill();
 }
 
+function formatViewTime(ms: number, precise: boolean): string {
+  if (!precise) return formatDurationMs(ms);
+  const safeMs = Math.max(0, Math.floor(ms));
+  const minutes = Math.floor(safeMs / 60_000);
+  const seconds = Math.floor(safeMs / 1_000) % 60;
+  const millis = safeMs % 1_000;
+  return `${minutes}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
 type DragTarget =
   | { kind: "start" }
   | { kind: "end" }
-  | { kind: "slice"; index: number };
+  | { kind: "slice"; index: number }
+  | { kind: "position" };
 
 export function SliceTimeline({
   durationMs,
+  resetKey,
   startMs,
   endMs,
   slices,
@@ -77,8 +92,20 @@ export function SliceTimeline({
   dragPreview,
   onZoomDetail,
   onViewChange,
+  gainEnvelope,
+  gainEnvelopeEditable = false,
+  onGainEnvelopeChange,
+  audioFade,
+  audioFadeEditable = false,
+  audioFadeContextKey,
+  onAudioFadeDurationChange,
+  previewPositionMs = null,
+  onPreviewPosition,
+  onPreviewPositionEnd,
 }: {
   durationMs: number;
+  /** Stable cue identity. Media-detail swaps must not cancel an active gesture. */
+  resetKey?: unknown;
   startMs: number | null;
   endMs: number | null;
   slices: SliceList;
@@ -95,6 +122,17 @@ export function SliceTimeline({
   /** Reports every visible-window change (`null` = whole clip) so the owner
    *  can stream in window-matched preview data. */
   onViewChange?: (view: TrimView | null) => void;
+  gainEnvelope?: GainEnvelopePoint[] | null;
+  gainEnvelopeEditable?: boolean;
+  onGainEnvelopeChange?: (points: GainEnvelopePoint[] | null) => void;
+  audioFade?: AudioFadeOverlay | null;
+  audioFadeEditable?: boolean;
+  audioFadeContextKey?: string;
+  onAudioFadeDurationChange?: (direction: FadeDirection, durationMs: number) => void;
+  /** Preview-only cursor callbacks; this component has no program-seek route. */
+  previewPositionMs?: number | null;
+  onPreviewPosition?: (filePositionMs: number) => void;
+  onPreviewPositionEnd?: (filePositionMs: number) => void;
 }) {
   const { t } = useLocale();
   const editLocked = useTimelineEditorStore((state) => state.locked);
@@ -109,18 +147,42 @@ export function SliceTimeline({
   const [editingBadge, setEditingBadge] = useState<number | null>(null);
   /** Visible time window; null = the whole clip. */
   const [viewWindow, setViewWindow] = useState<{ s: number; e: number } | null>(null);
+  const cueKeyRef = useRef(resetKey);
+  const dragCueKeyRef = useRef<unknown>(resetKey);
+  const badgeCueKeyRef = useRef<unknown>(resetKey);
+  const lastPreviewPositionRef = useRef(0);
+  if (!Object.is(cueKeyRef.current, resetKey)) {
+    // Invalidate before effects run, so a queued mouseup/blur cannot save into
+    // the newly selected cue.
+    dragCueKeyRef.current = Symbol("stale-slice-gesture");
+    badgeCueKeyRef.current = Symbol("stale-slice-badge");
+    cueKeyRef.current = resetKey;
+  }
 
-  // Reset transient drag/edit state only when the slice *content* actually
-  // changes — keying on the object identity would fire on every parent
-  // render, cancelling drags in progress and closing the badge editor.
+  // A cue switch resets editor state. `paintKey` is intentionally excluded:
+  // higher-resolution waveform/filmstrip swaps must not break zoom or drags.
   const slicesKey = `${slices.markers.join(",")}|${slices.play_counts.join(",")}`;
   useEffect(() => {
     setLocalStartMs(null);
     setLocalEndMs(null);
     setLocalMarkers(null);
     setEditingBadge(null);
+    setDragging(null);
+    setCursor(null);
+    setViewWindow(null);
+    onViewChange?.(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paintKey, slicesKey]);
+  }, [resetKey]);
+
+  useEffect(() => {
+    setLocalStartMs(null);
+    setLocalEndMs(null);
+    setLocalMarkers(null);
+    setEditingBadge(null);
+    setDragging(null);
+    setCursor(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slicesKey]);
 
   // Invalidate an edit that was started before the global lock was enabled.
   // Otherwise a delayed mouseup could still commit the stale trim or slice.
@@ -132,6 +194,14 @@ export function SliceTimeline({
     setLocalMarkers(null);
     setCursor(null);
   }, [editLocked]);
+
+  // Keep trim drafts only while a gesture is active. This also restores the
+  // authored values after a rejected save or an external Inspector edit.
+  useEffect(() => {
+    if (dragging) return;
+    setLocalStartMs(null);
+    setLocalEndMs(null);
+  }, [startMs, endMs, dragging]);
 
   // A different clip resets the zoom (but data-detail swaps must not).
   useEffect(() => {
@@ -217,8 +287,28 @@ export function SliceTimeline({
     }
     drawTrimMarker(ctx, toX(effStartMs), height, TRIM_START_COLOR);
     drawTrimMarker(ctx, toX(effEndMs), height, TRIM_END_COLOR);
+    if (previewPositionMs != null && previewPositionMs >= view.s && previewPositionMs <= view.e) {
+      const x = toX(previewPositionMs);
+      ctx.save();
+      ctx.strokeStyle = "#facc15";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = "#facc15";
+      ctx.beginPath();
+      ctx.moveTo(x - 4, 0);
+      ctx.lineTo(x + 4, 0);
+      ctx.lineTo(x, 7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paint, paintKey, effStartMs, effEndMs, markers, durationMs, height, view.s, view.e, canvasWidth]);
+  }, [paint, paintKey, effStartMs, effEndMs, markers, durationMs, height, view.s, view.e, canvasWidth, previewPositionMs]);
 
   // ── Coordinate helpers ────────────────────────────────────────────────────
   const xToMs = (clientX: number): number => {
@@ -255,12 +345,21 @@ export function SliceTimeline({
   // ── Mouse interactions ────────────────────────────────────────────────────
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
-    if (editLocked) return;
     const target = hitTest(e.clientX);
-    if (!target) return;
-    setDragging(target);
+    const action = sliceTimelinePointerAction(editLocked, !!target, !!onPreviewPosition);
+    if (action === "ignore") return;
+    dragCueKeyRef.current = resetKey;
     const rect = canvasRef.current!.getBoundingClientRect();
     setCursor({ x: e.clientX - rect.left, width: rect.width });
+    if (action === "preview") {
+      const position = Math.round(xToMs(e.clientX));
+      lastPreviewPositionRef.current = position;
+      setDragging({ kind: "position" });
+      onPreviewPosition?.(position);
+      return;
+    }
+    if (!target) return;
+    setDragging(target);
     if (target.kind === "slice" && localMarkers === null) {
       setLocalMarkers([...slices.markers]);
     }
@@ -268,13 +367,24 @@ export function SliceTimeline({
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!dragging) return;
+    if (!canCommitSliceTimelineGesture(dragCueKeyRef.current, resetKey)) {
+      setDragging(null);
+      setCursor(null);
+      setLocalStartMs(null);
+      setLocalEndMs(null);
+      setLocalMarkers(null);
+      return;
+    }
     const ms = xToMs(e.clientX);
     const rect = canvasRef.current!.getBoundingClientRect();
     setCursor({
       x: Math.max(0, Math.min(e.clientX - rect.left, rect.width)),
       width: rect.width,
     });
-    if (dragging.kind === "start") {
+    if (dragging.kind === "position") {
+      lastPreviewPositionRef.current = Math.round(ms);
+      onPreviewPosition?.(lastPreviewPositionRef.current);
+    } else if (dragging.kind === "start") {
       setLocalStartMs(Math.max(0, Math.min(ms, effEndMs - 50)));
     } else if (dragging.kind === "end") {
       setLocalEndMs(Math.min(durationMs, Math.max(ms, effStartMs + 50)));
@@ -292,7 +402,16 @@ export function SliceTimeline({
   const handleMouseUp = () => {
     setCursor(null);
     if (!dragging) return;
-    if (dragging.kind === "start" && localStartMs !== null) {
+    if (!canCommitSliceTimelineGesture(dragCueKeyRef.current, resetKey)) {
+      setDragging(null);
+      setLocalStartMs(null);
+      setLocalEndMs(null);
+      setLocalMarkers(null);
+      return;
+    }
+    if (dragging.kind === "position") {
+      onPreviewPositionEnd?.(lastPreviewPositionRef.current);
+    } else if (dragging.kind === "start" && localStartMs !== null) {
       const ms = Math.round(localStartMs);
       onCommitStart(ms <= 0 ? null : ms);
     } else if (dragging.kind === "end" && localEndMs !== null) {
@@ -302,6 +421,9 @@ export function SliceTimeline({
       commitMarkers(localMarkers);
     }
     setDragging(null);
+    setLocalStartMs(null);
+    setLocalEndMs(null);
+    setLocalMarkers(null);
   };
 
   const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -370,14 +492,12 @@ export function SliceTimeline({
     : dragging?.kind === "slice" ? (markers[dragging.index] ?? 0)
     : 0;
 
-  const fmtViewS = (ms: number) => (ms / 1000).toFixed(zoomFactor > 20 ? 3 : 1);
-
   return (
     <div style={{ position: "relative" }}>
       {/* Zoom controls + visible range */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
-        <span style={{ fontSize: 10, color: "var(--wc-text-faint)" }}>
-          Wheel: zoom · Shift+wheel: pan
+        <span style={{ fontSize: 10, color: "var(--wc-text-faint)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {onPreviewPosition ? t("editorUi.previewSliceHint") : t("editorUi.zoomPanHint")}
         </span>
         <span style={{ flex: 1 }} />
         <button
@@ -388,11 +508,9 @@ export function SliceTimeline({
           title={editLocked ? "Разблокировать обрезку и срезы" : "Заблокировать обрезку и срезы"}
           style={{ ...zoomBtn, color: editLocked ? "#facc15" : "var(--wc-text-muted)" }}
         >{editLocked ? "🔒" : "🔓"}</button>
-        {zoomFactor > 1.01 && (
-          <span style={{ fontSize: 10, color: "var(--wc-text-muted)", fontVariantNumeric: "tabular-nums" }}>
-            {fmtViewS(view.s)}s – {fmtViewS(view.e)}s ({zoomFactor.toFixed(1)}×)
-          </span>
-        )}
+        <span style={{ fontSize: 10, color: "var(--wc-text-muted)", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>
+          {formatViewTime(view.s, zoomFactor > 20)} – {formatViewTime(view.e, zoomFactor > 20)}{zoomFactor > 1.01 ? ` (${zoomFactor.toFixed(1)}×)` : ""}
+        </span>
         <button style={zoomBtn} title={t("editorUi.zoomOut")}
           onClick={() => applyZoom(1 / 1.6, (view.s + view.e) / 2)}>−</button>
         <button style={zoomBtn} title={t("editorUi.zoomIn")}
@@ -407,7 +525,7 @@ export function SliceTimeline({
         </button>
       </div>
 
-      {dragging && cursor && dragPreview && (
+      {dragging && dragging.kind !== "position" && cursor && dragPreview && (
         <div
           style={{
             position: "absolute",
@@ -422,22 +540,41 @@ export function SliceTimeline({
         </div>
       )}
 
-      <canvas
-        ref={canvasRef}
-        style={{
-          width: "100%",
-          height,
-          display: "block",
-          borderRadius: 4,
-          cursor: dragging ? "ew-resize" : "default",
-        }}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
-        onDoubleClick={handleDoubleClick}
-        onContextMenu={handleContextMenu}
-      />
+      {gainEnvelopeEditable && <div style={{ color: "var(--wc-text-faint)", fontSize: 10, margin: "0 0 3px" }}>{t("editorUi.gainEnvelopeHint")}</div>}
+      <div style={{ position: "relative", height }}>
+        <canvas
+          ref={canvasRef}
+          aria-label={t("editorUi.previewTimeline")}
+          style={{
+            width: "100%",
+            height,
+            display: "block",
+            borderRadius: 4,
+            cursor: dragging ? "ew-resize" : "default",
+          }}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+          onDoubleClick={handleDoubleClick}
+          onContextMenu={handleContextMenu}
+        />
+        {gainEnvelopeEditable && (
+          <GainEnvelopeOverlay
+            points={gainEnvelope}
+            durationMs={durationMs}
+            view={{ startMs: view.s, endMs: view.e }}
+            width={canvasWidth}
+            height={height}
+            editable={!editLocked}
+            fade={audioFade}
+            fadeEditable={audioFadeEditable && !editLocked}
+            fadeContextKey={audioFadeContextKey}
+            onFadeDurationChange={onAudioFadeDurationChange}
+            onCommit={onGainEnvelopeChange}
+          />
+        )}
+      </div>
 
       {/* Per-segment play-count badges (only when sliced). */}
       {segments.length > 1 && (
@@ -457,6 +594,10 @@ export function SliceTimeline({
                   if (e.key === "Escape") setEditingBadge(null);
                 }}
                 onBlur={(e) => {
+                  if (!canCommitSliceTimelineGesture(badgeCueKeyRef.current, resetKey)) {
+                    setEditingBadge(null);
+                    return;
+                  }
                   const v = e.target.value.trim().toLowerCase();
                   if (v === "inf" || v === "∞" || v === "0") {
                     setCount(seg.index, PLAY_COUNT_INFINITE);
@@ -482,7 +623,10 @@ export function SliceTimeline({
             ) : (
               <button
                 key={seg.index}
-                onClick={() => setEditingBadge(seg.index)}
+                onClick={() => {
+                  badgeCueKeyRef.current = resetKey;
+                  setEditingBadge(seg.index);
+                }}
                 title={
                   isVamp
                     ? t("sweepUi.vampHelp")

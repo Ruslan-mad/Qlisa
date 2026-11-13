@@ -510,6 +510,7 @@ impl CameraCue {
                 display_duration_ms: None,
                 hold_last_frame: false,
                 geometry: self.geometry,
+                presentation_video_layout: None,
                 live_source: true,
                 // A live feed has nothing to decode ahead of time; Load falls back
                 // to the trait default (bring up, pause) — which for a camera is
@@ -538,6 +539,18 @@ impl Default for CameraCue {
 }
 
 impl Cue for CameraCue {
+    fn live_source_dimensions(&self) -> Option<(u32, u32)> {
+        match &self.source {
+            CameraSource::Network { input: NetworkInputSource::Ndi { .. } } => {
+                self.ndi_input.as_ref()?.mailbox().latest_dimensions()
+            }
+            CameraSource::Network { input: NetworkInputSource::Srt { .. } } => {
+                self.srt_input.as_ref()?.mailbox().latest_dimensions()
+            }
+            _ => None,
+        }
+    }
+
     fn network_input_diagnostics(&self) -> Option<NetworkInputRuntimeDiagnostics> {
         let CameraSource::Network { input } = &self.source else {
             return None;
@@ -864,6 +877,7 @@ impl Cue for CameraCue {
             muted: self.muted,
             pan: self.pan,
             level_matrix: self.level_matrix.clone(),
+            gain_envelope: None,
         })
     }
 
@@ -1132,6 +1146,7 @@ mod tests {
         // Visual cues stack as layers; only Stop/Fade cues remove one.
         assert!(!cue.stop_on_next_go());
         assert!(cue.duration().is_none());
+        assert_eq!(cue.live_source_dimensions(), None, "standby Camera does not open a source for its inspector");
     }
 
     #[test]
@@ -1344,6 +1359,7 @@ mod tests {
             muted: Some(true),
             pan: Some(0.5),
             level_matrix: Some(None),
+            gain_envelope: None,
         });
         assert_eq!(cue.volume_db, -3.0);
         assert!(cue.muted);

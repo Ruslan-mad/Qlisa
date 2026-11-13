@@ -62,6 +62,8 @@ pub struct GroupCue {
     /// True when this Group is the user-facing concert Number variant. Number
     /// children are scheduled from offsets relative to the master child.
     number_mode: bool,
+    /// True when this Group is a prepared document shown as a page playlist.
+    presentation_mode: bool,
     /// The child that owns the Number timeline and determines its duration.
     master_child_id: Option<CueId>,
     /// Action child ID → offset from the master action start (milliseconds).
@@ -102,6 +104,8 @@ pub struct GroupCue {
     random_current_idx: Option<usize>,
     /// Successfully started child cue IDs waiting to be reported to transport.
     fired_child_ids: Vec<CueId>,
+    /// Paused slide image retained beneath an AsSlide video until page change.
+    presentation_retained_background_id: Option<CueId>,
     runtime_error: Option<String>,
     /// Runtime Number state. These values are intentionally not serialized.
     number_launched_actions: std::collections::HashSet<CueId>,
@@ -171,7 +175,7 @@ fn fade_spec_from_json(value: &Value, duration_key: &str, curve_key: &str) -> Op
 /// their internal waits in `duration()`.
 fn child_duration_with_waits(child: &dyn Cue) -> Option<Duration> {
     let duration = child.duration()?;
-    if matches!(child.cue_type(), CueType::Group | CueType::Number) {
+    if matches!(child.cue_type(), CueType::Group | CueType::Number | CueType::Presentation) {
         Some(duration)
     } else {
         Some(child.pre_wait().saturating_add(duration).saturating_add(child.post_wait()))
@@ -212,6 +216,7 @@ impl GroupCue {
             mode: GroupMode::Simultaneous,
             children: Vec::new(),
             number_mode: false,
+            presentation_mode: false,
             master_child_id: None,
             action_offsets_ms: std::collections::HashMap::new(),
             fade_in: None,
@@ -230,6 +235,7 @@ impl GroupCue {
             rng_state: 0,
             random_current_idx: None,
             fired_child_ids: Vec::new(),
+            presentation_retained_background_id: None,
             runtime_error: None,
             number_launched_actions: std::collections::HashSet::new(),
             number_master_finished: false,
@@ -248,10 +254,22 @@ impl GroupCue {
         cue
     }
 
+    /// Create an empty Presentation whose pages advance as a playlist.
+    pub fn new_presentation() -> Self {
+        let mut cue = Self::new();
+        cue.presentation_mode = true;
+        cue.mode = GroupMode::Playlist;
+        cue.playlist_loop = false;
+        cue.name = "Presentation".to_string();
+        cue
+    }
+
     /// Deserialise a GroupCue from JSON, using `registry` to reconstruct children.
     pub fn from_json_with_registry(value: &Value, registry: &CueRegistry) -> Result<Box<dyn Cue>> {
-        let is_number = value.get("type").and_then(|v| v.as_str()) == Some("number");
-        let mut cue = if is_number { GroupCue::new_number() } else { GroupCue::new() };
+        let cue_type = value.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        let is_number = cue_type == "number";
+        let is_presentation = cue_type == "presentation";
+        let mut cue = if is_number { GroupCue::new_number() } else if is_presentation { GroupCue::new_presentation() } else { GroupCue::new() };
 
         if let Some(s) = value.get("id").and_then(|v| v.as_str()) {
             cue.id = s.parse().unwrap_or_else(|_| Uuid::new_v4());
@@ -288,6 +306,10 @@ impl GroupCue {
         }
         if let Some(b) = value.get("playlist_loop").and_then(|v| v.as_bool()) {
             cue.playlist_loop = b;
+        }
+        if is_presentation {
+            cue.mode = GroupMode::Playlist;
+            cue.playlist_loop = false;
         }
 
         // Deserialise children recursively.
@@ -453,7 +475,7 @@ impl GroupCue {
             GroupMode::Simultaneous => {
                 for idx in 0..self.children.len() {
                     let child = &mut self.children[idx];
-                    let child_start = if child.cue_type() == CueType::Group { 0 } else { child.pre_wait().as_millis() as u64 };
+                    let child_start = if matches!(child.cue_type(), CueType::Group | CueType::Presentation) { 0 } else { child.pre_wait().as_millis() as u64 };
                     let child_len = child.duration().map(|d| d.as_millis() as u64).unwrap_or(0);
                     if local >= child_start && local <= child_start.saturating_add(child_len) {
                         if child.go(ctx).is_ok() {
@@ -466,7 +488,7 @@ impl GroupCue {
             GroupMode::Sequential | GroupMode::Playlist => {
                 for idx in 0..self.children.len() {
                     let child = &self.children[idx];
-                    let composite = child.cue_type() == CueType::Group;
+                    let composite = matches!(child.cue_type(), CueType::Group | CueType::Presentation);
                     let child_pre = if composite { 0 } else { child.pre_wait().as_millis() as u64 };
                     let child_post = if composite { 0 } else { child.post_wait().as_millis() as u64 };
                     let child_start = cursor.saturating_add(child_pre);
@@ -606,7 +628,7 @@ impl GroupCue {
         });
         !live_voice
             && (matches!(child.state(), CueState::Completed | CueState::Standby)
-                || child.duration().map(|d| child.action_elapsed() >= d).unwrap_or(false))
+                || child.automatic_completion_duration().map(|d| child.action_elapsed() >= d).unwrap_or(false))
     }
 
     fn tick_number(&mut self, ctx: &CueContext) -> Result<()> {
@@ -659,7 +681,7 @@ impl GroupCue {
         // Check the Number clock as well as the child voice. The outer event
         // loop also uses Number::duration(); this guarantees cleanup happens
         // in this tick before that generic completion path can reset us.
-        let master_duration = self.children[master_idx].duration();
+        let master_duration = self.children[master_idx].automatic_completion_duration();
         if let (Some(fade), Some(duration)) = (self.fade_out.as_ref(), master_duration) {
             let fade_duration = Duration::from_millis(fade.duration_ms);
             if fade_duration > Duration::ZERO
@@ -808,17 +830,49 @@ impl GroupCue {
 
         let child_id = self.children[next_idx].id();
         self.seq_current_id = Some(child_id);
+        let as_slide = self.presentation_mode && self.mode == GroupMode::Playlist && self.child_is_as_slide_video(next_idx);
+        let backdrop_id = if as_slide {
+            self.children[..next_idx].iter().rev()
+                .find(|child| child.cue_type() == CueType::Image)
+                .map(|child| child.id())
+        } else { None };
+        if !as_slide {
+            self.presentation_retained_background_id = None;
+        }
+
+        if let Some(backdrop_id) = backdrop_id {
+            // Clear the previous page first, then restart/hold the preceding
+            // PNG if its authored duration already completed. Start the video
+            // last so its layer remains above the static page.
+            self.stop_other_children_except(ctx, &[backdrop_id]);
+            if let Some(backdrop) = self.children.iter_mut().find(|child| child.id() == backdrop_id) {
+                if matches!(backdrop.state(), CueState::Completed | CueState::Standby) {
+                    let _ = backdrop.go(ctx);
+                }
+                if backdrop.is_running() { let _ = backdrop.pause(ctx); }
+            }
+            self.presentation_retained_background_id = Some(backdrop_id);
+        }
+
         if let Err(e) = self.go_child(next_idx, ctx) {
             log::warn!("Group sequential: child '{}' failed to start: {e}", self.children[next_idx].name());
             // Child rolled back to Standby — treat it as done and advance.
+            if let Some(background_id) = self.presentation_retained_background_id.take() {
+                self.stop_child_by_id(ctx, background_id);
+            }
             self.seq_done = true;
             return Ok(());
         }
 
         // Playlist is exclusive: starting this child stops any other still playing.
         if self.mode == GroupMode::Playlist {
-            self.stop_other_children(ctx, child_id);
-        } else {
+            if let Some(backdrop_id) = backdrop_id {
+                self.stop_other_children_except(ctx, &[child_id, backdrop_id]);
+            } else {
+                self.stop_other_children(ctx, child_id);
+            }
+        }
+        if self.mode != GroupMode::Playlist || self.presentation_mode {
             self.schedule_sequential_auto_continue(child_id, ctx)?;
         }
 
@@ -834,7 +888,7 @@ impl GroupCue {
         child_id: CueId,
         ctx: &CueContext,
     ) -> Result<bool> {
-        if self.mode == GroupMode::Playlist {
+        if self.mode == GroupMode::Playlist && !self.presentation_mode {
             return Ok(false);
         }
         let Some(idx) = self.children.iter().position(|child| child.id() == child_id) else {
@@ -903,7 +957,7 @@ impl GroupCue {
             let done = !live_voice
                 && (matches!(child.state(), CueState::Completed | CueState::Standby)
                     || child
-                        .duration()
+                        .automatic_completion_duration()
                         .map(|d| child.action_elapsed() >= d)
                         .unwrap_or(false));
             (done, child.take_fired_cue_ids())
@@ -1006,6 +1060,10 @@ impl GroupCue {
             current_done = true;
         }
 
+        if current_done && !self.has_next_sequential_child() {
+            self.release_presentation_background(ctx);
+        }
+
         // `seq_done` means the sequence is intentionally paused at this child
         // (a DoNotContinue boundary, or a manual Playhead placement) — wait for a
         // GO rather than auto-advancing.
@@ -1018,11 +1076,10 @@ impl GroupCue {
             let require_marker = self.children[idx].auto_continue_marker().is_some();
             let _ = self.children[idx].complete_naturally();
 
-            if self.mode == GroupMode::Playlist {
-                // A Playlist plays one child at a time and auto-advances through
-                // ALL of them regardless of each child's Continue Mode (it is a
-                // playlist, not a manual sequence).  `fire_next_sequential` wraps
-                // to the first child when looping, or sets `seq_done` at the end.
+            if self.mode == GroupMode::Playlist && !self.presentation_mode {
+                // Ordinary Playlists auto-advance regardless of child mode.
+                // Presentation uses exclusive switching but respects each page's
+                // Continue Mode, like a manual sequence with one active child.
                 if pw == Duration::ZERO {
                     self.fire_next_sequential(ctx, Some(current_id))?;
                 } else {
@@ -1090,6 +1147,7 @@ impl GroupCue {
         self.paused_at = None;
         self.random_bag.clear();
         self.random_current_idx = None;
+        self.presentation_retained_background_id = None;
     }
 
     fn clear_runtime_state(&mut self) {
@@ -1145,14 +1203,42 @@ impl GroupCue {
     /// Stop (and reset) every running/paused child except `keep_id`.  Used by
     /// Playlist mode so only one child is ever audible at a time.
     fn stop_other_children(&mut self, ctx: &CueContext, keep_id: CueId) {
+        self.stop_other_children_except(ctx, &[keep_id]);
+    }
+
+    fn stop_other_children_except(&mut self, ctx: &CueContext, keep_ids: &[CueId]) {
         for child in &mut self.children {
-            if child.id() != keep_id
+            if !keep_ids.contains(&child.id())
                 && (child.is_running() || child.is_paused() || child.has_retained_output())
             {
                 let _ = child.stop(ctx);
                 let _ = child.reset();
             }
         }
+    }
+
+    fn stop_child_by_id(&mut self, ctx: &CueContext, id: CueId) {
+        if let Some(child) = self.children.iter_mut().find(|child| child.id() == id) {
+            if child.is_running() || child.is_paused() || child.has_retained_output() {
+                let _ = child.hard_stop(ctx);
+            }
+            let _ = child.reset();
+        }
+    }
+
+    fn release_presentation_background(&mut self, ctx: &CueContext) {
+        if let Some(id) = self.presentation_retained_background_id.take() {
+            self.stop_child_by_id(ctx, id);
+        }
+    }
+
+    fn child_is_as_slide_video(&self, idx: usize) -> bool {
+        let Some(child) = self.children.get(idx) else { return false };
+        if child.cue_type() != CueType::Video { return false; }
+        let json = child.serialize();
+        json.get("presentation_video_imported").and_then(Value::as_bool) == Some(true)
+            && json.get("presentation_video_mode").and_then(Value::as_str) == Some("as_slide")
+            && json.get("presentation_video_layout_supported").and_then(Value::as_bool) == Some(true)
     }
 
     // ── StartRandom PRNG (xorshift64*) + shuffle bag ──────────────────────
@@ -1282,7 +1368,7 @@ impl Cue for GroupCue {
     // ── Identity ──────────────────────────────────────────────────────────
 
     fn id(&self) -> CueId { self.id }
-    fn cue_type(&self) -> CueType { if self.number_mode { CueType::Number } else { CueType::Group } }
+    fn cue_type(&self) -> CueType { if self.number_mode { CueType::Number } else if self.presentation_mode { CueType::Presentation } else { CueType::Group } }
     fn name(&self) -> &str { &self.name }
     fn set_name(&mut self, name: String) { self.name = name; }
     fn number(&self) -> Option<&str> { self.number.as_deref() }
@@ -1461,7 +1547,7 @@ impl Cue for GroupCue {
             *due += paused_for;
         }
         for child in &mut self.children {
-            if child.is_paused() {
+            if child.is_paused() && Some(child.id()) != self.presentation_retained_background_id {
                 let _ = child.resume(ctx);
             }
         }
@@ -1666,6 +1752,19 @@ impl Cue for GroupCue {
         Some(self.pre_wait.saturating_add(inner).saturating_add(self.post_wait))
     }
 
+    fn automatic_completion_duration(&self) -> Option<Duration> {
+        if self.number_mode {
+            let master = self.number_master_index().and_then(|idx| self.children.get(idx))?;
+            master.automatic_completion_duration()?;
+            return self.duration();
+        }
+        let duration = self.duration()?;
+        for child in &self.children {
+            child.automatic_completion_duration()?;
+        }
+        Some(duration)
+    }
+
     fn media_file_path(&self) -> Option<&std::path::Path> {
         if self.number_mode {
             self.number_master_index().and_then(|idx| self.children[idx].media_file_path())
@@ -1780,6 +1879,10 @@ impl Cue for GroupCue {
         self.children.iter().flat_map(|c| c.all_voice_ids()).collect()
     }
 
+    fn stop_on_next_go(&self) -> bool {
+        self.presentation_mode
+    }
+
     fn child_cues(&self) -> Option<&[Box<dyn Cue>]> {
         Some(&self.children)
     }
@@ -1831,7 +1934,7 @@ impl Cue for GroupCue {
     }
 
     fn set_group_mode(&mut self, mode: GroupMode) {
-        self.mode = mode;
+        self.mode = if self.presentation_mode { GroupMode::Playlist } else { mode };
     }
 
     fn playlist_loop(&self) -> Option<bool> {
@@ -1839,7 +1942,7 @@ impl Cue for GroupCue {
     }
 
     fn set_playlist_loop(&mut self, on: bool) {
-        self.playlist_loop = on;
+        self.playlist_loop = !self.presentation_mode && on;
     }
 
     fn number_start_stop_specification(&self) -> Option<(NumberStartStopMode, Vec<CueId>)> {
@@ -2004,6 +2107,105 @@ impl Cue for GroupCue {
         }
     }
 
+    fn presentation_current_child_id(&self) -> Option<CueId> {
+        (self.presentation_mode
+            && matches!(self.state, CueState::Running | CueState::Paused)
+            && !self.in_pre_wait)
+            .then_some(self.seq_current_id)
+            .flatten()
+    }
+
+    fn step_presentation(&mut self, ctx: &CueContext, direction: &str) -> Result<()> {
+        if !self.presentation_mode {
+            anyhow::bail!("Cue is not a Presentation");
+        }
+        if !matches!(self.state, CueState::Running | CueState::Paused) {
+            anyhow::bail!("Presentation is not running or paused");
+        }
+        if self.in_pre_wait {
+            anyhow::bail!("Presentation is still in pre-wait");
+        }
+        let current_id = self.seq_current_id
+            .ok_or_else(|| anyhow!("Presentation has no current slide"))?;
+        let current_idx = self.children.iter().position(|child| child.id() == current_id)
+            .ok_or_else(|| anyhow!("Presentation current slide was not found"))?;
+        let target_idx = match direction {
+            "previous" => (0..current_idx).rev().find(|&idx| !self.children[idx].is_disabled()),
+            "next" => (current_idx + 1..self.children.len()).find(|&idx| !self.children[idx].is_disabled()),
+            _ => anyhow::bail!("Direction must be 'previous' or 'next'"),
+        };
+        let Some(target_idx) = target_idx else {
+            return Ok(()); // Clamp at either end; never wrap.
+        };
+
+        let target_id = self.children[target_idx].id();
+        let parent_paused = self.state == CueState::Paused;
+        // ImageCue::go creates a new output voice when called while Paused.
+        // A retained AsSlide backdrop must release its old slot before it is
+        // restarted as the foreground slide, or the old voice becomes orphaned.
+        let restart_retained_image = self.presentation_retained_background_id == Some(target_id)
+            && self.children[target_idx].cue_type() == CueType::Image
+            && self.children[target_idx].is_paused();
+        if restart_retained_image {
+            self.children[target_idx].hard_stop(ctx)
+                .map_err(|error| anyhow!("Could not release retained slide background: {error}"))?;
+        }
+        let as_slide = self.child_is_as_slide_video(target_idx);
+        let backdrop_id = if as_slide {
+            self.children[..target_idx].iter().rev()
+                .find(|child| child.cue_type() == CueType::Image)
+                .map(|child| child.id())
+        } else { None };
+
+        // Match normal Presentation GO: an AsSlide video retains the nearest
+        // preceding image underneath it, while other slides are exclusive.
+        if let Some(id) = backdrop_id {
+            if let Some(backdrop) = self.children.iter_mut().find(|child| child.id() == id) {
+                if matches!(backdrop.state(), CueState::Completed | CueState::Standby) {
+                    let _ = backdrop.go(ctx);
+                }
+                if backdrop.is_running() {
+                    let _ = backdrop.pause(ctx);
+                }
+            }
+        }
+
+        if let Err(error) = self.go_child(target_idx, ctx) {
+            if restart_retained_image {
+                let restored = self.children[target_idx].go(ctx).is_ok()
+                    && (!self.children[target_idx].is_running() || self.children[target_idx].pause(ctx).is_ok());
+                if !restored {
+                    self.presentation_retained_background_id = None;
+                }
+            }
+            if let Some(background_id) = backdrop_id {
+                if Some(background_id) != self.seq_current_id
+                    && Some(background_id) != self.presentation_retained_background_id
+                {
+                    self.stop_child_by_id(ctx, background_id);
+                }
+            }
+            anyhow::bail!("Could not start slide '{}': {error}", self.children[target_idx].name());
+        }
+        if parent_paused {
+            if let Err(error) = self.children[target_idx].pause(ctx) {
+                let _ = self.children[target_idx].hard_stop(ctx);
+                anyhow::bail!("Could not pause slide '{}': {error}", self.children[target_idx].name());
+            }
+        }
+        self.seq_post_wait_until = None;
+        self.seq_done = false;
+        self.seq_current_id = Some(target_id);
+        self.presentation_retained_background_id = backdrop_id;
+        if let Some(backdrop_id) = backdrop_id {
+            self.stop_other_children_except(ctx, &[target_id, backdrop_id]);
+        } else {
+            self.stop_other_children(ctx, target_id);
+        }
+        self.schedule_sequential_auto_continue(target_id, ctx)?;
+        Ok(())
+    }
+
     fn set_active_child(&mut self, child_id: &CueId) -> bool {
         if !matches!(self.mode, GroupMode::Sequential | GroupMode::Playlist) {
             return false;
@@ -2032,8 +2234,8 @@ impl Cue for GroupCue {
     fn serialize(&self) -> Value {
         let children: Vec<Value> = self.children.iter().map(|c| c.serialize()).collect();
         let mut value = json!({
-            "type": if self.number_mode { "number" } else { "group" },
-            "cue_type": if self.number_mode { "number" } else { "group" },
+            "type": if self.number_mode { "number" } else if self.presentation_mode { "presentation" } else { "group" },
+            "cue_type": if self.number_mode { "number" } else if self.presentation_mode { "presentation" } else { "group" },
             "id": self.id,
             "number": self.number,
             "name": self.name,
@@ -2043,7 +2245,7 @@ impl Cue for GroupCue {
             "post_wait_ms": self.post_wait.as_millis() as u64,
             "continue_mode": self.continue_mode,
             "group_mode": self.mode,
-            "playlist_loop": self.playlist_loop,
+            "playlist_loop": if self.presentation_mode { false } else { self.playlist_loop },
             "children": children,
             "is_disabled": self.is_disabled,
         });
@@ -2105,6 +2307,17 @@ impl CueFactory for NumberCueFactory {
     }
 }
 
+/// Factory for the recursive Presentation variant.
+pub struct PresentationCueFactory;
+
+impl CueFactory for PresentationCueFactory {
+    fn create(&self) -> Box<dyn Cue> { Box::new(GroupCue::new_presentation()) }
+    fn from_json(&self, value: Value) -> Result<Box<dyn Cue>> {
+        let registry = CueRegistry::new();
+        GroupCue::from_json_with_registry(&value, &registry)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests — playhead-handling logic (pure, no CueContext required)
 // ---------------------------------------------------------------------------
@@ -2118,7 +2331,206 @@ mod tests {
     use crate::cue::image_cue::ImageCue;
     use crate::cue::light_cue::LightCue;
     use crate::cue::memo_cue::MemoCue;
+    use crate::cue::timer_cue::TimerCue;
+    use crate::cue::wait_cue::WaitCue;
+    use crate::cue::traits::RuntimeState;
     use crate::cue::video_cue::VideoCue;
+    use crate::engine::{
+        audio_engine::AudioEngine,
+        dmx_engine::DmxEngine,
+        engine_traits::OutputEngineApi,
+        output_engine::ContentRequest,
+        ring_command::VoiceId,
+    };
+    use crate::preferences::MachineAudioConfig;
+    use crossbeam_channel::unbounded;
+
+    #[derive(Default)]
+    struct NullOutput {
+        started: std::sync::Mutex<Vec<VoiceId>>,
+        stopped: std::sync::Mutex<Vec<VoiceId>>,
+    }
+
+    impl OutputEngineApi for NullOutput {
+        fn show_content(&self, _req: ContentRequest<'_>) -> anyhow::Result<VoiceId> {
+            let id = Uuid::new_v4();
+            self.started.lock().unwrap().push(id);
+            Ok(id)
+        }
+        fn stop_content(&self, voice_id: VoiceId, _visual_fade_ms: u32, _audio_fade_ms: u32) {
+            self.stopped.lock().unwrap().push(voice_id);
+        }
+        fn hard_stop_current(&self) {}
+        fn panic_stop(&self) {}
+        fn video_audio_voice(&self, _voice_id: VoiceId) -> Option<VoiceId> { None }
+        fn resync_audio_to_video(&self, _voice_id: VoiceId) {}
+        fn get_voice_opacity(&self, _voice_id: VoiceId) -> f32 { 1.0 }
+        fn set_voice_opacity(&self, _voice_id: VoiceId, _opacity: f32) {}
+        fn stop_voice(&self, _voice_id: VoiceId, _fade_ms: u32) -> anyhow::Result<()> { Ok(()) }
+        fn pause_voice(&self, _voice_id: VoiceId) -> anyhow::Result<()> { Ok(()) }
+        fn resume_voice(&self, _voice_id: VoiceId) -> anyhow::Result<()> { Ok(()) }
+        fn seek_voice_ms(&self, _voice_id: VoiceId, _position_ms: u64) {}
+        fn show_text_overlay(&self, _ass_text: &str, _screen_index: Option<u32>) {}
+        fn clear_text_overlay(&self) {}
+        fn begin_eof_fade_out(&self, _voice_id: VoiceId, _fade_ms: u32) -> bool { false }
+        fn devamp_voice(&self, _voice_id: VoiceId, _stop_at_end: bool) {}
+        fn start_preloaded(&self, _voice_id: VoiceId) -> bool { false }
+    }
+
+    fn presentation_context() -> CueContext {
+        presentation_context_with_output().0
+    }
+
+    fn presentation_context_with_output() -> (CueContext, std::sync::Arc<NullOutput>) {
+        let (events, _receiver) = unbounded();
+        let output = std::sync::Arc::new(NullOutput::default());
+        let context = CueContext::new(
+            AudioEngine::new_silent(&MachineAudioConfig::default()),
+            output.clone(), events, 0, Vec::new(), None, None,
+            Vec::new(), std::sync::Arc::new(DmxEngine::new()), Vec::new(), Vec::new(),
+            Vec::new(), 256,
+        );
+        (context, output)
+    }
+
+    fn three_slide_presentation() -> (GroupCue, CueId, CueId, CueId) {
+        let mut presentation = GroupCue::new_presentation();
+        let first = WaitCue::new();
+        let first_id = first.id();
+        let mut disabled = WaitCue::new();
+        disabled.set_disabled(true);
+        let disabled_id = disabled.id();
+        let last = WaitCue::new();
+        let last_id = last.id();
+        presentation.children = vec![Box::new(first), Box::new(disabled), Box::new(last)];
+        (presentation, first_id, disabled_id, last_id)
+    }
+
+    #[test]
+    fn presentation_manual_step_skips_disabled_and_clamps_at_ends() {
+        let ctx = presentation_context();
+        let (mut presentation, first_id, disabled_id, last_id) = three_slide_presentation();
+        presentation.go(&ctx).unwrap();
+        assert_eq!(presentation.presentation_current_child_id(), Some(first_id));
+
+        presentation.step_presentation(&ctx, "previous").unwrap();
+        assert_eq!(presentation.presentation_current_child_id(), Some(first_id));
+        presentation.step_presentation(&ctx, "next").unwrap();
+        assert_eq!(presentation.presentation_current_child_id(), Some(last_id));
+        assert_eq!(presentation.children[1].state(), CueState::Standby);
+        presentation.step_presentation(&ctx, "next").unwrap();
+        assert_eq!(presentation.presentation_current_child_id(), Some(last_id));
+        presentation.step_presentation(&ctx, "previous").unwrap();
+        assert_eq!(presentation.presentation_current_child_id(), Some(first_id));
+        assert_ne!(first_id, disabled_id);
+    }
+
+    #[test]
+    fn running_presentation_step_keeps_as_slide_background_paused() {
+        let (ctx, output) = presentation_context_with_output();
+        let mut presentation = GroupCue::new_presentation();
+        let mut image = ImageCue::new();
+        image.file_path = Some(std::path::PathBuf::from("image.png"));
+        let image_id = image.id();
+        let mut video = VideoCue::new();
+        video.file_path = Some(std::path::PathBuf::from("video.mp4"));
+        video.set_pre_wait(Duration::from_secs(60));
+        video.presentation_video_imported = true;
+        video.presentation_video_mode = crate::cue::types::PresentationVideoMode::AsSlide;
+        video.presentation_video_layout_supported = true;
+        video.presentation_video_layout = Some(crate::cue::types::PresentationVideoLayout {
+            slide_width: 100,
+            slide_height: 100,
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            rotation: 0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        });
+        let video_id = video.id();
+        presentation.children.push(Box::new(image));
+        presentation.children.push(Box::new(video));
+        presentation.go(&ctx).unwrap();
+
+        presentation.step_presentation(&ctx, "next").unwrap();
+
+        assert_eq!(presentation.presentation_current_child_id(), Some(video_id));
+        assert_eq!(presentation.children[0].state(), CueState::Paused);
+        assert_eq!(presentation.presentation_retained_background_id, Some(image_id));
+
+        // Backward navigation restarts the retained image. Every replaced
+        // output handle must be stopped exactly once across repeated cycles.
+        presentation.step_presentation(&ctx, "previous").unwrap();
+        assert_eq!(presentation.presentation_current_child_id(), Some(image_id));
+        assert_eq!(output.started.lock().unwrap().len(), 2);
+        assert_eq!(output.stopped.lock().unwrap().len(), 1);
+        presentation.step_presentation(&ctx, "next").unwrap();
+        presentation.step_presentation(&ctx, "previous").unwrap();
+        presentation.stop(&ctx).unwrap();
+        assert_eq!(output.started.lock().unwrap().len(), 3);
+        assert_eq!(output.stopped.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn presentation_step_keeps_parent_paused_and_clears_pending_advance() {
+        let ctx = presentation_context();
+        let (mut presentation, _first_id, _disabled_id, last_id) = three_slide_presentation();
+        presentation.go(&ctx).unwrap();
+        let first_id = presentation.seq_current_id.unwrap();
+        presentation.seq_post_wait_until = Some(PendingGroupAdvance {
+            due: Instant::now() + Duration::from_secs(30),
+            source_id: first_id,
+            source_generation: 0,
+            expected_current_id: Some(first_id),
+            require_marker: false,
+            source_paused_at: None,
+        });
+        presentation.pause(&ctx).unwrap();
+
+        presentation.step_presentation(&ctx, "next").unwrap();
+        assert_eq!(presentation.state(), CueState::Paused);
+        assert_eq!(presentation.children[2].state(), CueState::Paused);
+        assert_eq!(presentation.seq_current_id, Some(last_id));
+        assert!(presentation.seq_post_wait_until.is_none());
+
+        presentation.resume(&ctx).unwrap();
+        assert_eq!(presentation.state(), CueState::Running);
+        assert_eq!(presentation.children[2].state(), CueState::Running);
+    }
+
+    #[test]
+    fn presentation_step_rejects_stopped_presentation_and_ordinary_group() {
+        let ctx = presentation_context();
+        let (mut presentation, _first_id, _disabled_id, _last_id) = three_slide_presentation();
+        assert!(presentation.step_presentation(&ctx, "next").is_err());
+        let mut group = GroupCue::new();
+        group.state = CueState::Running;
+        assert!(group.step_presentation(&ctx, "next").is_err());
+    }
+
+    #[test]
+    fn presentation_navigation_is_blocked_during_parent_prewait_even_when_paused() {
+        let ctx = presentation_context();
+        let mut presentation = GroupCue::new_presentation();
+        let first = MemoCue::new();
+        let second = MemoCue::new();
+        let second_id = second.id();
+        presentation.children.push(Box::new(first));
+        presentation.children.push(Box::new(second));
+        assert!(presentation.set_active_child(&second_id));
+        presentation.set_pre_wait(Duration::from_secs(60));
+        presentation.go(&ctx).unwrap();
+        assert_eq!(presentation.presentation_current_child_id(), None);
+
+        presentation.pause(&ctx).unwrap();
+        assert!(presentation.step_presentation(&ctx, "next").is_err());
+        assert_eq!(presentation.presentation_current_child_id(), None);
+        assert!(presentation.children.iter().all(|child| child.state() == CueState::Standby));
+    }
 
     #[test]
     fn number_post_wait_progress_freezes_while_paused_and_clears_at_deadline() {
@@ -2309,6 +2721,34 @@ mod tests {
         assert!(!g.absorbs_go());
         assert!(!g.holds_playhead());
         assert!(g.released_playhead());
+    }
+
+    #[test]
+    fn timer_hold_at_zero_keeps_group_alive_after_finite_sibling_duration() {
+        let mut timer = TimerCue::new();
+        timer.set_user_action_duration(Some(Duration::ZERO)).unwrap();
+        timer.restore_runtime_state(RuntimeState { state: CueState::Running, voice_id: None, started_at: None, action_started_at: None });
+
+        let mut wait = WaitCue::new();
+        wait.set_user_action_duration(Some(Duration::from_secs(1))).unwrap();
+
+        let mut group = GroupCue::new();
+        group.state = CueState::Running;
+        group.action_started_at = Some(Instant::now() - Duration::from_secs(2));
+        group.children.push(Box::new(timer));
+        group.children.push(Box::new(wait));
+        assert_eq!(group.duration(), Some(Duration::from_secs(1)));
+        assert!(group.action_elapsed() >= Duration::from_secs(1));
+        assert_eq!(group.automatic_completion_duration(), None);
+        assert!(!group.is_complete());
+
+        let mut nested = GroupCue::new();
+        nested.children.push(group.children.remove(0));
+        nested.children.push(Box::new(WaitCue::new()));
+        let mut parent = GroupCue::new();
+        parent.children.push(Box::new(nested));
+        parent.children.push(Box::new(WaitCue::new()));
+        assert_eq!(parent.automatic_completion_duration(), None);
     }
 
     #[test]

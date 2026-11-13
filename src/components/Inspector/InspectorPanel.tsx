@@ -6,7 +6,7 @@
 // type are shown.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ScriptCueData, AudioCueData, BrowserCueData, CameraCueData, CueSummary, CueType, DevampCueData, FadeCueData, ImageCueData, LightCueData, MemoCueData, MicCueData, MidiCueData, MidiFileCueData, NumberCueData, OscCueData, StopCueData, TextCueData, TimecodeCueData, VideoCueData, WaitCueData } from "../../lib/types";
+import type { ScriptCueData, AudioCueData, BrowserCueData, CameraCueData, CueSummary, CueType, DevampCueData, FadeCueData, ImageCueData, LightCueData, MemoCueData, MicCueData, MidiCueData, MidiFileCueData, NumberCueData, OscCueData, StopCueData, TextCueData, TimecodeCueData, TimerCueData, VideoCueData, WaitCueData } from "../../lib/types";
 import { isCommandCueType } from "../../lib/types";
 import { getCue, updateCue } from "../../lib/commands";
 import { BasicsTab } from "./BasicsTab";
@@ -32,6 +32,7 @@ import { OscTab } from "./OscTab";
 import { LightTab } from "./LightTab";
 import { MicTab } from "./MicTab";
 import { TextTab } from "./TextTab";
+import { TimerTab } from "./TimerTab";
 import { TimecodeTab } from "./TimecodeTab";
 import { TriggersTab } from "./TriggersTab";
 import { CameraTab } from "./CameraTab";
@@ -49,6 +50,8 @@ import {
   inspectorTitleStyle,
 } from "./InspectorChrome";
 import { CueTypeIcon } from "../common/CueTypeIcon";
+import { PresentationControls } from "../Presentation/PresentationControls";
+import { findPresentationOwner } from "../Presentation/presentationNavigation";
 
 interface Props {
   selectedCue: CueSummary | null;
@@ -71,18 +74,19 @@ interface Props {
 type Tab =
   | "basics" | "time" | "levels" | "fade" | "layer" | "geometry" | "messages"
   | "fade-cue" | "stop" | "devamp" | "group" | "light" | "mic" | "timecode"
-  | "text" | "camera" | "browser" | "triggers" | "command" | "script" | "midi-file" | "memo" | "number";
+  | "text" | "timer" | "camera" | "browser" | "triggers" | "command" | "script" | "midi-file" | "memo" | "number";
 
 type CueData =
   | AudioCueData | VideoCueData | ImageCueData | WaitCueData | FadeCueData
   | MidiCueData | OscCueData | StopCueData | DevampCueData | LightCueData
-  | MicCueData | TimecodeCueData | TextCueData | CameraCueData | BrowserCueData | NumberCueData;
+  | MicCueData | TimecodeCueData | TextCueData | TimerCueData | CameraCueData | BrowserCueData | NumberCueData;
 
 /** Ordered tab list for a cue type: identity first, the type's main tab next,
  *  then timing, shared A/V tabs, and Triggers last. */
 function tabsFor(type: CueType, t: (key: string, vars?: Record<string, string | number>) => string): { id: Tab; label: string }[] {
   const isAV = type === "audio" || type === "video" || type === "camera";
   const isVisual = type === "video" || type === "image" || type === "camera";
+  const hasGeometry = isVisual || type === "text" || type === "timer";
   const hasAvFade = isAV || type === "image" || type === "number";
 
   const tabs: { id: Tab; label: string }[] = [{ id: "basics", label: t("inspector.basics") }];
@@ -90,7 +94,7 @@ function tabsFor(type: CueType, t: (key: string, vars?: Record<string, string | 
   if (type === "stop") tabs.push({ id: "stop", label: t("inspector.stop") });
   if (isCommandCueType(type)) tabs.push({ id: "command", label: t("inspector.command") });
   if (type === "devamp") tabs.push({ id: "devamp", label: t("inspector.devamp") });
-  if (type === "group") tabs.push({ id: "group", label: t("inspector.group") });
+  if (type === "group" || type === "presentation") tabs.push({ id: "group", label: t(type === "presentation" ? "cueTypes.presentation" : "inspector.group") });
   if (type === "number") tabs.push({ id: "number", label: t("inspector.number") });
   if (type === "camera") tabs.push({ id: "camera", label: t("inspector.camera") });
   if (type === "browser") tabs.push({ id: "browser", label: t("inspector.browser") });
@@ -101,12 +105,13 @@ function tabsFor(type: CueType, t: (key: string, vars?: Record<string, string | 
   if (type === "mic") tabs.push({ id: "mic", label: t("inspector.mic") });
   if (type === "timecode") tabs.push({ id: "timecode", label: t("inspector.timecode") });
   if (type === "text") tabs.push({ id: "text", label: t("inspector.text") });
+  if (type === "timer") tabs.push({ id: "timer", label: t("inspector.timer") });
   if (type === "script") tabs.push({ id: "script", label: t("inspector.script") });
   tabs.push({ id: "time", label: t("inspector.time") });
   if (isAV) tabs.push({ id: "levels", label: t("inspector.levels") });
   if (hasAvFade) tabs.push({ id: "fade", label: t("inspector.fade") });
   if (isVisual) tabs.push({ id: "layer", label: t("inspector.layer") });
-  if (isVisual) tabs.push({ id: "geometry", label: t("inspector.geometry") });
+  if (hasGeometry) tabs.push({ id: "geometry", label: t("inspector.geometry") });
   tabs.push({ id: "triggers", label: t("inspector.triggers") });
   return tabs;
 }
@@ -169,7 +174,7 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
       });
     // reloadToken: the clip editor dock saved this cue — re-fetch it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCue?.id, selectedCue?.cue_type, selectedCue?.number_master_id, selectedCueIds.length, reloadToken]);
+  }, [selectedCue?.id, selectedCue?.cue_type, selectedCue?.number_master_id, selectedCue?.state, selectedCueIds.length, reloadToken]);
 
   if (selectedCueIds.length > 1) {
     return <MultiCueInspector cueIds={selectedCueIds} />;
@@ -191,6 +196,7 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
   }
 
   const type = selectedCue.cue_type;
+  const presentationOwner = findPresentationOwner(allCues ?? [], selectedCue.id);
   const isAudio = type === "audio";
   const isVideo = type === "video";
   const isImage = type === "image";
@@ -273,6 +279,8 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
         )}
       </div>
 
+      {presentationOwner && <PresentationControls owner={presentationOwner as CueSummary} mode="inspector" onChanged={onRefresh} />}
+
       {/* Tabs — flexWrap so every tab stays reachable however narrow the
           inspector gets (a fixed row cropped the trailing tabs). */}
       <div style={inspectorTabBarStyle}>
@@ -290,7 +298,23 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
             {saveError}
           </div>
         )}
-        {(type === "video" || type === "image" || type === "camera" || type === "text" || isBrowser) && (
+        {isVideo && (cueData as VideoCueData).presentation_video_imported === true && (
+          <div style={{ padding: 9, marginBottom: 10, border: "1px solid var(--wc-border)", borderRadius: 5 }}>
+            <label style={{ display: "block", marginBottom: 5, fontSize: 11, color: "var(--wc-text-muted)" }}>{t("presentationUi.videoMode")}</label>
+            <select
+              value={(cueData as VideoCueData).presentation_video_mode ?? "fullscreen"}
+              disabled={selectedCue.state !== "standby"}
+              onChange={(event) => void save({ presentation_video_mode: event.target.value as "fullscreen" | "as_slide" })}
+              style={{ width: "100%", padding: "6px 8px", color: "var(--wc-text)", background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)", borderRadius: 4 }}
+            >
+              <option value="fullscreen">{t("presentationUi.fullscreen")}</option>
+              <option value="as_slide" disabled={!(cueData as VideoCueData).presentation_video_layout_supported}>{t("presentationUi.asSlide")}</option>
+            </select>
+            {!(cueData as VideoCueData).presentation_video_layout_supported && <div style={{ marginTop: 6, color: "var(--wc-text-muted)", fontSize: 11 }}>{(cueData as VideoCueData).presentation_video_layout_error || t("presentationUi.asSlideUnsupported")}</div>}
+            {selectedCue.state !== "standby" && <div style={{ marginTop: 6, color: "var(--wc-text-muted)", fontSize: 11 }}>{t("presentationUi.stopToChangeMode")}</div>}
+          </div>
+        )}
+        {(type === "video" || type === "image" || type === "camera" || type === "text" || type === "timer" || isBrowser) && (
           <OutputSelector
             cues={[cueData as CueData]}
             outputs={(displayPrefs.output_destinations ?? []).filter((output) => !isBrowser || output.sink_kind === "display")}
@@ -343,8 +367,8 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
         {activeTab === "devamp" && type === "devamp" && (
           <DevampTab cue={cueData as DevampCueData} onSave={save} />
         )}
-        {activeTab === "group" && type === "group" && (
-          <GroupTab cue={cueData} onRefresh={onRefresh} />
+        {activeTab === "group" && (type === "group" || type === "presentation") && (
+          <GroupTab cue={cueData} onRefresh={onRefresh} presentation={type === "presentation"} />
         )}
         {activeTab === "number" && type === "number" && (
           <>
@@ -381,10 +405,15 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
         {activeTab === "layer" && (isVideo || isImage || isCamera) && (
           <LayerTab cue={cueData as VideoCueData | ImageCueData | CameraCueData} onSave={save} />
         )}
-        {activeTab === "geometry" && (isVideo || isImage || isCamera) && (
+        {activeTab === "geometry" && (isVideo || isImage || isCamera || type === "text" || type === "timer") && (
           <GeometryTab
-            cue={cueData as VideoCueData | ImageCueData | CameraCueData}
+            key={cueData.id}
+            cue={cueData as VideoCueData | ImageCueData | CameraCueData | TextCueData | TimerCueData}
             outputs={displayPrefs.output_destinations ?? []}
+            sourceWidth={selectedCue.media_width}
+            sourceHeight={selectedCue.media_height}
+            cameraActive={selectedCue.state === "running" || selectedCue.state === "paused"}
+            overlayMargin={displayPrefs.timer_position === "center" ? 0 : displayPrefs.timer_margin}
             outputIds={displayedOutputIds(
               cueData as OutputSelectableCue,
               new Set((displayPrefs.output_destinations ?? []).map((output) => output.id)),
@@ -422,6 +451,9 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
         )}
         {activeTab === "text" && type === "text" && (
           <TextTab cue={cueData as TextCueData} onSave={save} />
+        )}
+        {activeTab === "timer" && type === "timer" && (
+          <TimerTab cue={cueData as TimerCueData} selectedCue={selectedCue} onSave={save} onRefresh={onRefresh} />
         )}
         {activeTab === "triggers" && (
           <TriggersTab cue={selectedCue} onSave={onRefresh} />

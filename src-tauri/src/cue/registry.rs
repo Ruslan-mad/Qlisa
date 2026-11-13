@@ -45,7 +45,7 @@ impl CueRegistry {
     /// Deserialise a cue from its persisted JSON representation.
     /// The JSON must contain a `"type"` field that matches a registered [`CueType`].
     ///
-    /// [`CueType::Group`] is handled specially: children are deserialised
+    /// Recursive container cues are handled specially: children are deserialised
     /// recursively using this same registry, bypassing the normal factory path.
     pub fn from_json(&self, value: Value) -> Result<Box<dyn Cue>> {
         let cue_type: CueType = serde_json::from_value(
@@ -55,7 +55,7 @@ impl CueRegistry {
                 .ok_or_else(|| anyhow!("Cue JSON missing 'type' field"))?,
         )?;
 
-        if matches!(cue_type, CueType::Group | CueType::Number) {
+        if matches!(cue_type, CueType::Group | CueType::Number | CueType::Presentation) {
             return super::group_cue::GroupCue::from_json_with_registry(&value, self);
         }
 
@@ -87,7 +87,7 @@ mod tests {
         control_cue::{ControlCueFactory, ALL_CONTROL_ACTIONS},
         devamp_cue::DevampCueFactory,
         fade_cue::FadeCueFactory,
-        group_cue::GroupCueFactory,
+        group_cue::{GroupCueFactory, PresentationCueFactory},
         image_cue::ImageCueFactory,
         light_cue::LightCueFactory,
         memo_cue::{MemoCue, MemoCueFactory},
@@ -98,6 +98,7 @@ mod tests {
         script_cue::ScriptCueFactory,
         stop_cue::StopCueFactory,
         text_cue::TextCueFactory,
+        timer_cue::TimerCueFactory,
         timecode_cue::TimecodeCueFactory,
         video_cue::VideoCueFactory,
         wait_cue::WaitCueFactory,
@@ -112,6 +113,7 @@ mod tests {
         registry.register(CueType::Devamp, Box::new(DevampCueFactory));
         registry.register(CueType::Fade, Box::new(FadeCueFactory));
         registry.register(CueType::Group, Box::new(GroupCueFactory));
+        registry.register(CueType::Presentation, Box::new(PresentationCueFactory));
         registry.register(CueType::Image, Box::new(ImageCueFactory));
         registry.register(CueType::Light, Box::new(LightCueFactory));
         registry.register(CueType::Memo, Box::new(MemoCueFactory));
@@ -122,6 +124,7 @@ mod tests {
         registry.register(CueType::Script, Box::new(ScriptCueFactory));
         registry.register(CueType::Stop, Box::new(StopCueFactory));
         registry.register(CueType::Text, Box::new(TextCueFactory));
+        registry.register(CueType::Timer, Box::new(TimerCueFactory));
         registry.register(CueType::Timecode, Box::new(TimecodeCueFactory));
         registry.register(CueType::Video, Box::new(VideoCueFactory));
         registry.register(CueType::Wait, Box::new(WaitCueFactory));
@@ -163,6 +166,48 @@ mod tests {
     }
 
     #[test]
+    fn presentation_roundtrips_as_recursive_non_looping_playlist() {
+        let registry = full_test_registry();
+        let mut presentation = crate::cue::group_cue::GroupCue::new_presentation();
+        let mut image = crate::cue::image_cue::ImageCue::new();
+        image.set_name("Slide 1".into());
+        let mut video = crate::cue::video_cue::VideoCue::new();
+        video.set_name("Slide 1 video 1".into());
+        video.presentation_video_layout = Some(crate::cue::types::PresentationVideoLayout {
+            slide_width: 16_000,
+            slide_height: 9_000,
+            x: 0.1,
+            y: 0.2,
+            width: 0.3,
+            height: 0.4,
+            rotation: 0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        });
+        video.presentation_video_layout_supported = true;
+        video.presentation_video_mode = crate::cue::types::PresentationVideoMode::AsSlide;
+        video.presentation_video_imported = true;
+        presentation.children.push(Box::new(image));
+        presentation.children.push(Box::new(video));
+
+        let saved = presentation.serialize();
+        assert_eq!(saved["type"], "presentation");
+        assert_eq!(saved["group_mode"], "playlist");
+        assert_eq!(saved["playlist_loop"], false);
+        let loaded = registry.from_json(saved).unwrap();
+        assert_eq!(loaded.cue_type(), CueType::Presentation);
+        assert_eq!(loaded.group_mode(), Some(crate::cue::types::GroupMode::Playlist));
+        assert_eq!(loaded.playlist_loop(), Some(false));
+        let children = loaded.child_cues().unwrap();
+        assert_eq!(children.iter().map(|child| child.cue_type()).collect::<Vec<_>>(), vec![CueType::Image, CueType::Video]);
+        let video_json = children[1].serialize();
+        assert_eq!(video_json["presentation_video_mode"], "as_slide");
+        assert_eq!(video_json["presentation_video_layout"]["x"], 0.1);
+    }
+
+    #[test]
     fn cue_types_have_no_implicit_color_and_missing_color_loads_neutral() {
         let registry = full_test_registry();
         let cue_types = [
@@ -170,6 +215,7 @@ mod tests {
             CueType::Memo,
             CueType::Wait,
             CueType::Group,
+            CueType::Presentation,
             CueType::Fade,
             CueType::Stop,
             CueType::Video,
@@ -181,6 +227,7 @@ mod tests {
             CueType::Mic,
             CueType::Timecode,
             CueType::Text,
+            CueType::Timer,
             CueType::Camera,
             CueType::Browser,
             CueType::Devamp,

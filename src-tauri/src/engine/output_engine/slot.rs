@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 
+use crate::cue::types::PresentationVideoLayout;
 use crate::engine::mpv_sys::{
     MpvEventEndFile, MpvEventLogMessage, MpvEventProperty, MpvLib, MPV_END_FILE_REASON_EOF,
     MPV_END_FILE_REASON_ERROR, MPV_EVENT_END_FILE, MPV_EVENT_FILE_LOADED, MPV_EVENT_LOG_MESSAGE,
@@ -29,7 +30,7 @@ use crate::engine::AudioEngine;
 
 use super::blend::BlendMode;
 use super::types::{LayerStyle, MpvCtx, OutputStatus, VideoGeometry, VoiceId};
-use super::{cs, get_prop_i64, opt_str, try_apply_crop};
+use super::{cs, get_prop_i64, opt_str};
 use crossbeam_channel::Sender;
 
 /// Maximum simultaneously-open video slots (excluding the overlay context).
@@ -248,10 +249,13 @@ pub(super) struct SlotState {
     pub voice_id: Option<VoiceId>,
     /// The AudioEngine voice carrying this content's audio track, if any.
     pub audio_voice_id: Option<VoiceId>,
-    /// Cue geometry, kept for the pixel-crop at `VIDEO_RECONFIG`.
+    /// Cue geometry, read by the compositor for the post-layout clip mask.
     pub geometry: VideoGeometry,
-    /// `true` once the crop has been resolved for the current load.
-    pub crop_applied: bool,
+    /// Slide-relative frame for imported presentation video, if enabled.
+    pub presentation_video_layout: Option<PresentationVideoLayout>,
+    /// Decoder display aspect and container rotation for the current source.
+    pub source_aspect: f64,
+    pub source_rotation: u32,
     /// Compositor sort key: explicit layers order below automatic ones,
     /// sequence breaks ties (newest on top).  See [`resolve_layer_key`].
     pub layer_key: u64,
@@ -320,7 +324,9 @@ impl SlotState {
             voice_id: None,
             audio_voice_id: None,
             geometry: VideoGeometry::default(),
-            crop_applied: true,
+            presentation_video_layout: None,
+            source_aspect: 0.0,
+            source_rotation: 0,
             layer_key: 0,
             blend_mode: BlendMode::Normal,
             base_opacity: 1.0,
@@ -764,12 +770,20 @@ pub(super) struct SlotLoad {
     pub hold_last_frame: bool,
     pub live_source: bool,
     pub geometry: VideoGeometry,
+    pub presentation_video_layout: Option<PresentationVideoLayout>,
     pub layer_style: LayerStyle,
     /// QLab-style slice segments `(start_s, end_s, play_count)`; empty = none.
     pub slices: Vec<(f64, f64, u32)>,
     /// Decode into the slot but hold the reveal (Load Cue) — see
     /// [`SlotState::preloaded`].
     pub preload: bool,
+}
+
+fn image_loop_file_option(is_image: bool, url: &str) -> Option<&'static str> {
+    let is_gif = std::path::Path::new(url)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"));
+    (is_image && is_gif).then_some("loop-file=inf")
 }
 
 fn is_trimmed_video_loop(start_ms: Option<u64>, end_ms: Option<u64>, loop_count: u32) -> bool {
@@ -788,7 +802,11 @@ fn trimmed_video_loop_bounds(
     let start = start_ms.unwrap_or(0);
     let end = end_ms.or(duration_ms)?;
     (end > start).then(|| {
-        let plays = if loop_count == u32::MAX { u32::MAX } else { loop_count.saturating_add(1) };
+        let plays = if loop_count == u32::MAX {
+            u32::MAX
+        } else {
+            loop_count.saturating_add(1)
+        };
         (start as f64 / 1000.0, end as f64 / 1000.0, plays)
     })
 }
@@ -796,7 +814,11 @@ fn trimmed_video_loop_bounds(
 fn push_ab_loop_options(opts: &mut Vec<String>, start_secs: f64, end_secs: f64, plays: u32) {
     opts.push(format!("ab-loop-a={start_secs:.3}"));
     opts.push(format!("ab-loop-b={end_secs:.3}"));
-    let loop_count = if plays == u32::MAX { "inf".to_string() } else { plays.saturating_sub(1).to_string() };
+    let loop_count = if plays == u32::MAX {
+        "inf".to_string()
+    } else {
+        plays.saturating_sub(1).to_string()
+    };
     opts.push(format!("ab-loop-count={loop_count}"));
 }
 
@@ -836,7 +858,9 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) {
         st.voice_id = Some(load.voice_id);
         st.audio_voice_id = load.audio_voice_id;
         st.geometry = load.geometry;
-        st.crop_applied = !load.geometry.has_crop();
+        st.presentation_video_layout = load.presentation_video_layout;
+        st.source_aspect = 0.0;
+        st.source_rotation = 0;
         st.layer_key = resolve_layer_key(load.layer_style.layer, seq);
         st.blend_mode = load.layer_style.blend_mode;
         st.base_opacity = load.layer_style.opacity.clamp(0.0, 1.0) as f32;
@@ -887,9 +911,8 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) {
         }
     }
 
-    // Per-slot scalar geometry (crop resolves at VIDEO_RECONFIG).
+    // Per-slot scalar geometry; crop remains a compositor mask.
     super::apply_scalar_geometry(lib, ctx, &load.geometry);
-    let _ = try_apply_crop(lib, ctx, &load.geometry);
 
     unsafe {
         let keep_open = if load.hold_last_frame && !load.is_image {
@@ -906,6 +929,12 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) {
                 .map(|ms| format!("{:.3}", ms as f64 / 1000.0))
                 .unwrap_or_else(|| "inf".to_string());
             opts.push(format!("image-display-duration={duration_val}"));
+            // Image display duration only controls single-frame images in
+            // mpv. GIF animation otherwise reaches EOF and completes its cue
+            // after one pass; loop this file until ImageCue stops it.
+            if let Some(loop_option) = image_loop_file_option(load.is_image, &load.url) {
+                opts.push(loop_option.to_string());
+            }
             // A preloaded image stays paused like a video: its display
             // duration must start counting when the cue is started, not when
             // it was loaded.
@@ -921,23 +950,20 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) {
             if load.slices.is_empty() {
                 if is_trimmed_video_loop(load.start_ms, load.end_ms, load.loop_count) {
                     opts.push("loop-file=no".to_string());
-                    if let Some((a, b, plays)) = trimmed_video_loop_bounds(
-                        load.start_ms,
-                        load.end_ms,
-                        None,
-                        load.loop_count,
-                    ) {
+                    if let Some((a, b, plays)) =
+                        trimmed_video_loop_bounds(load.start_ms, load.end_ms, None, load.loop_count)
+                    {
                         push_ab_loop_options(&mut opts, a, b, plays);
                     }
                 } else {
-                let loop_val = if load.loop_count == u32::MAX {
-                    "inf".to_string()
-                } else if load.loop_count == 0 {
-                    "no".to_string()
-                } else {
-                    load.loop_count.to_string()
-                };
-                opts.push(format!("loop-file={loop_val}"));
+                    let loop_val = if load.loop_count == u32::MAX {
+                        "inf".to_string()
+                    } else if load.loop_count == 0 {
+                        "no".to_string()
+                    } else {
+                        load.loop_count.to_string()
+                    };
+                    opts.push(format!("loop-file={loop_val}"));
                 }
             } else {
                 // Sliced playback: the segments own all looping (via ab-loop);
@@ -1431,17 +1457,24 @@ fn slot_event_loop(slot: Arc<VideoSlot>) {
             }
 
             MPV_EVENT_VIDEO_RECONFIG => {
-                // Source dimensions are now known — resolve the pixel crop.
-                let geometry = slot.state.lock().ok().and_then(|mut st| {
-                    if st.crop_applied {
-                        None
+                // Capture the effective display aspect and the source's clean
+                // metadata rotation. `video-params/rotate` also includes the
+                // authored video-rotate override, so use video-dec-params here
+                // and add the authored geometry rotation once in the mask.
+                let aspect =
+                    unsafe { get_prop_double(&lib, ctx as *mut c_void, "video-params/aspect") }
+                        .filter(|value| value.is_finite() && *value > 0.0);
+                let source_rotation =
+                    unsafe { get_prop_i64(&lib, ctx as *mut c_void, "video-dec-params/rotate") };
+                if let Ok(mut st) = slot.state.lock() {
+                    if let (Some(aspect), Some(source_rotation)) = (aspect, source_rotation) {
+                        st.source_aspect = aspect;
+                        st.source_rotation = source_rotation.rem_euclid(360) as u32;
                     } else {
-                        st.crop_applied = true;
-                        Some(st.geometry)
+                        // Never draw with a guessed crop transform. The next
+                        // VIDEO_RECONFIG can publish complete source metadata.
+                        st.source_aspect = 0.0;
                     }
-                });
-                if let Some(g) = geometry {
-                    let _ = try_apply_crop(&lib, ctx as *mut c_void, &g);
                 }
                 slot.wake();
             }
@@ -1789,14 +1822,22 @@ pub(super) fn is_playing(slot: &Arc<VideoSlot>) -> bool {
     let eof_reached = hold_last_frame
         .then(|| unsafe { get_prop_flag(&slot.lib, slot.mpv_ctx.0, "eof-reached") })
         .flatten();
-    playback_is_active((ret == 0).then_some(idle_active != 0), hold_last_frame, eof_reached)
+    playback_is_active(
+        (ret == 0).then_some(idle_active != 0),
+        hold_last_frame,
+        eof_reached,
+    )
 }
 
 pub(super) fn is_held_at_eof(slot: &Arc<VideoSlot>) -> bool {
     if !slot.accepts_mpv_calls() {
         return false;
     }
-    let holds = slot.state.lock().map(|state| state.hold_last_frame).unwrap_or(false);
+    let holds = slot
+        .state
+        .lock()
+        .map(|state| state.hold_last_frame)
+        .unwrap_or(false);
     holds && unsafe { get_prop_flag(&slot.lib, slot.mpv_ctx.0, "eof-reached") } == Some(true)
 }
 
@@ -1805,7 +1846,9 @@ fn playback_is_active(
     hold_last_frame: bool,
     eof_reached: Option<bool>,
 ) -> bool {
-    let Some(idle_active) = idle_active else { return false };
+    let Some(idle_active) = idle_active else {
+        return false;
+    };
     !idle_active && !(hold_last_frame && eof_reached == Some(true))
 }
 
@@ -1849,7 +1892,10 @@ pub(super) fn diagnostics(slot: &Arc<VideoSlot>) -> Option<VideoSlotDiagnostics>
             .map(|value| value as u32);
         snapshot.fps = get_prop_double(&slot.lib, slot.mpv_ctx.0, "container-fps")
             .filter(|value| value.is_finite() && *value > 0.0)
-            .or_else(|| get_prop_double(&slot.lib, slot.mpv_ctx.0, "estimated-vf-fps").filter(|value| value.is_finite() && *value > 0.0));
+            .or_else(|| {
+                get_prop_double(&slot.lib, slot.mpv_ctx.0, "estimated-vf-fps")
+                    .filter(|value| value.is_finite() && *value > 0.0)
+            });
         snapshot.hwdec_backend = get_prop_string(&slot.lib, slot.mpv_ctx.0, "hwdec-current");
         snapshot.decoder_format = get_prop_string(&slot.lib, slot.mpv_ctx.0, "video-format");
         snapshot.dropped_frames = get_prop_i64(&slot.lib, slot.mpv_ctx.0, "frame-drop-count")
@@ -1864,24 +1910,57 @@ pub(super) fn diagnostics(slot: &Arc<VideoSlot>) -> Option<VideoSlotDiagnostics>
     Some(snapshot)
 }
 
+pub(super) fn active_voice_id(slot: &Arc<VideoSlot>) -> Option<VoiceId> {
+    slot.state.lock().ok()?.voice_id
+}
+
+/// Read only the two mpv properties needed for an active source aspect hint.
+pub(super) fn source_dimensions(slot: &Arc<VideoSlot>) -> Option<(u32, u32)> {
+    if !slot.accepts_mpv_calls() {
+        return None;
+    }
+    unsafe {
+        let width = get_prop_i64(&slot.lib, slot.mpv_ctx.0, "video-params/w")
+            .filter(|value| *value > 0)? as u32;
+        let height = get_prop_i64(&slot.lib, slot.mpv_ctx.0, "video-params/h")
+            .filter(|value| *value > 0)? as u32;
+        Some((width, height))
+    }
+}
+
 unsafe fn get_prop_double(lib: &MpvLib, ctx: *mut c_void, name: &str) -> Option<f64> {
     let mut value = 0.0;
     let name = cs(name);
-    let ret = (lib.mpv_get_property)(ctx, name.as_ptr(), MPV_FORMAT_DOUBLE, &mut value as *mut f64 as *mut c_void);
+    let ret = (lib.mpv_get_property)(
+        ctx,
+        name.as_ptr(),
+        MPV_FORMAT_DOUBLE,
+        &mut value as *mut f64 as *mut c_void,
+    );
     (ret == 0).then_some(value)
 }
 
 unsafe fn get_prop_flag(lib: &MpvLib, ctx: *mut c_void, name: &str) -> Option<bool> {
     let mut value = 0;
     let name = cs(name);
-    let ret = (lib.mpv_get_property)(ctx, name.as_ptr(), crate::engine::mpv_sys::MPV_FORMAT_FLAG, &mut value as *mut i32 as *mut c_void);
+    let ret = (lib.mpv_get_property)(
+        ctx,
+        name.as_ptr(),
+        crate::engine::mpv_sys::MPV_FORMAT_FLAG,
+        &mut value as *mut i32 as *mut c_void,
+    );
     (ret == 0).then_some(value != 0)
 }
 
 unsafe fn get_prop_string(lib: &MpvLib, ctx: *mut c_void, name: &str) -> Option<String> {
     let mut value: *mut c_char = std::ptr::null_mut();
     let name = cs(name);
-    let ret = (lib.mpv_get_property)(ctx, name.as_ptr(), crate::engine::mpv_sys::MPV_FORMAT_STRING, &mut value as *mut *mut c_char as *mut c_void);
+    let ret = (lib.mpv_get_property)(
+        ctx,
+        name.as_ptr(),
+        crate::engine::mpv_sys::MPV_FORMAT_STRING,
+        &mut value as *mut *mut c_char as *mut c_void,
+    );
     if ret != 0 || value.is_null() {
         return None;
     }
@@ -1895,6 +1974,21 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use uuid::Uuid;
+
+    #[test]
+    fn only_image_gifs_receive_file_local_infinite_loop() {
+        assert_eq!(
+            image_loop_file_option(true, r"C:\media\SHOW.GIF"),
+            Some("loop-file=inf")
+        );
+        assert_eq!(
+            image_loop_file_option(true, "C:/media/фон#1.gif"),
+            Some("loop-file=inf")
+        );
+        assert_eq!(image_loop_file_option(true, "C:/media/still.png"), None);
+        assert_eq!(image_loop_file_option(true, "C:/media/still.jpeg"), None);
+        assert_eq!(image_loop_file_option(false, "C:/media/movie.gif"), None);
+    }
 
     #[test]
     fn held_last_frame_is_not_counted_as_active_playback() {
@@ -1912,15 +2006,26 @@ mod tests {
     #[ignore = "requires the installed pinned Windows libmpv and FFmpeg runtime"]
     fn installed_mpv_keeps_last_frame_while_eof_is_not_playing_and_seek_resumes() {
         use crate::engine::mpv_sys::{MpvLib, MPV_FORMAT_FLAG};
-        use std::{ffi::CString, os::windows::process::CommandExt, process::Command, time::Instant};
+        use std::{
+            ffi::CString, os::windows::process::CommandExt, process::Command, time::Instant,
+        };
 
         struct TempVideo(std::path::PathBuf);
         impl Drop for TempVideo {
-            fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
         }
-        struct MpvContext { lib: Arc<MpvLib>, ctx: *mut c_void }
+        struct MpvContext {
+            lib: Arc<MpvLib>,
+            ctx: *mut c_void,
+        }
         impl Drop for MpvContext {
-            fn drop(&mut self) { unsafe { (self.lib.mpv_terminate_destroy)(self.ctx); } }
+            fn drop(&mut self) {
+                unsafe {
+                    (self.lib.mpv_terminate_destroy)(self.ctx);
+                }
+            }
         }
 
         fn set_option(lib: &MpvLib, ctx: *mut c_void, key: &str, value: &str) {
@@ -1930,7 +2035,10 @@ mod tests {
         }
 
         fn command(lib: &MpvLib, ctx: *mut c_void, args: &[&str]) {
-            let strings = args.iter().map(|arg| CString::new(*arg).unwrap()).collect::<Vec<_>>();
+            let strings = args
+                .iter()
+                .map(|arg| CString::new(*arg).unwrap())
+                .collect::<Vec<_>>();
             let mut pointers = strings.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
             pointers.push(std::ptr::null());
             assert!(unsafe { (lib.mpv_command)(ctx, pointers.as_ptr()) } >= 0);
@@ -1939,27 +2047,59 @@ mod tests {
         fn flag(lib: &MpvLib, ctx: *mut c_void, name: &str) -> Option<bool> {
             let name = CString::new(name).unwrap();
             let mut value = 0_i32;
-            (unsafe { (lib.mpv_get_property)(ctx, name.as_ptr(), MPV_FORMAT_FLAG, &mut value as *mut i32 as *mut c_void) } == 0)
+            (unsafe {
+                (lib.mpv_get_property)(
+                    ctx,
+                    name.as_ptr(),
+                    MPV_FORMAT_FLAG,
+                    &mut value as *mut i32 as *mut c_void,
+                )
+            } == 0)
                 .then_some(value != 0)
         }
 
         let runtime = crate::media_runtime::runtime_dir();
         let ffmpeg = runtime.join("ffmpeg.exe");
-        assert!(ffmpeg.is_file(), "installed FFmpeg runtime missing: {}", ffmpeg.display());
+        assert!(
+            ffmpeg.is_file(),
+            "installed FFmpeg runtime missing: {}",
+            ffmpeg.display()
+        );
         let video = std::env::temp_dir().join(format!("qlisa-mpv-hold-{}.mp4", Uuid::new_v4()));
         let _temp_video = TempVideo(video.clone());
         let generated = Command::new(ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=24:d=1", "-an", "-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-y"])
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=64x64:r=24:d=1",
+                "-an",
+                "-c:v",
+                "mpeg4",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
             .arg(&video)
             .creation_flags(0x08000000)
             .output()
             .expect("run installed ffmpeg");
-        assert!(generated.status.success(), "FFmpeg fixture failed: {}", String::from_utf8_lossy(&generated.stderr));
+        assert!(
+            generated.status.success(),
+            "FFmpeg fixture failed: {}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
 
         let lib = Arc::new(MpvLib::load().expect("load installed libmpv runtime"));
         let ctx = unsafe { (lib.mpv_create)() };
         assert!(!ctx.is_null(), "mpv_create failed");
-        let _mpv_context = MpvContext { lib: Arc::clone(&lib), ctx };
+        let _mpv_context = MpvContext {
+            lib: Arc::clone(&lib),
+            ctx,
+        };
         set_option(&lib, ctx, "vo", "null");
         set_option(&lib, ctx, "ao", "null");
         set_option(&lib, ctx, "audio", "no");
@@ -1971,23 +2111,33 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(6);
         while Instant::now() < deadline && flag(&lib, ctx, "eof-reached") != Some(true) {
-            unsafe { (lib.mpv_wait_event)(ctx, 0.05); }
+            unsafe {
+                (lib.mpv_wait_event)(ctx, 0.05);
+            }
         }
         let idle = flag(&lib, ctx, "idle-active").expect("idle-active is supported");
         let eof = flag(&lib, ctx, "eof-reached").expect("eof-reached is supported");
         assert!(!idle, "keep-open should retain the loaded player/layer");
-        assert!(eof, "mpv should identify EOF while keep-open retains the last picture");
+        assert!(
+            eof,
+            "mpv should identify EOF while keep-open retains the last picture"
+        );
         assert!(!playback_is_active(Some(idle), true, Some(eof)));
 
         command(&lib, ctx, &["seek", "0.2", "absolute+exact"]);
         let seek_deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < seek_deadline && flag(&lib, ctx, "eof-reached") != Some(false) {
-            unsafe { (lib.mpv_wait_event)(ctx, 0.02); }
+            unsafe {
+                (lib.mpv_wait_event)(ctx, 0.02);
+            }
         }
         let eof_after_seek = flag(&lib, ctx, "eof-reached");
         assert_eq!(eof_after_seek, Some(false), "seek-back must clear EOF");
-        assert!(playback_is_active(Some(flag(&lib, ctx, "idle-active").unwrap()), true, eof_after_seek));
-
+        assert!(playback_is_active(
+            Some(flag(&lib, ctx, "idle-active").unwrap()),
+            true,
+            eof_after_seek
+        ));
     }
 
     #[test]
@@ -2158,9 +2308,18 @@ mod tests {
     #[test]
     fn ordinary_video_trim_loops_resolve_each_effective_bound() {
         assert_eq!(trimmed_video_loop_bounds(None, None, Some(2_000), 3), None);
-        assert_eq!(trimmed_video_loop_bounds(None, Some(750), Some(2_000), 3), Some((0.0, 0.75, 4)));
-        assert_eq!(trimmed_video_loop_bounds(Some(250), None, Some(2_000), 3), Some((0.25, 2.0, 4)));
-        assert_eq!(trimmed_video_loop_bounds(Some(250), Some(750), Some(2_000), 3), Some((0.25, 0.75, 4)));
+        assert_eq!(
+            trimmed_video_loop_bounds(None, Some(750), Some(2_000), 3),
+            Some((0.0, 0.75, 4))
+        );
+        assert_eq!(
+            trimmed_video_loop_bounds(Some(250), None, Some(2_000), 3),
+            Some((0.25, 2.0, 4))
+        );
+        assert_eq!(
+            trimmed_video_loop_bounds(Some(250), Some(750), Some(2_000), 3),
+            Some((0.25, 0.75, 4))
+        );
         assert_eq!(trimmed_video_loop_bounds(Some(250), None, None, 3), None);
     }
 
@@ -2169,11 +2328,12 @@ mod tests {
     #[ignore = "requires the installed pinned Windows libmpv and FFmpeg runtime"]
     fn installed_mpv_ab_loop_stays_inside_trim_for_finite_infinite_pause_and_seek() {
         use crate::engine::mpv_sys::{
-            MpvEventEndFile, MpvEventProperty, MpvLib, MPV_END_FILE_REASON_EOF,
-            MPV_EVENT_END_FILE, MPV_EVENT_FILE_LOADED, MPV_EVENT_PROPERTY_CHANGE,
-            MPV_FORMAT_DOUBLE,
+            MpvEventEndFile, MpvEventProperty, MpvLib, MPV_END_FILE_REASON_EOF, MPV_EVENT_END_FILE,
+            MPV_EVENT_FILE_LOADED, MPV_EVENT_PROPERTY_CHANGE, MPV_FORMAT_DOUBLE,
         };
-        use std::{ffi::CString, os::windows::process::CommandExt, process::Command, time::Instant};
+        use std::{
+            ffi::CString, os::windows::process::CommandExt, process::Command, time::Instant,
+        };
 
         fn set_option(lib: &MpvLib, ctx: *mut c_void, key: &str, value: &str) {
             let key = CString::new(key).unwrap();
@@ -2183,8 +2343,14 @@ mod tests {
         }
 
         fn command(lib: &MpvLib, ctx: *mut c_void, args: &[&str]) {
-            let values = args.iter().map(|value| CString::new(*value).unwrap()).collect::<Vec<_>>();
-            let mut pointers = values.iter().map(|value| value.as_ptr()).collect::<Vec<_>>();
+            let values = args
+                .iter()
+                .map(|value| CString::new(*value).unwrap())
+                .collect::<Vec<_>>();
+            let mut pointers = values
+                .iter()
+                .map(|value| value.as_ptr())
+                .collect::<Vec<_>>();
             pointers.push(std::ptr::null());
             let result = unsafe { (lib.mpv_command)(ctx, pointers.as_ptr()) };
             assert!(result >= 0, "mpv command failed: {result}");
@@ -2194,8 +2360,14 @@ mod tests {
             let key = CString::new("time-pos").unwrap();
             let mut value = 0.0_f64;
             (unsafe {
-                (lib.mpv_get_property)(ctx, key.as_ptr(), MPV_FORMAT_DOUBLE, &mut value as *mut f64 as *mut c_void)
-            } == 0).then_some(value)
+                (lib.mpv_get_property)(
+                    ctx,
+                    key.as_ptr(),
+                    MPV_FORMAT_DOUBLE,
+                    &mut value as *mut f64 as *mut c_void,
+                )
+            } == 0)
+                .then_some(value)
         }
 
         fn load_trimmed(lib: &MpvLib, ctx: *mut c_void, path: &std::path::Path, loops: u32) {
@@ -2206,7 +2378,16 @@ mod tests {
                 "end=0.750".to_string(),
                 "loop-file=no".to_string(),
             ];
-            push_ab_loop_options(&mut options, 0.25, 0.75, if loops == u32::MAX { u32::MAX } else { loops + 1 });
+            push_ab_loop_options(
+                &mut options,
+                0.25,
+                0.75,
+                if loops == u32::MAX {
+                    u32::MAX
+                } else {
+                    loops + 1
+                },
+            );
             let path = path.to_string_lossy().to_string();
             let options = options.join(",");
             command(lib, ctx, &["loadfile", &path, "replace", "0", &options]);
@@ -2214,15 +2395,37 @@ mod tests {
 
         let runtime = crate::media_runtime::runtime_dir();
         let ffmpeg = runtime.join("ffmpeg.exe");
-        assert!(ffmpeg.is_file(), "installed FFmpeg runtime missing: {}", ffmpeg.display());
+        assert!(
+            ffmpeg.is_file(),
+            "installed FFmpeg runtime missing: {}",
+            ffmpeg.display()
+        );
         let video = std::env::temp_dir().join(format!("qlisa-mpv-trim-{}.mp4", Uuid::new_v4()));
         let output = Command::new(ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=24:duration=2", "-an", "-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-y"])
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=24:duration=2",
+                "-an",
+                "-c:v",
+                "mpeg4",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
             .arg(&video)
             .creation_flags(0x08000000)
             .output()
             .expect("run installed ffmpeg");
-        assert!(output.status.success(), "ffmpeg fixture generation failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "ffmpeg fixture generation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         let lib = Arc::new(MpvLib::load().expect("load installed libmpv runtime"));
         let ctx = unsafe { (lib.mpv_create)() };
@@ -2234,7 +2437,10 @@ mod tests {
         let init = unsafe { (lib.mpv_initialize)(ctx) };
         assert!(init >= 0, "mpv_initialize failed: {init}");
         let prop = CString::new("time-pos").unwrap();
-        assert_eq!(unsafe { (lib.mpv_observe_property)(ctx, 1, prop.as_ptr(), MPV_FORMAT_DOUBLE) }, 0);
+        assert_eq!(
+            unsafe { (lib.mpv_observe_property)(ctx, 1, prop.as_ptr(), MPV_FORMAT_DOUBLE) },
+            0
+        );
 
         load_trimmed(&lib, ctx, &video, 2);
         let finite_deadline = Instant::now() + std::time::Duration::from_secs(6);
@@ -2244,15 +2450,24 @@ mod tests {
         let mut eof = false;
         while Instant::now() < finite_deadline && !eof {
             let event = unsafe { (lib.mpv_wait_event)(ctx, 0.05) };
-            if event.is_null() { continue; }
+            if event.is_null() {
+                continue;
+            }
             match unsafe { (*event).event_id } {
                 MPV_EVENT_FILE_LOADED => loaded = true,
                 MPV_EVENT_PROPERTY_CHANGE if loaded => {
                     let data = unsafe { ((*event).data as *const MpvEventProperty).as_ref() };
-                    if let Some(data) = data.filter(|data| data.format == MPV_FORMAT_DOUBLE && !data.data.is_null()) {
+                    if let Some(data) =
+                        data.filter(|data| data.format == MPV_FORMAT_DOUBLE && !data.data.is_null())
+                    {
                         let time = unsafe { *(data.data as *const f64) };
-                        assert!(time >= 0.20, "finite trim loop exposed physical frame zero: {time}");
-                        if previous.is_some_and(|prior| time + 0.1 < prior) { finite_wraps += 1; }
+                        assert!(
+                            time >= 0.20,
+                            "finite trim loop exposed physical frame zero: {time}"
+                        );
+                        if previous.is_some_and(|prior| time + 0.1 < prior) {
+                            finite_wraps += 1;
+                        }
                         previous = Some(time);
                     }
                 }
@@ -2264,7 +2479,10 @@ mod tests {
             }
         }
         assert!(eof, "finite A-B loop did not complete at its end bound");
-        assert_eq!(finite_wraps, 2, "finite loop count is two additional A-B seeks");
+        assert_eq!(
+            finite_wraps, 2,
+            "finite loop count is two additional A-B seeks"
+        );
 
         load_trimmed(&lib, ctx, &video, u32::MAX);
         let infinite_deadline = Instant::now() + std::time::Duration::from_secs(6);
@@ -2273,15 +2491,24 @@ mod tests {
         let mut loaded = false;
         while Instant::now() < infinite_deadline && infinite_wraps < 1 {
             let event = unsafe { (lib.mpv_wait_event)(ctx, 0.05) };
-            if event.is_null() { continue; }
+            if event.is_null() {
+                continue;
+            }
             match unsafe { (*event).event_id } {
                 MPV_EVENT_FILE_LOADED => loaded = true,
                 MPV_EVENT_PROPERTY_CHANGE if loaded => {
                     let data = unsafe { ((*event).data as *const MpvEventProperty).as_ref() };
-                    if let Some(data) = data.filter(|data| data.format == MPV_FORMAT_DOUBLE && !data.data.is_null()) {
+                    if let Some(data) =
+                        data.filter(|data| data.format == MPV_FORMAT_DOUBLE && !data.data.is_null())
+                    {
                         let time = unsafe { *(data.data as *const f64) };
-                        assert!(time >= 0.20, "infinite trim loop exposed physical frame zero: {time}");
-                        if previous.is_some_and(|prior| time + 0.1 < prior) { infinite_wraps += 1; }
+                        assert!(
+                            time >= 0.20,
+                            "infinite trim loop exposed physical frame zero: {time}"
+                        );
+                        if previous.is_some_and(|prior| time + 0.1 < prior) {
+                            infinite_wraps += 1;
+                        }
                         previous = Some(time);
                     }
                 }
@@ -2293,7 +2520,10 @@ mod tests {
         let paused_at = position(&lib, ctx).expect("mpv time-pos");
         std::thread::sleep(std::time::Duration::from_millis(150));
         let paused_after = position(&lib, ctx).expect("paused mpv time-pos");
-        assert!((paused_after - paused_at).abs() < 0.03, "pause moved the media clock");
+        assert!(
+            (paused_after - paused_at).abs() < 0.03,
+            "pause moved the media clock"
+        );
         command(&lib, ctx, &["seek", "0.500", "absolute+exact"]);
         let seek_deadline = Instant::now() + std::time::Duration::from_secs(2);
         while Instant::now() < seek_deadline
@@ -2302,24 +2532,39 @@ mod tests {
             let _ = unsafe { (lib.mpv_wait_event)(ctx, 0.05) };
         }
         let seeked = position(&lib, ctx).expect("seeked mpv time-pos");
-        assert!((seeked - 0.5).abs() <= 0.10, "seek did not land in the effective trim: {seeked}");
+        assert!(
+            (seeked - 0.5).abs() <= 0.10,
+            "seek did not land in the effective trim: {seeked}"
+        );
         command(&lib, ctx, &["set", "pause", "no"]);
         let resume_deadline = Instant::now() + std::time::Duration::from_secs(3);
         let start_wraps = infinite_wraps;
         while Instant::now() < resume_deadline && infinite_wraps == start_wraps {
             let event = unsafe { (lib.mpv_wait_event)(ctx, 0.05) };
-            if event.is_null() { continue; }
+            if event.is_null() {
+                continue;
+            }
             if unsafe { (*event).event_id } == MPV_EVENT_PROPERTY_CHANGE {
                 let data = unsafe { ((*event).data as *const MpvEventProperty).as_ref() };
-                if let Some(data) = data.filter(|data| data.format == MPV_FORMAT_DOUBLE && !data.data.is_null()) {
+                if let Some(data) =
+                    data.filter(|data| data.format == MPV_FORMAT_DOUBLE && !data.data.is_null())
+                {
                     let time = unsafe { *(data.data as *const f64) };
-                    assert!(time >= 0.20, "resumed loop exposed physical frame zero: {time}");
-                    if previous.is_some_and(|prior| time + 0.1 < prior) { infinite_wraps += 1; }
+                    assert!(
+                        time >= 0.20,
+                        "resumed loop exposed physical frame zero: {time}"
+                    );
+                    if previous.is_some_and(|prior| time + 0.1 < prior) {
+                        infinite_wraps += 1;
+                    }
                     previous = Some(time);
                 }
             }
         }
-        assert!(infinite_wraps > start_wraps, "loop did not continue after pause/resume/seek");
+        assert!(
+            infinite_wraps > start_wraps,
+            "loop did not continue after pause/resume/seek"
+        );
 
         // Match the production start-only path: load with `start`, wait for
         // FILE_LOADED duration, then install A/B through the same helper that
@@ -2333,16 +2578,23 @@ mod tests {
             "pause=no".to_string(),
             "start=0.250".to_string(),
             "loop-file=no".to_string(),
-        ].join(",");
+        ]
+        .join(",");
         let video_path = video.to_string_lossy().to_string();
-        command(&lib, ctx, &["loadfile", &video_path, "replace", "0", &start_only_options]);
+        command(
+            &lib,
+            ctx,
+            &["loadfile", &video_path, "replace", "0", &start_only_options],
+        );
         let start_only_deadline = Instant::now() + std::time::Duration::from_secs(30);
         let mut start_only_loaded = false;
         let mut start_only_wraps = 0_u32;
         let mut start_only_previous: Option<f64> = None;
         while Instant::now() < start_only_deadline && start_only_wraps < 100 {
             let event = unsafe { (lib.mpv_wait_event)(ctx, 0.05) };
-            if event.is_null() { continue; }
+            if event.is_null() {
+                continue;
+            }
             match unsafe { (*event).event_id } {
                 MPV_EVENT_FILE_LOADED => {
                     start_only_loaded = true;
@@ -2352,9 +2604,14 @@ mod tests {
                 }
                 MPV_EVENT_PROPERTY_CHANGE if start_only_loaded => {
                     let data = unsafe { ((*event).data as *const MpvEventProperty).as_ref() };
-                    if let Some(data) = data.filter(|data| data.format == MPV_FORMAT_DOUBLE && !data.data.is_null()) {
+                    if let Some(data) =
+                        data.filter(|data| data.format == MPV_FORMAT_DOUBLE && !data.data.is_null())
+                    {
                         let time = unsafe { *(data.data as *const f64) };
-                        assert!(time >= 0.20, "start-only trim loop exposed physical frame zero: {time}");
+                        assert!(
+                            time >= 0.20,
+                            "start-only trim loop exposed physical frame zero: {time}"
+                        );
                         if start_only_previous.is_some_and(|prior| time + 0.1 < prior) {
                             start_only_wraps += 1;
                         }
@@ -2365,7 +2622,10 @@ mod tests {
             }
         }
         assert!(start_only_loaded, "start-only fixture did not load");
-        assert_eq!(start_only_wraps, 100, "finite start-only loop did not make 100 bounded repeats");
+        assert_eq!(
+            start_only_wraps, 100,
+            "finite start-only loop did not make 100 bounded repeats"
+        );
         command(&lib, ctx, &["quit"]);
         unsafe { (lib.mpv_terminate_destroy)(ctx) };
         let _ = std::fs::remove_file(video);

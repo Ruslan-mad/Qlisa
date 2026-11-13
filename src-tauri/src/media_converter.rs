@@ -143,6 +143,7 @@ struct JobRecord {
     temp_path: PathBuf,
     reservation_path: PathBuf,
     diagnostic_path: PathBuf,
+    media_kind: MediaKind,
     app: tauri::AppHandle,
 }
 
@@ -419,23 +420,8 @@ impl MediaConverterManager {
             .extension()
             .and_then(|extension| extension.to_str())
             .unwrap_or("mp4");
-        let temp = output.with_file_name(format!(
-            ".{}.part-{}.{}",
-            output
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("qlisa"),
-            Uuid::new_v4(),
-            temp_extension,
-        ));
-        let diagnostic_path = output.with_file_name(format!(
-            ".{}.ffmpeg-{}.log",
-            output
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("qlisa"),
-            Uuid::new_v4()
-        ));
+        let temp = output.with_file_name(format!(".q-{}.{}", Uuid::new_v4(), temp_extension));
+        let diagnostic_path = output.with_file_name(format!(".q-{}.log", Uuid::new_v4()));
         let probe = probe_media_path(&input).ok();
         let args = match media_kind {
             // Audio output is deliberately encoded as M4A/AAC.  Remuxing an
@@ -443,9 +429,10 @@ impl MediaConverterManager {
             // attached cover-art stream would fabricate a video track.
             MediaKind::Audio => audio_preset_args(&request, &input, &temp),
             MediaKind::Video => {
-                if probe.as_ref().is_some_and(|metadata| {
-                    analyze_compatibility(metadata).status == CompatibilityStatus::Compatible
-                }) {
+                if probe
+                    .as_ref()
+                    .is_some_and(|metadata| can_remux_video(&request, metadata))
+                {
                     remux_args(&input, &temp)
                 } else {
                     preset_args(&request, &input, &temp)
@@ -480,6 +467,7 @@ impl MediaConverterManager {
             temp_path: temp.clone(),
             reservation_path: reservation_path.clone(),
             diagnostic_path: diagnostic_path.clone(),
+            media_kind,
             app: app.clone(),
         });
         self.jobs
@@ -578,8 +566,10 @@ fn is_media_extension(path: &Path) -> bool {
                 | "aac"
                 | "flac"
                 | "ogg"
+                | "ogv"
                 | "aiff"
                 | "aif"
+                | "aifc"
                 | "m4a"
                 | "png"
                 | "jpg"
@@ -615,7 +605,7 @@ pub fn preset_args(request: &MediaConversionRequest, input: &Path, temp: &Path) 
         "-i".into(),
         input.to_string_lossy().into_owned(),
         "-map".into(),
-        "0:v:0?".into(),
+        "0:V:0?".into(),
         "-map".into(),
         "0:a:0?".into(),
         "-c:v".into(),
@@ -632,10 +622,9 @@ pub fn preset_args(request: &MediaConversionRequest, input: &Path, temp: &Path) 
         "192k".into(),
         "-movflags".into(),
         "+faststart".into(),
+        "-vf".into(),
+        video_preset_filter(request.max_resolution),
     ];
-    if let Some(max) = request.max_resolution {
-        args.extend(["-vf".into(), format!("scale=trunc(min(iw\\,{max})/2)*2:trunc(min(ih\\,{max})/2)*2:force_original_aspect_ratio=decrease")]);
-    }
     args.extend([
         "-ar".into(),
         "48000".into(),
@@ -646,6 +635,20 @@ pub fn preset_args(request: &MediaConversionRequest, input: &Path, temp: &Path) 
         temp.to_string_lossy().into_owned(),
     ]);
     args
+}
+
+/// Convert full-range inputs to the limited-range pixel format expected by
+/// the video encoder, while leaving already-limited inputs at the same levels.
+/// `in_range=auto` lets FFmpeg detect the input range from its pixel format and
+/// metadata. The optional size constraint stays in this same scale operation.
+fn video_preset_filter(max_resolution: Option<u32>) -> String {
+    let scale = match max_resolution {
+        Some(max) => format!(
+            "scale=trunc(min(iw\\,{max})/2)*2:trunc(min(ih\\,{max})/2)*2:force_original_aspect_ratio=decrease:force_divisible_by=2:in_range=auto:out_range=tv"
+        ),
+        None => "scale=max(2\\,trunc(iw/2)*2):max(2\\,trunc(ih/2)*2):in_range=auto:out_range=tv".into(),
+    };
+    format!("{scale},format=yuv420p")
 }
 
 /// Encode an audio Cue without inventing a video stream.  The old generic
@@ -760,7 +763,7 @@ pub fn remux_args(input: &Path, temp: &Path) -> Vec<String> {
         "-i".into(),
         input.to_string_lossy().into_owned(),
         "-map".into(),
-        "0:v:0?".into(),
+        "0:V:0?".into(),
         "-map".into(),
         "0:a:0?".into(),
         "-c".into(),
@@ -784,12 +787,95 @@ fn unique_output_path(input: &Path, extension: &str) -> Result<PathBuf, String> 
         } else {
             format!("_{n}")
         };
-        let candidate = parent.join(format!("{stem}_converted{suffix}.{extension}"));
+        let fixed_suffix = format!("_converted{suffix}.{extension}");
+        let lock_suffix = format!("_converted{suffix}.lock");
+        let reserved_units = fixed_suffix
+            .encode_utf16()
+            .count()
+            .max(lock_suffix.encode_utf16().count());
+        let max_stem_units = 255_usize.saturating_sub(reserved_units);
+        let stem = truncate_utf16(stem, max_stem_units);
+        let candidate = parent.join(format!("{stem}{fixed_suffix}"));
         if candidate != input && !candidate.exists() && !candidate.with_extension("lock").exists() {
             return Ok(candidate);
         }
     }
     Err("Could not find a unique converted output name".into())
+}
+
+fn truncate_utf16(value: &str, max_units: usize) -> &str {
+    let mut end = 0;
+    let mut units = 0;
+    for (index, ch) in value.char_indices() {
+        let next = ch.len_utf16();
+        if units + next > max_units {
+            break;
+        }
+        units += next;
+        end = index + ch.len_utf8();
+    }
+    &value[..end]
+}
+
+fn can_remux_video(request: &MediaConversionRequest, metadata: &ProbeMetadata) -> bool {
+    request.mode == ConversionMode::Optimize
+        && request.max_resolution.is_none()
+        && metadata.width.is_some_and(|value| value > 0)
+        && metadata.height.is_some_and(|value| value > 0)
+        && metadata.video_codec.as_deref() == Some("h264")
+        && metadata.pixel_format.as_deref() == Some("yuv420p")
+        && metadata.video_bit_depth.is_none_or(|depth| depth <= 8)
+        && matches!(metadata.audio_codec.as_deref(), None | Some("aac"))
+}
+
+fn validate_converted_output(kind: MediaKind, metadata: &ProbeMetadata) -> Result<(), String> {
+    if analyze_compatibility(metadata).status == CompatibilityStatus::Unsupported {
+        return Err(format!(
+            "incompatible: {}",
+            analyze_compatibility(metadata).reasons.join("; ")
+        ));
+    }
+    let valid = match kind {
+        MediaKind::Audio => metadata.audio_codec.is_some(),
+        MediaKind::Video | MediaKind::Image => {
+            metadata.video_codec.is_some()
+                && metadata.width.is_some_and(|value| value > 0)
+                && metadata.height.is_some_and(|value| value > 0)
+        }
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err("output does not contain the expected media stream and dimensions".into())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyPathDecision {
+    Apply,
+    AlreadyApplied,
+}
+
+fn check_media_apply_path(
+    current: &Path,
+    input: &Path,
+    output: &Path,
+) -> Result<ApplyPathDecision, String> {
+    let current = fs::canonicalize(current)
+        .map_err(|_| "Текущий путь к медиа Cue изменён или файл отсутствует; результат не применён")?;
+    let output =
+        fs::canonicalize(output).map_err(|_| "Файл результата конвертации не существует")?;
+    if current == output {
+        Ok(ApplyPathDecision::AlreadyApplied)
+    } else {
+        let input = fs::canonicalize(input)
+            .map_err(|_| "Исходный файл конвертации больше не существует; результат не применён")?;
+        if current == input {
+            Ok(ApplyPathDecision::Apply)
+        } else {
+            Err("Назначенный файл Cue изменён после начала конвертации; результат не применён".into())
+        }
+    }
 }
 
 fn read_lines<T: Read + Send + 'static>(
@@ -1050,18 +1136,13 @@ fn conversion_worker(
     };
     let success = finalized_by_this_job
         && match probe_media_path(&output) {
-            Ok(metadata)
-                if analyze_compatibility(&metadata).status == CompatibilityStatus::Compatible =>
-            {
-                true
-            }
-            Ok(metadata) => {
-                validation_error = Some(format!(
-                    "incompatible: {}",
-                    analyze_compatibility(&metadata).reasons.join("; ")
-                ));
-                false
-            }
+            Ok(metadata) => match validate_converted_output(record.media_kind, &metadata) {
+                Ok(()) => true,
+                Err(error) => {
+                    validation_error = Some(error);
+                    false
+                }
+            },
             Err(error) => {
                 // Keep the probe detail in the diagnostic log, but never expose
                 // ffprobe's raw stderr or parser internals in the user-facing job.
@@ -1662,13 +1743,18 @@ pub fn replace_cue_media_path(
     state: tauri::State<'_, crate::state::AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let (cue_id, output) = state.media_converter.completed_output(&job_id)?;
+    let (cue_id, input, output) = state.media_converter.completed_paths(&job_id)?;
     let file_path = output.to_string_lossy().into_owned();
     if !output.is_file() {
         return Err("Completed conversion output does not exist".into());
     }
     let id = Uuid::parse_str(&cue_id).map_err(|_| "Cue id is not a valid UUID".to_string())?;
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let workspace_parent = ws
+        .file_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(Path::to_path_buf);
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
     let cue = cue_list.get_recursive(&id).ok_or("Cue not found")?;
     if !matches!(
@@ -1681,6 +1767,23 @@ pub fn replace_cue_media_path(
     }
     if cue.is_running() || cue.is_paused() {
         return Err("Stop the cue before replacing its media".into());
+    }
+    let stored = cue
+        .media_file_path()
+        .ok_or("Cue has no authored media path")?;
+    let current_path = if stored.is_absolute() {
+        stored.to_path_buf()
+    } else if let Some(parent) = workspace_parent {
+        parent.join(stored)
+    } else {
+        stored.to_path_buf()
+    };
+    if check_media_apply_path(&current_path, &input, &output)?
+        == ApplyPathDecision::AlreadyApplied
+    {
+        drop(ws);
+        state.media_converter.mark_applied(&job_id, true)?;
+        return Ok(());
     }
     let cue_type = cue.cue_type();
     {
@@ -1868,10 +1971,310 @@ mod tests {
         );
         assert!(args.contains(&"-i".into()));
         assert!(args.contains(&"libx264".into()));
-        assert!(args.iter().any(|arg| arg == "scale=trunc(min(iw\\,1920)/2)*2:trunc(min(ih\\,1920)/2)*2:force_original_aspect_ratio=decrease"));
+        assert!(args.iter().any(|arg| arg == "scale=trunc(min(iw\\,1920)/2)*2:trunc(min(ih\\,1920)/2)*2:force_original_aspect_ratio=decrease:force_divisible_by=2:in_range=auto:out_range=tv,format=yuv420p"));
+        assert_eq!(args.iter().filter(|arg| arg.as_str() == "-vf").count(), 1);
         assert!(!args
             .iter()
             .any(|arg| arg.contains("cmd.exe") || arg.contains("/bin/sh")));
+    }
+
+    #[test]
+    fn video_preset_filter_converts_range_without_forcing_resize() {
+        assert_eq!(
+            video_preset_filter(None),
+            "scale=max(2\\,trunc(iw/2)*2):max(2\\,trunc(ih/2)*2):in_range=auto:out_range=tv,format=yuv420p"
+        );
+        assert_eq!(
+            video_preset_filter(Some(720)),
+            "scale=trunc(min(iw\\,720)/2)*2:trunc(min(ih\\,720)/2)*2:force_original_aspect_ratio=decrease:force_divisible_by=2:in_range=auto:out_range=tv,format=yuv420p"
+        );
+    }
+
+    #[test]
+    fn remux_is_limited_to_optimize_without_resize_and_safe_mp4_streams() {
+        let mut metadata = ProbeMetadata {
+            path: "input.mp4".into(),
+            file_size: 100,
+            format_name: Some("mov,mp4".into()),
+            duration_seconds: Some(1.0),
+            width: Some(1920),
+            height: Some(1080),
+            video_codec: Some("h264".into()),
+            video_profile: Some("High".into()),
+            video_bit_depth: Some(8),
+            audio_codec: Some("aac".into()),
+            audio_channels: Some(2),
+            sample_rate: Some(48_000),
+            pixel_format: Some("yuv420p".into()),
+            frame_rate: Some(30.0),
+        };
+        let mut request = MediaConversionRequest {
+            cue_id: None,
+            input_path: "input.mp4".into(),
+            mode: ConversionMode::Optimize,
+            quality: None,
+            max_resolution: None,
+            image_format: None,
+        };
+        assert!(can_remux_video(&request, &metadata));
+        request.mode = ConversionMode::Size;
+        assert!(!can_remux_video(&request, &metadata));
+        request.mode = ConversionMode::Optimize;
+        request.max_resolution = Some(720);
+        assert!(!can_remux_video(&request, &metadata));
+        request.max_resolution = None;
+        metadata.video_codec = Some("theora".into());
+        assert!(!can_remux_video(&request, &metadata));
+        metadata.video_codec = Some("h264".into());
+        metadata.audio_codec = Some("flac".into());
+        assert!(!can_remux_video(&request, &metadata));
+        metadata.audio_codec = None;
+        assert!(can_remux_video(&request, &metadata));
+    }
+
+    #[test]
+    fn output_validation_accepts_advisory_limits_but_checks_stream_shape() {
+        let metadata = ProbeMetadata {
+            path: "portrait.mp4".into(),
+            file_size: 100,
+            format_name: Some("mov,mp4".into()),
+            duration_seconds: Some(1.0),
+            width: Some(1440),
+            height: Some(2560),
+            video_codec: Some("h264".into()),
+            video_profile: Some("High".into()),
+            video_bit_depth: Some(8),
+            audio_codec: Some("aac".into()),
+            audio_channels: Some(2),
+            sample_rate: Some(48_000),
+            pixel_format: Some("yuv420p".into()),
+            frame_rate: Some(120.0),
+        };
+        assert_eq!(
+            analyze_compatibility(&metadata).status,
+            CompatibilityStatus::Recommended
+        );
+        assert!(validate_converted_output(MediaKind::Video, &metadata).is_ok());
+        let mut missing_video = metadata.clone();
+        missing_video.video_codec = None;
+        assert!(validate_converted_output(MediaKind::Video, &missing_video).is_err());
+        assert!(validate_converted_output(MediaKind::Audio, &missing_video).is_ok());
+        let mut unsupported = metadata;
+        unsupported.video_codec = Some("vp9".into());
+        unsupported.audio_codec = Some("opus".into());
+        assert!(validate_converted_output(MediaKind::Video, &unsupported).is_err());
+    }
+
+    #[test]
+    fn converter_extensions_include_ui_supported_ogv_and_aifc_but_not_svg() {
+        assert!(is_media_extension(Path::new("clip.ogv")));
+        assert!(is_media_extension(Path::new("audio.aifc")));
+        assert!(!is_media_extension(Path::new("vector.svg")));
+    }
+
+    #[test]
+    fn output_name_truncation_preserves_unicode_and_component_limits() {
+        let stem = format!("{}🎬", "я".repeat(230));
+        let truncated = truncate_utf16(&stem, 220);
+        assert!(truncated.encode_utf16().count() <= 220);
+        assert!(!truncated.ends_with('🎬'));
+        let suffix = "_converted_9999.mp4";
+        let lock_suffix = "_converted_9999.lock";
+        assert!(truncated.encode_utf16().count() + suffix.encode_utf16().count() <= 255);
+        assert!(truncated.encode_utf16().count() + lock_suffix.encode_utf16().count() <= 255);
+    }
+
+    #[test]
+    fn apply_path_guard_rejects_reassignment_and_is_idempotent_for_job_output() {
+        let dir = std::env::temp_dir().join(format!("qlisa-apply-guard-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("original.mp4");
+        let output = dir.join("original_converted.mp4");
+        let reassigned = dir.join("new-source.mp4");
+        fs::write(&input, b"input").unwrap();
+        fs::write(&output, b"output").unwrap();
+        fs::write(&reassigned, b"replacement").unwrap();
+        assert_eq!(
+            check_media_apply_path(&input, &input, &output).unwrap(),
+            ApplyPathDecision::Apply
+        );
+        assert_eq!(
+            check_media_apply_path(&output, &input, &output).unwrap(),
+            ApplyPathDecision::AlreadyApplied
+        );
+        assert!(check_media_apply_path(&reassigned, &input, &output).is_err());
+        assert!(check_media_apply_path(&dir.join("cleared.mp4"), &input, &output).is_err());
+        fs::remove_file(&input).unwrap();
+        assert_eq!(
+            check_media_apply_path(&output, &input, &output).unwrap(),
+            ApplyPathDecision::AlreadyApplied
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// End-to-end regression for full-range MJPEG and ordinary limited-range
+    /// H.264. Set QLISA_FFMPEG_FIXTURE_FULL_RANGE and
+    /// QLISA_FFMPEG_FIXTURE_LIMITED_RANGE to local paths, then run:
+    /// `cargo test --lib media_converter::tests::preset_args_encode_full_and_limited_range_fixtures -- --ignored --exact`
+    #[test]
+    #[ignore = "requires local full-range MJPEG and limited-range H.264 fixtures"]
+    fn preset_args_encode_full_and_limited_range_fixtures() {
+        use std::process::Command;
+
+        let full_range = std::env::var("QLISA_FFMPEG_FIXTURE_FULL_RANGE")
+            .expect("set QLISA_FFMPEG_FIXTURE_FULL_RANGE to a full-range video fixture");
+        let limited_range = std::env::var("QLISA_FFMPEG_FIXTURE_LIMITED_RANGE")
+            .expect("set QLISA_FFMPEG_FIXTURE_LIMITED_RANGE to a limited-range video fixture");
+        let ffmpeg = find_ffmpeg_runtime().expect("Qlisa FFmpeg runtime is unavailable");
+        let ffprobe = ffmpeg.with_file_name(if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        });
+        let work = std::env::temp_dir().join(format!(
+            "qlisa-media-converter-range-test-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&work).expect("create temporary conversion directory");
+
+        for (name, input, max_resolution, expected_source_range) in [
+            ("full", full_range.clone(), None, "pc"),
+            ("full_720", full_range, Some(720), "pc"),
+            ("limited", limited_range.clone(), None, "tv"),
+            ("limited_720", limited_range, Some(720), "tv"),
+        ] {
+            let source_probe = Command::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-count_frames",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height,color_range,color_space,r_frame_rate,duration,nb_read_frames",
+                    "-of",
+                    "json",
+                ])
+                .arg(&input)
+                .output()
+                .expect("probe fixture range");
+            assert!(
+                source_probe.status.success(),
+                "ffprobe failed: {}",
+                String::from_utf8_lossy(&source_probe.stderr)
+            );
+            let source_metadata: serde_json::Value =
+                serde_json::from_slice(&source_probe.stdout).expect("parse fixture metadata");
+            let source_stream = &source_metadata["streams"][0];
+            assert_eq!(
+                source_stream["color_range"], expected_source_range,
+                "fixture {name} has unexpected range"
+            );
+
+            let output = work.join(format!("{name}.mp4"));
+            let request = MediaConversionRequest {
+                cue_id: None,
+                input_path: input.clone(),
+                mode: ConversionMode::Optimize,
+                quality: None,
+                max_resolution,
+                image_format: None,
+            };
+            let args = preset_args(&request, Path::new(&input), &output);
+            let encoded = Command::new(&ffmpeg)
+                .args(&args)
+                .output()
+                .expect("run production preset arguments");
+            assert!(
+                encoded.status.success(),
+                "FFmpeg failed for {name}: {}",
+                String::from_utf8_lossy(&encoded.stderr)
+            );
+
+            let probe = Command::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-count_frames",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height,pix_fmt,color_range,color_space,r_frame_rate,duration,nb_read_frames",
+                    "-of",
+                    "json",
+                ])
+                .arg(&output)
+                .output()
+                .expect("probe converted output");
+            assert!(
+                probe.status.success(),
+                "ffprobe output failed for {name}: {}",
+                String::from_utf8_lossy(&probe.stderr)
+            );
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&probe.stdout).expect("parse output metadata");
+            let stream = &metadata["streams"][0];
+            assert_eq!(stream["pix_fmt"], "yuv420p", "wrong pixel format for {name}");
+            assert_eq!(stream["color_range"], "tv", "wrong output range for {name}");
+            assert_eq!(
+                stream["r_frame_rate"], source_stream["r_frame_rate"],
+                "frame rate changed for {name}"
+            );
+            assert_eq!(
+                stream["color_space"], source_stream["color_space"],
+                "color space changed for {name}"
+            );
+            assert_eq!(
+                stream["nb_read_frames"], source_stream["nb_read_frames"],
+                "frame count changed for {name}"
+            );
+            let source_duration = source_stream["duration"]
+                .as_str()
+                .expect("fixture duration")
+                .parse::<f64>()
+                .expect("parse fixture duration");
+            let output_duration = stream["duration"]
+                .as_str()
+                .expect("output duration")
+                .parse::<f64>()
+                .expect("parse output duration");
+            assert!(
+                (source_duration - output_duration).abs() <= 0.001,
+                "duration changed for {name}: {source_duration} -> {output_duration}"
+            );
+            let width = stream["width"].as_u64().expect("output width") as u32;
+            let height = stream["height"].as_u64().expect("output height") as u32;
+            assert_eq!(width % 2, 0, "odd output width for {name}");
+            assert_eq!(height % 2, 0, "odd output height for {name}");
+            if max_resolution.is_some() {
+                assert!(
+                    width <= 720 && height <= 720,
+                    "resolution limit exceeded for {name}: {width}x{height}"
+                );
+                assert_eq!(width % 2, 0, "odd output width for {name}");
+                assert_eq!(height % 2, 0, "odd output height for {name}");
+            } else {
+                assert_eq!(width, source_stream["width"].as_u64().unwrap() as u32);
+                assert_eq!(height, source_stream["height"].as_u64().unwrap() as u32);
+            }
+
+            let probed = probe_media_path(&output).expect("run Qlisa media probe");
+            assert_eq!(
+                analyze_compatibility(&probed).status,
+                CompatibilityStatus::Compatible,
+                "Qlisa rejects converted output for {name}"
+            );
+
+            let decoded = Command::new(&ffmpeg)
+                .args(["-hide_banner", "-v", "error", "-i"])
+                .arg(&output)
+                .args(["-map", "0:v:0", "-f", "null", if cfg!(windows) { "NUL" } else { "/dev/null" }])
+                .output()
+                .expect("decode converted output");
+            assert!(decoded.status.success(), "decode failed for {name}: {}", String::from_utf8_lossy(&decoded.stderr));
+        }
+
+        let _ = fs::remove_dir_all(work);
     }
 
     #[test]
@@ -1982,6 +2385,36 @@ mod tests {
         let second = unique_output_path(&input, "mp4").unwrap();
         assert_eq!(first.file_name().unwrap(), "show_converted.mp4");
         assert_eq!(second.file_name().unwrap(), "show_converted_1.mp4");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn long_output_names_keep_collision_suffix_under_windows_component_limit() {
+        let dir = std::env::temp_dir().join(format!("qlisa-converter-long-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let input = dir.join(format!("{}.mov", "я".repeat(240)));
+        fs::write(&input, b"x").unwrap();
+        let first = unique_output_path(&input, "mp4").unwrap();
+        assert!(first
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .encode_utf16()
+            .count()
+            <= 255);
+        assert!(first
+            .with_extension("lock")
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .encode_utf16()
+            .count()
+            <= 255);
+        fs::write(&first, b"x").unwrap();
+        let second = unique_output_path(&input, "mp4").unwrap();
+        let second_name = second.file_name().unwrap().to_string_lossy();
+        assert!(second_name.ends_with("_converted_1.mp4"));
+        assert!(second_name.encode_utf16().count() <= 255);
         let _ = fs::remove_dir_all(dir);
     }
 

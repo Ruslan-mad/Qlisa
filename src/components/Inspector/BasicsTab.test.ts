@@ -46,4 +46,22 @@ describe("Basics tab notes", () => {
     expect(html).toMatch(/<textarea[^>]*>Keep quiet<\/textarea>/);
     expect(cueNotesUpdate(audio, "Edited note")).toEqual({ notes: "Edited note" });
   });
+
+  it("shows background protection in Basics for Number and media cues only", () => {
+    for (const cue_type of ["number", "audio", "video", "image"]) {
+      const html = renderBasics({
+        id: `${cue_type}-1`, cue_type, number: null, name: "Cue", color: "none",
+        notes: "", is_disabled: false, background_screensaver: true,
+      });
+      expect(html).toMatch(/Background screensaver \(ignore ordinary stops\)|Фоновая заставка \(обычные остановки игнорируются\)/);
+    }
+
+    for (const cue_type of ["camera", "group", "text"]) {
+      const html = renderBasics({
+        id: `${cue_type}-1`, cue_type, number: null, name: "Cue", color: "none",
+        notes: "", is_disabled: false, background_screensaver: true,
+      });
+      expect(html).not.toContain("Background screensaver");
+    }
+  });
 });

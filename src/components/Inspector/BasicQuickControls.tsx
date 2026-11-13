@@ -73,7 +73,7 @@ function QuickControlsSection({
     </div>
     {outputs.length > 0 && <div style={{ marginTop: 8 }}>
       <div style={{ fontSize: 10, color: "var(--wc-text-muted)", marginBottom: 5 }}>{isRu ? "Вписывание по выходам" : "Fit by output"}</div>
-      <div style={{ fontSize: 10, color: "var(--wc-text-faint)", marginBottom: 5 }}>{isRu ? "Каждая строка меняет только cue, назначенные на этот выход." : "Each row changes only cues assigned to that output."}</div>
+      <div style={{ fontSize: 10, color: "var(--wc-text-faint)", marginBottom: 5 }}>{isRu ? "Связь выходов настраивается на вкладке «Геометрия»." : "Output linking is configured in the Geometry tab."}</div>
       <FitByOutputRows outputs={outputs} geometryByOutput={geometryByOutput} fallback={fallback} disabled={disabled} mixedOutputIds={mixedOutputIds} mixedLabel={mixedLabel || undefined} onSelect={onFit} />
     </div>}
     {loopDisabled && showLoop && <div style={{ fontSize: 11, color: "var(--wc-warning, #fbbf24)", marginTop: 7 }}>{isRu ? "Остановите или сбросьте выбранные cue, чтобы изменить зацикливание." : "Stop or reset selected cues to change looping."}</div>}
@@ -102,11 +102,11 @@ export function BasicQuickControls({
   const canFit = isVideo || isImage || isCamera;
   const infiniteLoop = (cue.loop_count ?? 0) === LOOP_INFINITE;
   const geometry = cue.geometry ?? DEFAULT_GEOMETRY;
-  const { values, saveOutput } = useGeometryOutputOverrides(
+  const { values, saveFit } = useGeometryOutputOverrides(
     cue.id,
     cue.geometry_by_output,
     geometry,
-    (overrides) => onSave({ geometry_by_output: overrides }),
+    (patch) => onSave(patch),
   );
   const selected = outputs.filter((output) => outputIds.includes(output.id)).map(({ id, name }) => ({ id, name }));
   const currentGeometryByOutput = Object.fromEntries(selected.map(({ id }) => [id, values[id] ?? geometry]));
@@ -121,7 +121,7 @@ export function BasicQuickControls({
     onLoop={() => onSave({ loop_count: loopQuickToggleAfterCount(cue.loop_count ?? 0) })}
     onMute={() => onSave({ muted: !(cue.muted ?? false) })}
     onContinue={(mode) => onSave({ continue_mode: mode })}
-    onFit={(id, mode) => saveOutput(id, { fit_mode: mode })}
+    onFit={(id, mode) => saveFit(id, mode)}
   />;
 }
 

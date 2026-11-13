@@ -10,10 +10,34 @@ use tauri::{Emitter, State};
 
 use crate::{
     commands::cue_list_cmds,
-    cue::types::CueType,
+    cue::{context::CueContext, traits::Cue, types::CueType},
     show::{workspace::CollectReport, Workspace},
     state::AppState,
 };
+
+fn hard_stop_timer_cues(cues: &mut [Box<dyn Cue>], context: &CueContext) {
+    for cue in cues {
+        if cue.cue_type() == CueType::Timer {
+            if let Err(error) = cue.hard_stop(context) {
+                log::warn!("Could not stop Timer Cue '{}' during workspace replacement: {error:#}", cue.name());
+            }
+        }
+        if let Some(children) = cue.child_cues_mut() {
+            hard_stop_timer_cues(children, context);
+        }
+    }
+}
+
+fn hard_stop_workspace_timers(workspace: &mut Workspace, state: &AppState) {
+    let stop_fade_ms = workspace.preferences.audio.default_fade_out_ms;
+    let context = crate::commands::transport_cmds::make_context_from_workspace(state, workspace, stop_fade_ms);
+    for cue_list in &mut workspace.cue_lists {
+        hard_stop_timer_cues(&mut cue_list.cues, &context);
+    }
+    // Catch stale owners that outlived their Cue state, including cues whose
+    // serialized routing changed while they were active.
+    state.output_engine.clear_all_timer_overlays();
+}
 
 /// Overlay the authoritative machine-wide Preferences onto a workspace
 /// runtime mirror.  Legacy workspace values are used only when the global
@@ -122,6 +146,7 @@ pub fn new_workspace(
         .map_err(|e| format!("Could not activate default output destinations: {e}"))?;
 
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    hard_stop_workspace_timers(&mut ws, state.inner());
     *ws = new_workspace;
     cue_list_cmds::emit_cue_lists_changed(&app_handle, &ws);
     let outputs = ws.universe_outputs.clone();
@@ -247,6 +272,7 @@ pub(crate) fn install_workspace(
 
     {
         let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+        hard_stop_workspace_timers(&mut ws, state);
         *ws = loaded;
         // Mirror the (just-loaded) auto-renumber preference onto the cue lists.
         ws.sync_auto_renumber();
@@ -461,4 +487,98 @@ pub fn import_qlab_workspace(
 
     install_workspace(state.inner(), &app_handle, imported)?;
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use anyhow::Result;
+    use crossbeam_channel::unbounded;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        cue::{group_cue::GroupCue, image_cue::ImageCue, timer_cue::TimerCue, traits::{Cue, RuntimeState}, types::CueState, wait_cue::WaitCue},
+        engine::{audio_engine::AudioEngine, dmx_engine::DmxEngine, engine_traits::OutputEngineApi, output_engine::ContentRequest},
+        preferences::MachineAudioConfig,
+    };
+
+    #[derive(Default)]
+    struct RecordingOutput { cleared_timers: Mutex<Vec<Uuid>> }
+
+    impl OutputEngineApi for RecordingOutput {
+        fn show_content(&self, _req: ContentRequest<'_>) -> Result<Uuid> { anyhow::bail!("unused") }
+        fn stop_content(&self, _voice_id: Uuid, _visual_fade_ms: u32, _audio_fade_ms: u32) {}
+        fn hard_stop_current(&self) {}
+        fn panic_stop(&self) {}
+        fn video_audio_voice(&self, _voice_id: Uuid) -> Option<Uuid> { None }
+        fn resync_audio_to_video(&self, _voice_id: Uuid) {}
+        fn get_voice_opacity(&self, _voice_id: Uuid) -> f32 { 1.0 }
+        fn set_voice_opacity(&self, _voice_id: Uuid, _opacity: f32) {}
+        fn stop_voice(&self, _voice_id: Uuid, _fade_ms: u32) -> Result<()> { Ok(()) }
+        fn pause_voice(&self, _voice_id: Uuid) -> Result<()> { Ok(()) }
+        fn resume_voice(&self, _voice_id: Uuid) -> Result<()> { Ok(()) }
+        fn seek_voice_ms(&self, _voice_id: Uuid, _position_ms: u64) {}
+        fn show_text_overlay(&self, _ass_text: &str, _screen_index: Option<u32>) {}
+        fn clear_text_overlay(&self) {}
+        fn clear_timer_overlay_for_outputs(&self, owner: Uuid, _output_id: Option<&str>, _output_ids: &[String]) {
+            self.cleared_timers.lock().unwrap().push(owner);
+        }
+        fn begin_eof_fade_out(&self, _voice_id: Uuid, _fade_ms: u32) -> bool { false }
+        fn devamp_voice(&self, _voice_id: Uuid, _stop_at_end: bool) {}
+        fn start_preloaded(&self, _voice_id: Uuid) -> bool { false }
+    }
+
+    fn test_context(output: Arc<RecordingOutput>) -> CueContext {
+        let (events, _receiver) = unbounded();
+        CueContext::new(
+            AudioEngine::new_silent(&MachineAudioConfig::default()), output, events, 0,
+            Vec::new(), None, None, Vec::new(), Arc::new(DmxEngine::new()),
+            Vec::new(), Vec::new(), Vec::new(), 256,
+        )
+    }
+
+    #[test]
+    fn workspace_timer_cleanup_recurses_and_leaves_other_cues_running() {
+        let output = Arc::new(RecordingOutput::default());
+        let context = test_context(Arc::clone(&output));
+
+        let mut timer = TimerCue::new();
+        let timer_id = timer.id();
+        let sound_id = Uuid::new_v4();
+        timer.restore_runtime_state(RuntimeState {
+            state: CueState::Running,
+            voice_id: Some(sound_id),
+            started_at: None,
+            action_started_at: None,
+        });
+        let mut wait = WaitCue::new();
+        wait.go(&context).unwrap();
+        assert_eq!(wait.state(), CueState::Running, "fixture must start an unrelated Wait cue");
+        let wait_id = wait.id();
+        let mut image = ImageCue::new();
+        let image_voice = Uuid::new_v4();
+        image.restore_runtime_state(RuntimeState {
+            state: CueState::Running,
+            voice_id: Some(image_voice),
+            started_at: None,
+            action_started_at: None,
+        });
+        let mut group = GroupCue::new();
+        group.children.push(Box::new(timer));
+        group.children.push(Box::new(wait));
+        group.children.push(Box::new(image));
+        let mut cues: Vec<Box<dyn Cue>> = vec![Box::new(group)];
+
+        hard_stop_timer_cues(&mut cues, &context);
+
+        assert_eq!(cues[0].child_cues().unwrap()[0].state(), CueState::Standby);
+        assert!(cues[0].child_cues().unwrap()[0].all_voice_ids().is_empty(), "Timer end/start signal voice is released");
+        assert_eq!(cues[0].child_cues().unwrap()[1].state(), CueState::Running);
+        assert_eq!(cues[0].child_cues().unwrap()[2].state(), CueState::Running, "workspace replacement must not stop Image");
+        assert_eq!(cues[0].child_cues().unwrap()[2].all_voice_ids(), vec![image_voice]);
+        assert_eq!(*output.cleared_timers.lock().unwrap(), vec![timer_id]);
+        assert_eq!(cues[0].child_cues().unwrap()[1].id(), wait_id);
+    }
 }

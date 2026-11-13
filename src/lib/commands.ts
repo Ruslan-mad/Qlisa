@@ -7,6 +7,7 @@ import { cancelPendingCueListGo, queueCueListGo, runCueListContextTransition } f
 import type {
   AppPreferences,
   AudioCueData,
+  CameraCueData,
   BrowserSurfaceState,
   AudioPreferences,
   BulkEditMetadata,
@@ -47,6 +48,8 @@ import type {
   OscReceiveConfig,
   OutputPatch,
   OutputTransform,
+  TextCueData,
+  TimerCueData,
   ParamTarget,
   PatchedFixture,
   RecoveryInfo,
@@ -73,7 +76,8 @@ import type {
 export const getMediaRuntimeStatus = () => invoke<MediaRuntimeStatus>("get_media_runtime_status");
 export const isBackendReady = () => invoke<boolean>("is_backend_ready");
 export const prepareMediaRuntime = (force: boolean) => invoke<MediaRuntimeStatus>("prepare_media_runtime", { force });
-export const scheduleMediaRuntimeReinstall = () => invoke<void>("schedule_media_runtime_reinstall");
+export const scheduleMediaRuntimeReinstall = (action: "update" | "repair" = "update") =>
+  invoke<void>("schedule_media_runtime_reinstall", { action });
 
 // ---------------------------------------------------------------------------
 // Transport
@@ -114,6 +118,8 @@ export const seekCueMedia = (cueId: CueId, filePositionMs: number) =>
   invoke<void>("seek_cue_media", { cueId, filePositionMs: Math.max(0, Math.round(filePositionMs)) });
 export const resumeCue = (cueId: CueId) =>
   invoke<void>("resume_cue", { cueId });
+export const stepPresentation = (cueId: CueId, direction: "previous" | "next") =>
+  invoke<void>("step_presentation", { cueId, direction });
 
 // ---------------------------------------------------------------------------
 // Cue management
@@ -123,7 +129,7 @@ export const getAllCues = () => invoke<CueSummary[]>("get_all_cues");
 export const getWorkspaceCueCatalog = () => invoke<WorkspaceCueCatalogList[]>("get_workspace_cue_catalog");
 export const getWorkspaceSnapshot = () => invoke<WorkspaceSnapshot>("get_workspace_snapshot");
 export const getCue = (cueId: CueId) =>
-  invoke<AudioCueData | VideoCueData | ImageCueData | NumberCueData>("get_cue", { cueId });
+  invoke<AudioCueData | VideoCueData | ImageCueData | CameraCueData | TextCueData | TimerCueData | NumberCueData>("get_cue", { cueId });
 export const addCue = (cueType: CueType, position = -1) =>
   invoke<CueId>("add_cue", { cueType, position });
 export const addTargetedCue = (cueType: CueType, targetCueId: CueId, position = -1) =>
@@ -168,6 +174,33 @@ export const setGroupMode = (groupId: CueId, mode: GroupMode) =>
   invoke<void>("set_group_mode", { groupId, mode });
 export const setPlaylistLoop = (groupId: CueId, loopOn: boolean) =>
   invoke<void>("set_playlist_loop", { groupId, loopOn });
+export type PresentationImportedVideoStatus = "added" | "missing" | "unsupported";
+export interface DocumentImportVideo {
+  name: string;
+  status: PresentationImportedVideoStatus;
+  cue_id: CueId | null;
+  error: string | null;
+  warning: string | null;
+}
+export interface DocumentImportSlide {
+  number: number;
+  image_cue_id: CueId;
+  image_path: string;
+  videos: DocumentImportVideo[];
+}
+export interface DocumentImportResult {
+  cue_id: CueId;
+  title: string;
+  source: string;
+  page_count: number;
+  video_count: number;
+  warnings: string[];
+  report: string[];
+  slides: DocumentImportSlide[];
+  media_scan_error: string | null;
+}
+export const importDocument = (path: string, position = -1, parentId?: CueId | null) =>
+  invoke<DocumentImportResult>("import_document", { path, position, parentId });
 export const addCueToGroup = (cueId: CueId, groupId: CueId, position = -1) =>
   invoke<void>("add_cue_to_group", { cueId, groupId, position });
 export const removeCueFromGroup = (groupId: CueId, cueId: CueId) =>

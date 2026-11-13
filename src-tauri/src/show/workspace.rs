@@ -39,13 +39,14 @@ fn relativize_paths(value: &mut serde_json::Value, base: &std::path::Path) {
             }
         }
         serde_json::Value::Object(obj) => {
-            if let Some(serde_json::Value::String(p)) = obj.get("file_path") {
+            for key in ["file_path", "sound_start_path", "sound_end_path"] {
+                let Some(serde_json::Value::String(p)) = obj.get(key) else { continue };
                 let path = std::path::Path::new(p.as_str());
                 if path.is_absolute() {
                     if let Ok(rel) = path.strip_prefix(base) {
                         // Use forward slashes so the file is readable on any OS.
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
-                        obj.insert("file_path".into(), serde_json::Value::String(rel_str));
+                        obj.insert(key.into(), serde_json::Value::String(rel_str));
                     }
                     // If strip_prefix fails (file is on a different drive), keep absolute.
                 }
@@ -69,11 +70,12 @@ fn absolutize_paths(value: &mut serde_json::Value, base: &std::path::Path) {
             }
         }
         serde_json::Value::Object(obj) => {
-            if let Some(serde_json::Value::String(p)) = obj.get("file_path") {
+            for key in ["file_path", "sound_start_path", "sound_end_path"] {
+                let Some(serde_json::Value::String(p)) = obj.get(key) else { continue };
                 let path = std::path::Path::new(p.as_str());
                 if path.is_relative() && !p.is_empty() {
                     let abs = base.join(path);
-                    obj.insert("file_path".into(),
+                    obj.insert(key.into(),
                         serde_json::Value::String(abs.to_string_lossy().into_owned()));
                 }
             }
@@ -96,10 +98,11 @@ fn remap_paths(value: &mut serde_json::Value, path_map: &HashMap<PathBuf, String
             }
         }
         serde_json::Value::Object(obj) => {
-            if let Some(serde_json::Value::String(p)) = obj.get("file_path") {
+            for key in ["file_path", "sound_start_path", "sound_end_path"] {
+                let Some(serde_json::Value::String(p)) = obj.get(key) else { continue };
                 let path = PathBuf::from(p.as_str());
                 if let Some(new_rel) = path_map.get(&path) {
-                    obj.insert("file_path".into(), serde_json::Value::String(new_rel.clone()));
+                    obj.insert(key.into(), serde_json::Value::String(new_rel.clone()));
                 }
             }
             if let Some(children) = obj.get_mut("children") {
@@ -163,13 +166,16 @@ fn collect_all_media_paths(
     out: &mut Vec<(CueType, PathBuf)>,
 ) {
     for cue in cues {
-        if let ct @ (CueType::Audio | CueType::Video | CueType::Image | CueType::MidiFile) =
+        if let ct @ (CueType::Audio | CueType::Video | CueType::Image | CueType::MidiFile | CueType::Timer) =
             cue.cue_type()
         {
             if let Some(path) = cue.media_file_path() {
                 if !path.as_os_str().is_empty() {
-                    out.push((ct, path.to_path_buf()));
+                    out.push((ct.clone(), path.to_path_buf()));
                 }
+            }
+            for path in cue.additional_media_file_paths() {
+                if !path.as_os_str().is_empty() { out.push((ct.clone(), path.to_path_buf())); }
             }
         }
         if let Some(children) = cue.child_cues() {
@@ -550,6 +556,7 @@ impl Workspace {
 
             let subfolder = match cue_type {
                 CueType::Audio => "audio",
+                CueType::Timer => "audio",
                 CueType::Video => "video",
                 CueType::Image => "images",
                 CueType::MidiFile => "midi",

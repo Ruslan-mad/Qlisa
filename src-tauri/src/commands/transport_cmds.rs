@@ -12,6 +12,7 @@ use crate::{
         types::{CueState, CueType},
     },
     show::{cue_list::CueList, transport::Transport},
+    show::Workspace,
     state::AppState,
 };
 use crate::engine::output_engine::BrowserSurfaceState;
@@ -68,6 +69,32 @@ pub(crate) fn make_context(state: &AppState, stop_fade_ms: u32) -> CueContext {
         groups,
         input_patches,
         audio_buffer_size,
+    )
+}
+
+/// Build a CueContext from a workspace that the caller already locked.
+/// Unlike `make_context`, this preserves the configured patches and output
+/// screen for GO and live-overlay refresh paths.
+pub(crate) fn make_context_from_workspace(
+    state: &AppState,
+    ws: &Workspace,
+    stop_fade_ms: u32,
+) -> CueContext {
+    let (tx, _rx) = crossbeam_channel::unbounded::<CueEvent>();
+    CueContext::new(
+        state.audio_engine.clone(),
+        state.output_engine.clone(),
+        tx,
+        stop_fade_ms,
+        ws.output_patches.clone(),
+        ws.default_output_patch_id,
+        ws.preferences.display.output_screen,
+        ws.osc_patches.clone(),
+        state.dmx_engine.clone(),
+        ws.fixtures.clone(),
+        ws.fixture_groups.clone(),
+        ws.input_patches.clone(),
+        ws.preferences.audio.audio_buffer_size,
     )
 }
 
@@ -211,7 +238,7 @@ pub fn go_cue(
     let active_list_id = ws.active_cue_list_id;
     let active_playhead_before = ws.active_cue_list().and_then(|list| list.playhead_cue_id);
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
-    let context = make_context(&state, stop_fade_ms);
+    let context = make_context_from_workspace(&state, &ws, stop_fade_ms);
     let mut transport = Transport::new(context);
     if let Some(cue) = ws.cue_lists.iter().find_map(|list| list.get_recursive(&id)) {
         let issues = crate::cue::group_cue::number_readiness_issues(cue);
@@ -248,6 +275,42 @@ pub fn go_cue(
             "cue_id": active_playhead_after,
         }));
     }
+    let _ = app_handle.emit("cue-list-refresh", serde_json::json!({}));
+    Ok(())
+}
+
+/// Step within one already-running Presentation without touching the global
+/// Playhead or firing the Presentation through normal GO.
+#[tauri::command]
+pub fn step_presentation(
+    cue_id: String,
+    direction: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let id: uuid::Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
+    let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
+    let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
+    let context = make_context_from_workspace(&state, &ws, stop_fade_ms);
+    let before_states = workspace_cue_states(&ws.cue_lists);
+
+    let cue = ws.cue_lists.iter_mut()
+        .find_map(|list| list.get_mut_recursive(&id))
+        .ok_or_else(|| format!("Presentation not found: {id}"))?;
+    if cue.cue_type() != CueType::Presentation {
+        return Err(format!("Cue {id} is not a Presentation"));
+    }
+    if !matches!(cue.state(), CueState::Running | CueState::Paused) {
+        return Err("Presentation is not running or paused".into());
+    }
+    cue.step_presentation(&context, &direction).map_err(|e| e.to_string())?;
+    let fired = cue.take_fired_cue_ids();
+    let after_states = workspace_cue_states(&ws.cue_lists);
+
+    for fired_id in &fired {
+        let _ = app_handle.emit("cue-fired", serde_json::json!({ "cue_id": fired_id }));
+    }
+    emit_workspace_state_changes(&app_handle, &before_states, &after_states);
     let _ = app_handle.emit("cue-list-refresh", serde_json::json!({}));
     Ok(())
 }

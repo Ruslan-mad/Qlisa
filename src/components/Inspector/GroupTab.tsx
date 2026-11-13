@@ -17,10 +17,12 @@ const MODE_HINTS: Record<GroupMode, string> = {
 export function GroupTab({
   cue,
   onRefresh,
+  presentation = false,
 }: {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   cue: any;
   onRefresh: () => void;
+  presentation?: boolean;
 }) {
   const { t, locale } = useLocale();
   const modeHints: Record<GroupMode, string> = locale === "ru" ? {
@@ -41,7 +43,17 @@ export function GroupTab({
   }, [cue.id, persistedMode, persistedLoop]);
 
   return (
-    <Section title="Mode">
+    <Section title={presentation ? t("cueTypes.presentation") : t("inspector.mode")}>
+      {presentation ? (
+        <>
+          <div style={{ fontSize: 12, color: "var(--wc-text-secondary)", lineHeight: 1.5, whiteSpace: "pre-line" }}>
+            {t("presentationUi.playbackHint")}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--wc-text-faint)", marginTop: 8 }}>
+            {t("presentationUi.pageCount", { count: cue.page_count ?? (cue.children ?? []).filter((child: { cue_type: string }) => child.cue_type === "image").length })}
+          </div>
+        </>
+      ) : <>
       {error && <div role="alert" style={{ color: "#fecaca", fontSize: 11, marginBottom: 6 }}>{error}</div>}
       <Select
         style={inputStyle}
@@ -86,6 +98,7 @@ export function GroupTab({
           }}
         />
       )}
+      </>}
     </Section>
   );
 }

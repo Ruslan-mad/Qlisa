@@ -4037,6 +4037,7 @@ dependencies = [
  "chrono",
  "cpal",
  "crossbeam-channel",
+ "flate2",
  "glow",
  "glutin",
  "iana-time-zone",
@@ -4049,6 +4050,7 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-foundation 0.2.2",
  "plist",
+ "quick-xml 0.41.0",
  "raw-window-handle",
  "reqwest",
  "ringbuf",
@@ -4070,9 +4072,11 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "uuid",
+ "windows",
  "windows-sys 0.52.0",
  "winit",
  "winreg 0.52.0",
+ "zip",
 ]
 
 [[package]]
@@ -7820,6 +7824,7 @@ checksum = "caa8cd6af31c3b31c6631b8f483848b91589021b28fffe50adada48d4f4d2ed1"
 dependencies = [
  "arbitrary",
  "crc32fast",
+ "flate2",
  "indexmap 2.13.1",
  "memchr",
 ]

@@ -2,7 +2,7 @@
 // the same canvas painter as SliceTimeline, but never writes trim or slices.
 
 import { useEffect, useRef, useState } from "react";
-import type { SliceList, WaveformData } from "../../lib/types";
+import type { GainEnvelopePoint, SliceList, WaveformData } from "../../lib/types";
 import type { TrimPainter } from "../Inspector/TrimStrip";
 import type { TrimView } from "../Inspector/TrimStrip";
 import { useCanvasWidth } from "../Inspector/TrimStrip";
@@ -11,6 +11,8 @@ import { mediaSourceMsAtPixel, panTimelineView, sourceRangeForTimelinePass, wave
 import { useTimelineEditorStore } from "../../stores/timelineEditorStore";
 import { useLocale } from "../../i18n";
 import { formatDurationMs } from "../CueList/formatDuration";
+import { GainEnvelopeOverlay } from "./GainEnvelopeOverlay";
+import type { AudioFadeOverlay, FadeDirection } from "./audioFadeModel";
 
 const SLICE_COLOR = "#facc15";
 
@@ -83,8 +85,19 @@ export interface LiveTimelineProps {
   seekEnabled?: boolean;
   onZoomDetail?: () => void;
   onViewChange?: (view: TrimView | null) => void;
+  gainEnvelope?: GainEnvelopePoint[] | null;
+  gainEnvelopeEditable?: boolean;
+  /** Render the cue's authored curve as a passive Live overlay. */
+  gainEnvelopeReadOnly?: boolean;
+  onGainEnvelopeChange?: (points: GainEnvelopePoint[] | null) => void;
+  audioFade?: AudioFadeOverlay | null;
+  audioFadeEditable?: boolean;
+  audioFadeContextKey?: string;
+  onAudioFadeDurationChange?: (direction: FadeDirection, durationMs: number) => void;
   /** Optional multi-track Number overlay rendered in this same native canvas. */
   numberTracks?: NumberTimelineTrack[];
+  /** Keep Number timing bands out of non-Number views that reuse its track overlay. */
+  showNumberTimingBands?: boolean;
   /** Number-only timing bands. The track clock remains action-relative. */
   numberPreWaitMs?: number;
   numberPostWaitMs?: number;
@@ -112,14 +125,23 @@ export function LiveTimeline({
   seekEnabled = false,
   onZoomDetail,
   onViewChange,
+  gainEnvelope,
+  gainEnvelopeEditable = false,
+  gainEnvelopeReadOnly = false,
+  onGainEnvelopeChange,
+  audioFade,
+  audioFadeEditable = false,
+  audioFadeContextKey,
+  onAudioFadeDurationChange,
   numberTracks = [],
+  showNumberTimingBands = true,
   numberPreWaitMs = 0,
   numberPostWaitMs = 0,
   numberRuntimeElapsedMs = null,
   onNumberTrackChange,
   onNumberTrackSnap,
 }: LiveTimelineProps) {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const canvasWidth = useCanvasWidth(canvasRef);
   const [dragging, setDragging] = useState(false);
@@ -354,7 +376,11 @@ export function LiveTimeline({
         ctx.fillStyle = track.master ? "rgba(226,232,240,.92)" : "rgba(226,232,240,.78)";
         ctx.font = "11px sans-serif";
         ctx.textAlign = "left";
-        ctx.fillText(track.master ? `Master · ${track.name}` : track.name, 7, top + rowH / 2 + 4);
+        const masterLabel = t("numberUi.masterShort");
+        const trackLabel = track.master
+          ? `${masterLabel.charAt(0).toUpperCase()}${masterLabel.slice(1)} · ${track.name}`
+          : track.name;
+        ctx.fillText(trackLabel, 7, top + rowH / 2 + 4);
         if (!track.master) {
           const border = track.cueType === "video" ? "#93c5fd"
             : track.cueType === "image" ? "#d8b4fe"
@@ -419,7 +445,7 @@ export function LiveTimeline({
       ctx.fill();
       ctx.restore();
     }
-  }, [paint, paintKey, startMs, endMs, slices, durationMs, height, visible.s, visible.e, span, mediaPositionMs, previewPositionMs, canvasWidth, numberMode, numberTracks, numberDrag, selectedNumberTrackId]);
+  }, [t, locale, paint, paintKey, startMs, endMs, slices, durationMs, height, visible.s, visible.e, span, mediaPositionMs, previewPositionMs, canvasWidth, numberMode, numberTracks, numberDrag, selectedNumberTrackId]);
 
   const positionFromEvent = (e: React.MouseEvent<HTMLCanvasElement>) => xToMs(e.clientX);
   const numberTrackFromEvent = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -472,7 +498,7 @@ export function LiveTimeline({
       title={previewPositionMs != null ? previewLabel : undefined}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: 10, color: "var(--wc-text-faint)" }}>
-        <span>Wheel: zoom · Shift+wheel: pan</span>
+        <span>{t("editorUi.zoomPanHint")}</span>
         <span style={{ flex: 1 }} />
         {hoverMs != null && <span style={{ fontVariantNumeric: "tabular-nums" }}>{(hoverMs / 1000).toFixed(3)}s</span>}
         <button
@@ -491,9 +517,9 @@ export function LiveTimeline({
             style={{ color: "#facc15", fontSize: 12 }}
           >🎧</span>
         )}
-        {view && <button type="button" onClick={fitWholeFile} style={zoomButton} title="Fit whole file">Fit</button>}
+        {view && <button type="button" onClick={fitWholeFile} style={zoomButton} title={t("editorUi.fitTimeline")}>{t("editorUi.fitTimeline")}</button>}
       </div>
-      {numberMode && (
+      {numberMode && showNumberTimingBands && (
         <div
           aria-label="Number timing"
           style={{ display: "flex", height: 22, marginBottom: 3, borderRadius: 3, overflow: "hidden", border: "1px solid var(--wc-border)" }}
@@ -511,17 +537,19 @@ export function LiveTimeline({
                 key={segment.key}
                 style={{ flex: `${segment.ms} 1 0`, minWidth: 0, padding: "3px 6px", background: active ? segment.color : "var(--wc-bg-surface)", color: active ? "#fff" : "var(--wc-text-muted)", fontSize: 9, fontWeight: 600, letterSpacing: ".04em", textAlign: "center", borderRight: "1px solid var(--wc-border)", whiteSpace: "nowrap" }}
               >
-                {segment.key === "action" ? t("cueList.duration") : segment.label} · {segment.key === "action" ? formatDurationMs(segment.ms) : `${(segment.ms / 1000).toFixed(2)}s`}
+                {segment.key === "action" ? t("cueList.duration") : segment.label} · {formatDurationMs(segment.ms)}
               </div>
             );
           })}
         </div>
       )}
-      <canvas
-        ref={canvasRef}
-        aria-label={previewPositionMs != null ? `Live media timeline; ${previewLabel.toLowerCase()} active` : "Live media timeline"}
-        style={{ width: "100%", height, display: "block", borderRadius: 4, cursor: numberMode ? (numberDrag ? "ew-resize" : "crosshair") : (seekEnabled ? "crosshair" : "default") }}
-        onMouseDown={(e) => {
+      {gainEnvelopeEditable && <div style={{ color: "var(--wc-text-faint)", fontSize: 10, margin: "0 0 3px" }}>{t("editorUi.gainEnvelopeHint")}</div>}
+      <div style={{ position: "relative", height }}>
+        <canvas
+          ref={canvasRef}
+          aria-label={previewPositionMs != null ? `Live media timeline; ${previewLabel.toLowerCase()} active` : "Live media timeline"}
+          style={{ width: "100%", height, display: "block", borderRadius: 4, cursor: numberMode ? (numberDrag ? "ew-resize" : "crosshair") : (seekEnabled ? "crosshair" : "default") }}
+          onMouseDown={(e) => {
           if (e.button !== 0) return;
           // The timeline lock is a complete position lock.  It must prevent
           // seeking/scrubbing as well as move/trim/slice edits.  Returning at
@@ -549,8 +577,8 @@ export function LiveTimeline({
             return;
           }
           setDragging(true); announcePosition(e);
-        }}
-        onMouseMove={(e) => {
+          }}
+          onMouseMove={(e) => {
           setHoverMs(positionFromEvent(e));
           if (editLocked) {
             // A lock blocks every position-changing operation.  Cancel any
@@ -588,8 +616,8 @@ export function LiveTimeline({
             const next = applyNumberDragSnap(numberDrag.kind, proposed, snapped);
             setNumberDrag({ ...numberDrag, startMs: next.startMs, endMs: next.endMs, moved });
           } else if (dragging) announcePosition(e);
-        }}
-        onMouseUp={() => {
+          }}
+          onMouseUp={() => {
           if (editLocked) {
             setNumberDrag(null);
             setDragging(false);
@@ -604,8 +632,8 @@ export function LiveTimeline({
           } else if (numberMode) onPreviewPositionEnd?.(lastPositionRef.current);
           else if (dragging) finishPosition();
           setDragging(false);
-        }}
-        onMouseLeave={() => {
+          }}
+          onMouseLeave={() => {
           if (editLocked) {
             setNumberDrag(null);
             setDragging(false);
@@ -621,11 +649,29 @@ export function LiveTimeline({
           } else if (numberMode) onPreviewPositionEnd?.(lastPositionRef.current);
           if (dragging) finishPosition();
           setDragging(false); setHoverMs(null);
-        }}
-      />
+          }}
+        />
+        {(gainEnvelopeEditable || gainEnvelopeReadOnly) && (!numberMode || gainEnvelopeReadOnly) && (
+          <GainEnvelopeOverlay
+            points={gainEnvelope}
+            durationMs={durationMs}
+            view={{ startMs: visible.s, endMs: visible.e }}
+            width={canvasWidth}
+            height={height}
+            editable={gainEnvelopeEditable && !editLocked}
+            strokeWidth={gainEnvelopeReadOnly ? 2 : 4}
+            alwaysShowLabels={gainEnvelopeReadOnly}
+            fade={audioFade}
+            fadeEditable={audioFadeEditable && !editLocked}
+            fadeContextKey={audioFadeContextKey}
+            onFadeDurationChange={onAudioFadeDurationChange}
+            onCommit={onGainEnvelopeChange}
+          />
+        )}
+      </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--wc-text-faint)", marginTop: 3 }}>
-        <span>{((visible.s) / 1000).toFixed(2)}s</span>
-        <span>{((visible.e) / 1000).toFixed(2)}s</span>
+        <span>{formatDurationMs(visible.s)}</span>
+        <span>{formatDurationMs(visible.e)}</span>
       </div>
     </div>
   );

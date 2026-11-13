@@ -23,20 +23,20 @@ mod types;
 mod warp;
 
 pub use blend::BlendMode;
-pub(crate) use runtime::OutputRegistry;
-use runtime::OutputPipelineConfig;
-use types::{compose_display_props, FadeAnimState, MpvCtx, OutputVoice, PendingVideoStart};
+pub use browser_surface::{validate_browser_url, BrowserSurfaceManager, BrowserSurfaceState};
 use render::RenderRuntime;
+use runtime::OutputPipelineConfig;
+pub(crate) use runtime::OutputRegistry;
+use types::{compose_display_props, FadeAnimState, MpvCtx, OutputVoice, PendingVideoStart};
 pub use types::{
     ContentRequest, FitMode, LayerStyle, OutputStatus, OutputSurface, OutputTransform, ScreenInfo,
     SurfaceId, TestPattern, VideoGeometry, VoiceId,
 };
-pub use browser_surface::{validate_browser_url, BrowserSurfaceManager, BrowserSurfaceState};
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CString};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -46,26 +46,40 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::cue::types::{db_to_linear, FadeSpec};
+use crate::engine::network_io::{
+    BgraFrame, NetworkFrameSink, NetworkOutputConfig, NetworkOutputManager,
+};
 use crate::engine::AudioEngine;
-use crate::engine::network_io::{BgraFrame, NetworkFrameSink, NetworkOutputConfig, NetworkOutputManager};
 
 use super::mpv_sys::{
-    MpvLib, MpvNode, MpvNodeList, MpvNodeUnion, MPV_FORMAT_INT64, MPV_FORMAT_NODE_MAP,
+    MpvLib, MpvNode, MpvNodeList, MpvNodeUnion, MPV_FORMAT_DOUBLE, MPV_FORMAT_INT64,
+    MPV_FORMAT_NODE_MAP,
     MPV_FORMAT_NONE, MPV_FORMAT_STRING,
 };
 
 /// Metadata available from a bounded headless libmpv probe.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MediaProbe {
     pub duration: Option<Duration>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Display aspect including pixel aspect ratio, when mpv reports it.
+    pub display_aspect: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputMonitorFrameRead {
-    Frame { sequence: u64, session: u64, captured_at_us: u64, frame: Arc<BgraFrame> },
-    Unchanged { sequence: u64, session: u64, captured_at_us: u64 },
+    Frame {
+        sequence: u64,
+        session: u64,
+        captured_at_us: u64,
+        frame: Arc<BgraFrame>,
+    },
+    Unchanged {
+        sequence: u64,
+        session: u64,
+        captured_at_us: u64,
+    },
     NoFrame,
 }
 
@@ -176,7 +190,6 @@ pub(super) struct PipelineState {
     pub current_fade_out_ms: Mutex<u32>,
     pub pending_video_start: Mutex<Option<PendingVideoStart>>,
     pub current_audio_voice: Mutex<Option<Uuid>>,
-    pub pending_crop: Mutex<Option<VideoGeometry>>,
     pub transform: Mutex<OutputTransform>,
     pub last_cue_geometry: Mutex<VideoGeometry>,
     pub overlay_has_dummy: AtomicBool,
@@ -185,19 +198,36 @@ pub(super) struct PipelineState {
     /// the pipeline (rather than the render runtime) because `fade` and the
     /// native OSD helpers also need to know whether the overlay has pixels.
     pub text_overlay_active: AtomicBool,
+    /// OSD margin currently applied to this pipeline by timer style settings.
+    pub osd_margin: AtomicU32,
+    /// Active independently-owned Timer Cue OSD surfaces on this output.
+    pub timer_overlay_owners: Mutex<HashSet<Uuid>>,
     pub test_pattern_active: AtomicBool,
 }
 
 impl PipelineState {
-    fn new(status_tx: Sender<OutputStatus>) -> Arc<Self> { Arc::new(Self {
-        lifecycle: MpvLifecycleGate::default(), fade: Mutex::new(FadeAnimState::idle()), operator_ftb: Mutex::new(FadeAnimState::operator_blackout_idle()), mpv_lib: Mutex::new(None), mpv_ctx: Mutex::new(None),
-        status_tx, current_voice: Mutex::new(None), current_fade_out_ms: Mutex::new(0),
-        pending_video_start: Mutex::new(None), current_audio_voice: Mutex::new(None),
-        pending_crop: Mutex::new(None), transform: Mutex::new(OutputTransform::default()),
-        last_cue_geometry: Mutex::new(VideoGeometry::default()), overlay_has_dummy: AtomicBool::new(false),
-        timer_osd_active: AtomicBool::new(false), text_overlay_active: AtomicBool::new(false),
-        test_pattern_active: AtomicBool::new(false),
-    }) }
+    fn new(status_tx: Sender<OutputStatus>) -> Arc<Self> {
+        Arc::new(Self {
+            lifecycle: MpvLifecycleGate::default(),
+            fade: Mutex::new(FadeAnimState::idle()),
+            operator_ftb: Mutex::new(FadeAnimState::operator_blackout_idle()),
+            mpv_lib: Mutex::new(None),
+            mpv_ctx: Mutex::new(None),
+            status_tx,
+            current_voice: Mutex::new(None),
+            current_fade_out_ms: Mutex::new(0),
+            pending_video_start: Mutex::new(None),
+            current_audio_voice: Mutex::new(None),
+            transform: Mutex::new(OutputTransform::default()),
+            last_cue_geometry: Mutex::new(VideoGeometry::default()),
+            overlay_has_dummy: AtomicBool::new(false),
+            timer_osd_active: AtomicBool::new(false),
+            text_overlay_active: AtomicBool::new(false),
+            osd_margin: AtomicU32::new(0),
+            timer_overlay_owners: Mutex::new(HashSet::new()),
+            test_pattern_active: AtomicBool::new(false),
+        })
+    }
 
     pub(super) fn enter_mpv_call(&self) -> Option<MpvCallPermit<'_>> {
         self.lifecycle.enter()
@@ -242,6 +272,9 @@ pub(super) static FLOAT_TIMER_FONT: OnceLock<Mutex<String>> = OnceLock::new();
 pub(super) fn overlay_active(p: &PipelineState) -> bool {
     p.timer_osd_active.load(Ordering::Relaxed)
         || p.text_overlay_active.load(Ordering::Relaxed)
+        || p.timer_overlay_owners
+            .lock()
+            .is_ok_and(|owners| !owners.is_empty())
         || p.test_pattern_active.load(Ordering::Relaxed)
 }
 
@@ -262,7 +295,10 @@ fn ensure_overlay_surface(p: &PipelineState) {
     let Some(_permit) = p.enter_mpv_call() else {
         return;
     };
-    if let (Some(lib), Some(ctx)) = (p.mpv_lib.lock().ok().and_then(|x| x.clone()), p.mpv_ctx.lock().ok().and_then(|x| x.clone())) {
+    if let (Some(lib), Some(ctx)) = (
+        p.mpv_lib.lock().ok().and_then(|x| x.clone()),
+        p.mpv_ctx.lock().ok().and_then(|x| x.clone()),
+    ) {
         unsafe {
             let cmd = cs("loadfile");
             // Tiny + fully transparent: `format=rgba` keeps the alpha plane,
@@ -270,7 +306,10 @@ fn ensure_overlay_surface(p: &PipelineState) {
             let url = cs("av://lavfi:color=c=black@0.0:s=64x64:r=10,format=rgba");
             let flags = cs("replace");
             let idx = cs("0");
-            let opts = cs("audio=no,loop-file=inf");
+            // The transparent dummy is only a keep-alive for OSD rendering.
+            // It must cover the full FBO; otherwise mpv's default aspect-fit
+            // letterboxes this 64×64 source with opaque black pillars.
+            let opts = cs("audio=no,loop-file=inf,keepaspect=no");
             let args: [*const c_char; 6] = [
                 cmd.as_ptr(),
                 url.as_ptr(),
@@ -296,7 +335,10 @@ fn release_overlay_surface_if_idle(p: &PipelineState) {
     let Some(_permit) = p.enter_mpv_call() else {
         return;
     };
-    if let (Some(lib), Some(ctx)) = (p.mpv_lib.lock().ok().and_then(|x| x.clone()), p.mpv_ctx.lock().ok().and_then(|x| x.clone())) {
+    if let (Some(lib), Some(ctx)) = (
+        p.mpv_lib.lock().ok().and_then(|x| x.clone()),
+        p.mpv_ctx.lock().ok().and_then(|x| x.clone()),
+    ) {
         unsafe {
             let stop = cs("stop");
             let args: [*const c_char; 2] = [stop.as_ptr(), std::ptr::null()];
@@ -422,10 +464,7 @@ impl NativeOutputPipeline {
         visibility_state: Arc<DisplayVisibilityState>,
     ) -> Result<Arc<Self>> {
         let ctx = create_overlay_context(&lib)?;
-        let (current_voice, go_sent_at) = (
-            Arc::new(Mutex::new(None)),
-            Arc::new(Mutex::new(None)),
-        );
+        let (current_voice, go_sent_at) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
         let pipeline = PipelineState::new(status_tx.clone());
         *pipeline.mpv_lib.lock().unwrap() = Some(Arc::clone(&lib));
         *pipeline.mpv_ctx.lock().unwrap() = Some(Arc::clone(&ctx));
@@ -458,10 +497,8 @@ impl NativeOutputPipeline {
         );
         render_runtime.set_warp(warp::warp_matrix(&config.transform));
         let wake_runtime = Arc::clone(&render_runtime);
-        let slot_registry = slot::SlotRegistry::new(
-            status_tx.clone(),
-            Arc::new(move || wake_runtime.wake()),
-        );
+        let slot_registry =
+            slot::SlotRegistry::new(status_tx.clone(), Arc::new(move || wake_runtime.wake()));
 
         // Start the event loop before publishing the render thread.  Apart
         // from avoiding a usable pipeline with no event consumer, this makes
@@ -480,9 +517,7 @@ impl NativeOutputPipeline {
             std::thread::Builder::new()
                 .name(name)
                 .spawn(move || {
-                    mpv_events::mpv_event_loop(
-                        lib2, ctx2, voice2, tx2, go2, ae, slots2, pipeline2,
-                    )
+                    mpv_events::mpv_event_loop(lib2, ctx2, voice2, tx2, go2, ae, slots2, pipeline2)
                 })
                 .map_err(|e| anyhow!("output event thread: {e}"))?
         };
@@ -531,8 +566,10 @@ impl NativeOutputPipeline {
     }
 
     fn config(&self) -> OutputPipelineConfig {
-        self.config.lock().map(|c| c.clone()).unwrap_or_else(|_| {
-            OutputPipelineConfig {
+        self.config
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_else(|_| OutputPipelineConfig {
                 id: String::new(),
                 name: String::new(),
                 sink_kind: crate::preferences::OutputSinkKind::Display,
@@ -543,8 +580,7 @@ impl NativeOutputPipeline {
                 hide_cursor: false,
                 transform: OutputTransform::default(),
                 fullscreen_locked: true,
-            }
-        })
+            })
     }
 
     fn update_config(&self, config: OutputPipelineConfig) {
@@ -554,7 +590,8 @@ impl NativeOutputPipeline {
         if let Ok(mut t) = self.pipeline.transform.lock() {
             *t = config.transform;
         }
-        self.render_runtime.set_warp(warp::warp_matrix(&config.transform));
+        self.render_runtime
+            .set_warp(warp::warp_matrix(&config.transform));
         self.render_runtime.configure_output_window(
             &config.id,
             config.monitor.is_none(),
@@ -566,7 +603,8 @@ impl NativeOutputPipeline {
 
     fn set_network_frame_sink(&self, sink: Option<NetworkFrameSink>) {
         let is_network_output = sink.is_some();
-        self.network_output.store(is_network_output, Ordering::Relaxed);
+        self.network_output
+            .store(is_network_output, Ordering::Relaxed);
         if is_network_output {
             self.visible.store(false, Ordering::Relaxed);
             self.render_runtime.hide();
@@ -610,13 +648,7 @@ impl NativeOutputPipeline {
         match target {
             Some(s) => {
                 #[cfg(not(target_os = "macos"))]
-                render::set_fullscreen_on_rect(
-                    &self.render_runtime,
-                    s.x,
-                    s.y,
-                    s.width,
-                    s.height,
-                );
+                render::set_fullscreen_on_rect(&self.render_runtime, s.x, s.y, s.width, s.height);
                 #[cfg(target_os = "macos")]
                 render::position_on_screen(&self.render_runtime, s.index);
             }
@@ -667,8 +699,9 @@ impl NativeOutputPipeline {
         *self.go_sent_at.lock().unwrap() = None;
         *self.pipeline.current_fade_out_ms.lock().unwrap() = 0;
         *self.pipeline.pending_video_start.lock().unwrap() = None;
-        *self.pipeline.pending_crop.lock().unwrap() = None;
         *self.pipeline.current_audio_voice.lock().unwrap() = None;
+
+        remove_timer_overlay_owners(&self.pipeline, &self.mpv.lib, self.mpv.ctx.0, None);
 
         for slot in self.slot_registry.all_slots() {
             slot::hard_unload(&self.slot_registry, &slot, false);
@@ -678,11 +711,20 @@ impl NativeOutputPipeline {
             let stop = cs("stop");
             let args: [*const c_char; 2] = [stop.as_ptr(), std::ptr::null()];
             (self.mpv.lib.mpv_command)(self.mpv.ctx.0, args.as_ptr());
+            osd_overlay_remove(&self.mpv.lib, self.mpv.ctx.0);
         }
-        self.pipeline.timer_osd_active.store(false, Ordering::Relaxed);
-        self.pipeline.text_overlay_active.store(false, Ordering::Relaxed);
-        self.pipeline.test_pattern_active.store(false, Ordering::Relaxed);
-        self.pipeline.overlay_has_dummy.store(false, Ordering::Relaxed);
+        self.pipeline
+            .timer_osd_active
+            .store(false, Ordering::Relaxed);
+        self.pipeline
+            .text_overlay_active
+            .store(false, Ordering::Relaxed);
+        self.pipeline
+            .test_pattern_active
+            .store(false, Ordering::Relaxed);
+        self.pipeline
+            .overlay_has_dummy
+            .store(false, Ordering::Relaxed);
         self.render_runtime.set_text_overlay_active(false);
         self.render_runtime.clear_external_sources();
         self.render_runtime.mark_overlay_dirty();
@@ -690,26 +732,48 @@ impl NativeOutputPipeline {
     }
 
     fn hard_stop_except(&self, keep: &HashSet<VoiceId>) {
-        if self.mpv_destroyed.load(Ordering::Acquire) { return; }
-        let Some(_permit) = self.enter_mpv_call() else { return; };
+        if self.mpv_destroyed.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(_permit) = self.enter_mpv_call() else {
+            return;
+        };
         let kept_slot_exists = self.slot_registry.all_slots().iter().any(|slot| {
-            slot.state.lock().ok().and_then(|state| state.voice_id).is_some_and(|voice| keep.contains(&voice))
+            slot.state
+                .lock()
+                .ok()
+                .and_then(|state| state.voice_id)
+                .is_some_and(|voice| keep.contains(&voice))
         });
-        let kept_external_exists = keep.iter().any(|voice| self.render_runtime.has_external_source(*voice));
-        let has_kept_visual = kept_slot_exists || kept_external_exists;
-        let current_voice_is_kept = self.current_voice.lock().ok().is_some_and(|voice| voice.is_some_and(|id| keep.contains(&id)));
+        let kept_external_exists = keep
+            .iter()
+            .any(|voice| self.render_runtime.has_external_source(*voice));
+        let timer_active =
+            remove_timer_overlay_owners(&self.pipeline, &self.mpv.lib, self.mpv.ctx.0, Some(keep));
+        let has_kept_visual = kept_slot_exists || kept_external_exists || timer_active;
+        let current_voice_is_kept = self
+            .current_voice
+            .lock()
+            .ok()
+            .is_some_and(|voice| voice.is_some_and(|id| keep.contains(&id)));
         if !current_voice_is_kept {
             *self.current_voice.lock().unwrap() = None;
             *self.pipeline.current_voice.lock().unwrap() = None;
             *self.go_sent_at.lock().unwrap() = None;
             *self.pipeline.current_fade_out_ms.lock().unwrap() = 0;
             *self.pipeline.pending_video_start.lock().unwrap() = None;
-            *self.pipeline.pending_crop.lock().unwrap() = None;
             *self.pipeline.current_audio_voice.lock().unwrap() = None;
         }
         for slot in self.slot_registry.all_slots() {
-            let kept = slot.state.lock().ok().and_then(|state| state.voice_id).is_some_and(|voice| keep.contains(&voice));
-            if !kept { slot::hard_unload(&self.slot_registry, &slot, false); }
+            let kept = slot
+                .state
+                .lock()
+                .ok()
+                .and_then(|state| state.voice_id)
+                .is_some_and(|voice| keep.contains(&voice));
+            if !kept {
+                slot::hard_unload(&self.slot_registry, &slot, false);
+            }
         }
         if !has_kept_visual {
             unsafe {
@@ -718,14 +782,25 @@ impl NativeOutputPipeline {
                 (self.mpv.lib.mpv_command)(self.mpv.ctx.0, args.as_ptr());
             }
         }
-        self.pipeline.timer_osd_active.store(false, Ordering::Relaxed);
-        self.pipeline.text_overlay_active.store(false, Ordering::Relaxed);
-        self.pipeline.test_pattern_active.store(false, Ordering::Relaxed);
-        self.pipeline.overlay_has_dummy.store(false, Ordering::Relaxed);
-        self.render_runtime.set_text_overlay_active(false);
+        unsafe {
+            osd_overlay_remove(&self.mpv.lib, self.mpv.ctx.0);
+        }
+        self.pipeline
+            .timer_osd_active
+            .store(false, Ordering::Relaxed);
+        self.pipeline
+            .text_overlay_active
+            .store(false, Ordering::Relaxed);
+        self.pipeline
+            .test_pattern_active
+            .store(false, Ordering::Relaxed);
+        self.render_runtime.set_text_overlay_active(timer_active);
         self.render_runtime.clear_external_sources_except(keep);
         self.render_runtime.mark_overlay_dirty();
         if !has_kept_visual {
+            self.pipeline
+                .overlay_has_dummy
+                .store(false, Ordering::Relaxed);
             fade::set_overlay_alpha(&self.pipeline, 255);
         }
     }
@@ -916,8 +991,31 @@ pub struct OutputEngine {
     browser_surface: BrowserSurfaceManager,
 }
 
-fn geometry_for_output<'a>(output_id: &str, fallback: &'a VideoGeometry, overrides: &'a HashMap<String, VideoGeometry>) -> &'a VideoGeometry {
+fn geometry_for_output<'a>(
+    output_id: &str,
+    fallback: &'a VideoGeometry,
+    overrides: &'a HashMap<String, VideoGeometry>,
+) -> &'a VideoGeometry {
     overrides.get(output_id).unwrap_or(fallback)
+}
+
+fn media_probe_can_return(
+    file_loaded: bool,
+    wait_for_dimensions: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+    display_aspect: Option<f64>,
+) -> bool {
+    if !file_loaded {
+        return false;
+    }
+    if !wait_for_dimensions {
+        return true;
+    }
+
+    width.is_some_and(|value| value > 0)
+        && height.is_some_and(|value| value > 0)
+        && display_aspect.is_some_and(|value| value.is_finite() && value > 0.0)
 }
 
 impl OutputEngine {
@@ -949,24 +1047,34 @@ impl OutputEngine {
 
     /// Return the live worker state for every configured NDI/SRT destination.
     /// This is a read-only snapshot intended for Preferences/diagnostics.
-    pub fn network_output_statuses(&self) -> Vec<crate::engine::network_io::NetworkOutputRuntimeStatus> {
+    pub fn network_output_statuses(
+        &self,
+    ) -> Vec<crate::engine::network_io::NetworkOutputRuntimeStatus> {
         self.network_outputs.statuses()
     }
 
     /// Read per-display successful present counters without touching GL or
     /// mpv. Hidden and network-only pipelines are not reported as displays.
     pub fn physical_present_counters(&self) -> Vec<(String, String, u64)> {
-        self.active_display_pipelines().into_iter().filter_map(|pipeline| {
-            if !pipeline.render_runtime.shared.visible.load(Ordering::Relaxed) {
-                return None;
-            }
-            let config = pipeline.config();
-            Some((
-                config.id,
-                config.name,
-                pipeline.render_runtime.successful_physical_present_count(),
-            ))
-        }).collect()
+        self.active_display_pipelines()
+            .into_iter()
+            .filter_map(|pipeline| {
+                if !pipeline
+                    .render_runtime
+                    .shared
+                    .visible
+                    .load(Ordering::Relaxed)
+                {
+                    return None;
+                }
+                let config = pipeline.config();
+                Some((
+                    config.id,
+                    config.name,
+                    pipeline.render_runtime.successful_physical_present_count(),
+                ))
+            })
+            .collect()
     }
 
     /// Read-only network diagnostics assembled from existing destination
@@ -988,7 +1096,9 @@ impl OutputEngine {
             .map(|groups| {
                 groups
                     .iter()
-                    .flat_map(|(primary, members)| members.iter().map(move |member| (*member, *primary)))
+                    .flat_map(|(primary, members)| {
+                        members.iter().map(move |member| (*member, *primary))
+                    })
                     .collect::<HashMap<VoiceId, VoiceId>>()
             })
             .unwrap_or_default();
@@ -1004,7 +1114,10 @@ impl OutputEngine {
                 };
                 let slot_voice_id = snapshot.voice_id;
                 result.push(VideoRuntimeDiagnostic {
-                    cue_voice_id: canonical.get(&slot_voice_id).copied().unwrap_or(slot_voice_id),
+                    cue_voice_id: canonical
+                        .get(&slot_voice_id)
+                        .copied()
+                        .unwrap_or(slot_voice_id),
                     slot_voice_id,
                     output_id: config.id.clone(),
                     output_name: config.name.clone(),
@@ -1030,6 +1143,59 @@ impl OutputEngine {
         result
     }
 
+    /// Read source dimensions for one existing video voice. This is used by
+    /// Camera inspector geometry previews; it queries only the matching slots.
+    pub fn live_video_source_dimensions(&self, cue_voice_id: VoiceId) -> Option<(u32, u32)> {
+        let canonical = self
+            .voice_groups
+            .lock()
+            .ok()
+            .map(|groups| {
+                groups
+                    .iter()
+                    .flat_map(|(primary, members)| {
+                        members.iter().map(move |member| (*member, *primary))
+                    })
+                    .collect::<HashMap<VoiceId, VoiceId>>()
+            })
+            .unwrap_or_default();
+        for pipeline in self.active_output_pipelines() {
+            let Some(_permit) = pipeline.enter_mpv_call() else {
+                continue;
+            };
+            for slot in pipeline.slot_registry.all_slots() {
+                let Some(slot_voice_id) = slot::active_voice_id(&slot) else {
+                    continue;
+                };
+                if canonical
+                    .get(&slot_voice_id)
+                    .copied()
+                    .unwrap_or(slot_voice_id)
+                    != cue_voice_id
+                {
+                    continue;
+                }
+                if let Some(dimensions) = slot::source_dimensions(&slot) {
+                    return Some(dimensions);
+                }
+            }
+        }
+        None
+    }
+
+    /// Return effective OSD margins for pipelines that already exist. This is
+    /// inspector preview metadata; it must not create an output pipeline.
+    pub fn overlay_margin_by_output(&self) -> HashMap<String, u32> {
+        self.active_output_pipelines()
+            .into_iter()
+            .map(|pipeline| {
+                let id = pipeline.config().id;
+                let margin = pipeline.pipeline.osd_margin.load(Ordering::Relaxed);
+                (id, margin)
+            })
+            .collect()
+    }
+
     /// Return operator-facing state keyed by stable destination id. FTB is
     /// runtime-only, so a frontend reload cannot clear an active blackout.
     pub fn output_control_statuses(&self) -> Vec<OutputControlStatus> {
@@ -1039,51 +1205,66 @@ impl OutputEngine {
         let network_statuses = self.network_outputs.statuses();
         let active = self.outputs.lock().ok();
         let registry = self.output_registry.lock().ok();
-        let (Some(active), Some(registry)) = (active, registry) else { return Vec::new() };
+        let (Some(active), Some(registry)) = (active, registry) else {
+            return Vec::new();
+        };
         let statuses = registry
             .ids()
             .filter_map(|id| {
                 let registered = registry.pipeline(id)?;
                 let pipeline = active.get(id);
-                let (available, healthy, ftb, active, visible, monitor, network, detail) = if let Some(pipeline) = pipeline {
-                    let network = pipeline.network_output.load(Ordering::Relaxed);
-                    let ftb = pipeline
-                        .pipeline
-                        .operator_ftb
-                        .lock()
-                        .map(|state| state.target_alpha > 0 || state.current_alpha > 0)
-                        .unwrap_or(false);
-                    let network_detail = if network {
-                        network_output_status_detail(
-                            network_statuses.iter().find(|status| status.output_id == *id),
+                let (available, healthy, ftb, active, visible, monitor, network, detail) =
+                    if let Some(pipeline) = pipeline {
+                        let network = pipeline.network_output.load(Ordering::Relaxed);
+                        let ftb = pipeline
+                            .pipeline
+                            .operator_ftb
+                            .lock()
+                            .map(|state| state.target_alpha > 0 || state.current_alpha > 0)
+                            .unwrap_or(false);
+                        let network_detail = if network {
+                            network_output_status_detail(
+                                network_statuses
+                                    .iter()
+                                    .find(|status| status.output_id == *id),
+                            )
+                        } else {
+                            None
+                        };
+                        let destroyed = pipeline.mpv_destroyed.load(Ordering::Acquire);
+                        let visible = pipeline.visible.load(Ordering::Acquire);
+                        let detail = network_detail.or_else(|| {
+                            (!network && !visible).then(|| "Output is hidden".to_owned())
+                        });
+                        let available =
+                            !destroyed && ((network && detail.is_none()) || (!network && visible));
+                        let healthy = available && detail.is_none();
+                        (
+                            available,
+                            healthy,
+                            ftb,
+                            true,
+                            visible,
+                            pipeline.config().monitor,
+                            network,
+                            detail,
                         )
                     } else {
-                        None
+                        (
+                            false,
+                            false,
+                            false,
+                            false,
+                            false,
+                            registered.config.monitor,
+                            matches!(
+                                &registered.config.sink_kind,
+                                crate::preferences::OutputSinkKind::Ndi
+                                    | crate::preferences::OutputSinkKind::Srt
+                            ),
+                            Some("Output is not active".to_owned()),
+                        )
                     };
-                    let destroyed = pipeline.mpv_destroyed.load(Ordering::Acquire);
-                    let visible = pipeline.visible.load(Ordering::Acquire);
-                    let detail = network_detail.or_else(|| {
-                        (!network && !visible).then(|| "Output is hidden".to_owned())
-                    });
-                    let available = !destroyed && ((network && detail.is_none()) || (!network && visible));
-                    let healthy = available && detail.is_none();
-                    (available, healthy, ftb, true, visible, pipeline.config().monitor, network, detail)
-                } else {
-                    (
-                        false,
-                        false,
-                        false,
-                        false,
-                        false,
-                        registered.config.monitor,
-                        matches!(
-                            &registered.config.sink_kind,
-                            crate::preferences::OutputSinkKind::Ndi
-                                | crate::preferences::OutputSinkKind::Srt
-                        ),
-                        Some("Output is not active".to_owned()),
-                    )
-                };
                 Some(OutputControlStatus {
                     output_id: id.clone(),
                     name: registered.config.name.clone(),
@@ -1241,8 +1422,7 @@ impl OutputEngine {
             Self::resolve_browser_output_id(&output_registry, output_id)?
         };
         let statuses = self.output_control_statuses();
-        let monitor_index =
-            Self::browser_monitor_for_output(&statuses, Some(&resolved_output_id))?;
+        let monitor_index = Self::browser_monitor_for_output(&statuses, Some(&resolved_output_id))?;
         let monitor = monitor_index
             .map(|index| {
                 self.list_screens()
@@ -1251,15 +1431,14 @@ impl OutputEngine {
                     .ok_or_else(|| anyhow!("Browser output monitor is unavailable"))
             })
             .transpose()?;
-        self.browser_surface
-            .start(
-                cue_id,
-                url,
-                reload_on_go,
-                zoom,
-                Some(&resolved_output_id),
-                monitor,
-            )
+        self.browser_surface.start(
+            cue_id,
+            url,
+            reload_on_go,
+            zoom,
+            Some(&resolved_output_id),
+            monitor,
+        )
     }
 
     pub fn stop_browser_surface(&self, cue_id: Uuid, hard: bool) -> Result<()> {
@@ -1290,7 +1469,10 @@ impl OutputEngine {
         self.outputs.lock().ok()?.get(&id).cloned()
     }
 
-    fn pipeline_for_output(&self, requested: Option<&str>) -> Option<(String, Arc<NativeOutputPipeline>)> {
+    fn pipeline_for_output(
+        &self,
+        requested: Option<&str>,
+    ) -> Option<(String, Arc<NativeOutputPipeline>)> {
         let id = self.output_registry.lock().ok()?.resolve(requested)?;
         let pipeline = self.outputs.lock().ok()?.get(&id).cloned()?;
         Some((id, pipeline))
@@ -1341,7 +1523,7 @@ impl OutputEngine {
                 return None;
             }
 
-            let path_str = path.to_string_lossy().replace('\\', "/");
+            let path_str = crate::engine::mpv_sys::path_to_mpv_url(path);
             let path_cstr = match CString::new(path_str.as_str()) {
                 Ok(c) => c,
                 Err(_) => {
@@ -1367,6 +1549,7 @@ impl OutputEngine {
             let mut duration_secs: Option<f64> = None;
             let mut width: Option<u32> = None;
             let mut height: Option<u32> = None;
+            let mut display_aspect: Option<f64> = None;
             let mut file_loaded = false;
             loop {
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1378,9 +1561,7 @@ impl OutputEngine {
                 let event_id = (*event).event_id;
                 if matches!(
                     event_id,
-                    MPV_EVENT_FILE_LOADED
-                        | MPV_EVENT_VIDEO_RECONFIG
-                        | MPV_EVENT_PLAYBACK_RESTART
+                    MPV_EVENT_FILE_LOADED | MPV_EVENT_VIDEO_RECONFIG | MPV_EVENT_PLAYBACK_RESTART
                 ) {
                     if event_id == MPV_EVENT_FILE_LOADED {
                         file_loaded = true;
@@ -1405,10 +1586,17 @@ impl OutputEngine {
                         .filter(|value| *value > 0)
                         .and_then(|value| u32::try_from(value).ok())
                         .or(height);
+                    display_aspect = get_prop_double(lib, ctx, "video-params/aspect")
+                        .filter(|value| value.is_finite() && *value > 0.0)
+                        .or(display_aspect);
 
-                    if file_loaded
-                        && (!wait_for_dimensions || (width.is_some() && height.is_some()))
-                    {
+                    if media_probe_can_return(
+                        file_loaded,
+                        wait_for_dimensions,
+                        width,
+                        height,
+                        display_aspect,
+                    ) {
                         break;
                     }
                 }
@@ -1426,6 +1614,7 @@ impl OutputEngine {
                 duration,
                 width,
                 height,
+                display_aspect,
             })
         }
     }
@@ -1596,11 +1785,7 @@ impl OutputEngine {
         // the destination settings did not change.  Registry metadata is still
         // refreshed because disabled destinations/default routing are pure
         // state and do not affect the native graph.
-        if output_graph_is_unchanged(
-            destinations,
-            &active_configs,
-            network_configuration_current,
-        ) {
+        if output_graph_is_unchanged(destinations, &active_configs, network_configuration_current) {
             self.output_registry
                 .lock()
                 .map_err(|_| anyhow!("output registry poisoned"))?
@@ -1619,9 +1804,7 @@ impl OutputEngine {
 
         let mut created = HashMap::new();
         if let Some(lib) = &self.mpv_lib {
-            for destination in destinations.iter().filter(|d| {
-                d.enabled
-            }) {
+            for destination in destinations.iter().filter(|d| d.enabled) {
                 if active_before.contains_key(&destination.id) {
                     continue;
                 }
@@ -1660,7 +1843,10 @@ impl OutputEngine {
         }
 
         let retired: Vec<_> = {
-            let mut active = self.outputs.lock().map_err(|_| anyhow!("output map poisoned"))?;
+            let mut active = self
+                .outputs
+                .lock()
+                .map_err(|_| anyhow!("output map poisoned"))?;
             let old = std::mem::replace(&mut *active, next);
             old.into_iter()
                 .filter_map(|(id, pipeline)| (!wanted_ids.contains(&id)).then_some(pipeline))
@@ -1693,7 +1879,10 @@ impl OutputEngine {
             .map_err(|_| anyhow!("output registry poisoned"))?
             .release_outputs(&retired_ids);
         {
-            let owners = self.voice_outputs.lock().map_err(|_| anyhow!("voice map poisoned"))?;
+            let owners = self
+                .voice_outputs
+                .lock()
+                .map_err(|_| anyhow!("voice map poisoned"))?;
             affected_voices.extend(
                 owners
                     .iter()
@@ -1710,13 +1899,26 @@ impl OutputEngine {
             .lock()
             .map_err(|_| anyhow!("voice groups poisoned"))?
             .iter()
-            .filter(|(_, members)| members.iter().any(|voice| retired_voice_ids.contains(voice)))
+            .filter(|(_, members)| {
+                members
+                    .iter()
+                    .any(|voice| retired_voice_ids.contains(voice))
+            })
             .map(|(primary, members)| (*primary, members.clone()))
             .collect();
         for (primary, members) in groups_to_terminate {
-            self.voice_groups.lock().map_err(|_| anyhow!("voice groups poisoned"))?.remove(&primary);
-            self.voice_group_completed.lock().map_err(|_| anyhow!("voice completion state poisoned"))?.remove(&primary);
-            self.voice_group_completion_emitted.lock().map_err(|_| anyhow!("voice completion state poisoned"))?.remove(&primary);
+            self.voice_groups
+                .lock()
+                .map_err(|_| anyhow!("voice groups poisoned"))?
+                .remove(&primary);
+            self.voice_group_completed
+                .lock()
+                .map_err(|_| anyhow!("voice completion state poisoned"))?
+                .remove(&primary);
+            self.voice_group_completion_emitted
+                .lock()
+                .map_err(|_| anyhow!("voice completion state poisoned"))?
+                .remove(&primary);
             affected_voices.extend(members.iter().copied());
             for member in members {
                 if retired_voice_ids.contains(&member) {
@@ -1767,21 +1969,14 @@ impl OutputEngine {
     /// This is deliberately separate from [`Self::configure_outputs`]. A
     /// monitor picker is a placement operation, not an output-graph apply:
     /// NDI/SRT workers and their frame sinks must remain completely untouched.
-    pub fn set_display_output_monitor(
-        &self,
-        output_id: &str,
-        monitor: Option<u32>,
-    ) -> Result<()> {
+    pub fn set_display_output_monitor(&self, output_id: &str, monitor: Option<u32>) -> Result<()> {
         self.set_display_output_monitors(&[(output_id.to_owned(), monitor)])
     }
 
     /// Move several physical display outputs atomically. This is used for a
     /// monitor assignment swap, where both live windows and the pure registry
     /// must change under one output-graph gate.
-    pub fn set_display_output_monitors(
-        &self,
-        assignments: &[(String, Option<u32>)],
-    ) -> Result<()> {
+    pub fn set_display_output_monitors(&self, assignments: &[(String, Option<u32>)]) -> Result<()> {
         self.set_display_output_monitors_inner(assignments, true)
     }
 
@@ -1805,7 +2000,9 @@ impl OutputEngine {
             .lock()
             .map_err(|_| anyhow!("output configure gate poisoned"))?;
         if assignments.is_empty() {
-            return Err(anyhow!("At least one display output assignment is required"));
+            return Err(anyhow!(
+                "At least one display output assignment is required"
+            ));
         }
         let screens = self.list_screens();
         if require_connected {
@@ -1840,7 +2037,13 @@ impl OutputEngine {
                 return Err(anyhow!("Output '{output_id}' is not a physical display"));
             }
             let was_visible = pipeline.visible.load(Ordering::Acquire);
-            pipelines.push((output_id.clone(), pipeline, old_config, *monitor, was_visible));
+            pipelines.push((
+                output_id.clone(),
+                pipeline,
+                old_config,
+                *monitor,
+                was_visible,
+            ));
         }
         drop(active);
 
@@ -1925,8 +2128,12 @@ impl OutputEngine {
     /// Select the only output whose final compositor image is tapped by the
     /// operator monitor. `None` disables every tap immediately.
     pub fn set_output_monitor_source(&self, source_id: Option<&str>, session: u64) -> Result<bool> {
-        let mut selection = self.monitor_selection.lock().map_err(|_| anyhow!("output monitor selection lock poisoned"))?;
-        if session < selection.0 || (session == selection.0 && source_id != selection.1.as_deref()) {
+        let mut selection = self
+            .monitor_selection
+            .lock()
+            .map_err(|_| anyhow!("output monitor selection lock poisoned"))?;
+        if session < selection.0 || (session == selection.0 && source_id != selection.1.as_deref())
+        {
             return Ok(false);
         }
         let pipelines = self.active_output_pipelines();
@@ -1957,8 +2164,11 @@ impl OutputEngine {
         after_sequence: u64,
         session: u64,
     ) -> Result<OutputMonitorFrameRead> {
-        let active_session = self.monitor_selection.lock()
-            .map_err(|_| anyhow!("output monitor selection lock poisoned"))?.0;
+        let active_session = self
+            .monitor_selection
+            .lock()
+            .map_err(|_| anyhow!("output monitor selection lock poisoned"))?
+            .0;
         if session != active_session {
             return Err(anyhow!("stale selection token"));
         }
@@ -1974,25 +2184,73 @@ impl OutputEngine {
         {
             return Err(anyhow!("Output monitor source '{source_id}' is not active"));
         }
-        Ok(match pipeline.render_runtime.monitor_frame_after(after_sequence, session) {
-            Some((sequence, current_session, captured_at_us, Some(frame))) => OutputMonitorFrameRead::Frame { sequence, session: current_session, captured_at_us, frame },
-            Some((sequence, current_session, captured_at_us, None)) => OutputMonitorFrameRead::Unchanged { sequence, session: current_session, captured_at_us },
-            None => OutputMonitorFrameRead::NoFrame,
-        })
+        Ok(
+            match pipeline
+                .render_runtime
+                .monitor_frame_after(after_sequence, session)
+            {
+                Some((sequence, current_session, captured_at_us, Some(frame))) => {
+                    OutputMonitorFrameRead::Frame {
+                        sequence,
+                        session: current_session,
+                        captured_at_us,
+                        frame,
+                    }
+                }
+                Some((sequence, current_session, captured_at_us, None)) => {
+                    OutputMonitorFrameRead::Unchanged {
+                        sequence,
+                        session: current_session,
+                        captured_at_us,
+                    }
+                }
+                None => OutputMonitorFrameRead::NoFrame,
+            },
+        )
     }
 
-    pub fn output_monitor_diagnostics(&self, source_id: Option<&str>) -> Result<OutputMonitorCaptureDiagnostics> {
-        let selection = self.monitor_selection.lock()
+    pub fn output_monitor_diagnostics(
+        &self,
+        source_id: Option<&str>,
+    ) -> Result<OutputMonitorCaptureDiagnostics> {
+        let selection = self
+            .monitor_selection
+            .lock()
             .map_err(|_| anyhow!("output monitor selection lock poisoned"))?;
-        let id = source_id.or(selection.1.as_deref())
+        let id = source_id
+            .or(selection.1.as_deref())
             .ok_or_else(|| anyhow!("Output monitor has no selected source"))?;
-        let pipeline = self.outputs.lock()
+        let pipeline = self
+            .outputs
+            .lock()
             .map_err(|_| anyhow!("output map poisoned"))?
-            .get(id).cloned()
+            .get(id)
+            .cloned()
             .ok_or_else(|| anyhow!("Output monitor source '{id}' is unavailable"))?;
-        let (attempts, captured, skipped_pbo, dropped_stale, published, total_copy_us, maximum_copy_us, copy_samples, mailbox_lock_drops, preview_fps) =
-            pipeline.render_runtime.monitor_capture_diagnostics();
-        Ok(OutputMonitorCaptureDiagnostics { attempts, captured, skipped_pbo, dropped_stale, published, total_copy_us, maximum_copy_us, copy_samples, mailbox_lock_drops, preview_fps })
+        let (
+            attempts,
+            captured,
+            skipped_pbo,
+            dropped_stale,
+            published,
+            total_copy_us,
+            maximum_copy_us,
+            copy_samples,
+            mailbox_lock_drops,
+            preview_fps,
+        ) = pipeline.render_runtime.monitor_capture_diagnostics();
+        Ok(OutputMonitorCaptureDiagnostics {
+            attempts,
+            captured,
+            skipped_pbo,
+            dropped_stale,
+            published,
+            total_copy_us,
+            maximum_copy_us,
+            copy_samples,
+            mailbox_lock_drops,
+            preview_fps,
+        })
     }
 
     // ── Unified content display ──────────────────────────────────────────────
@@ -2073,7 +2331,7 @@ impl OutputEngine {
             slot::SlotLoad {
                 voice_id,
                 audio_voice_id: req.audio_voice_id,
-                url: req.file_path.to_string_lossy().replace('\\', "/"),
+                url: crate::engine::mpv_sys::path_to_mpv_url(req.file_path),
                 is_image: req.is_image,
                 fade_in_ms: req.fade_in_ms,
                 loop_count: req.loop_count,
@@ -2084,6 +2342,7 @@ impl OutputEngine {
                 hold_last_frame: req.hold_last_frame,
                 live_source: req.live_source,
                 geometry: req.geometry,
+                presentation_video_layout: req.presentation_video_layout,
                 layer_style: req.layer_style,
                 slices: req.slices,
                 preload: req.preload,
@@ -2094,52 +2353,102 @@ impl OutputEngine {
 
     /// Display one cue on several destinations. The first voice is canonical;
     /// lifecycle operations on it are fanned out by the engine.
-    pub fn show_content_multi(&self, req: ContentRequest<'_>, output_ids: &[String]) -> Result<VoiceId> {
+    pub fn show_content_multi(
+        &self,
+        req: ContentRequest<'_>,
+        output_ids: &[String],
+    ) -> Result<VoiceId> {
         self.show_content_multi_with_geometry(req, output_ids, &std::collections::HashMap::new())
     }
 
     pub fn show_content_multi_with_geometry(
-        &self, req: ContentRequest<'_>, output_ids: &[String],
+        &self,
+        req: ContentRequest<'_>,
+        output_ids: &[String],
         geometry_by_output: &std::collections::HashMap<String, VideoGeometry>,
     ) -> Result<VoiceId> {
-        let ids: Vec<&str> = output_ids.iter().map(String::as_str).filter(|id| !id.trim().is_empty()).fold(Vec::new(), |mut ids, id| { if !ids.contains(&id) { ids.push(id); } ids });
+        let ids: Vec<&str> = output_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .fold(Vec::new(), |mut ids, id| {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+                ids
+            });
         if ids.is_empty() {
-            let resolved_geometry = self.pipeline_for_output(req.output_id)
+            let resolved_geometry = self
+                .pipeline_for_output(req.output_id)
                 .map(|(id, _)| *geometry_for_output(&id, &req.geometry, geometry_by_output))
                 .unwrap_or(req.geometry);
             return self.show_content(ContentRequest {
-                file_path: req.file_path, is_image: req.is_image, fade_in_ms: req.fade_in_ms,
-                loop_count: req.loop_count, initial_seek_action_ms: req.initial_seek_action_ms,
-                start_ms: req.start_ms, end_ms: req.end_ms, screen_index: req.screen_index,
-                output_id: req.output_id, audio_voice_id: req.audio_voice_id,
-                display_duration_ms: req.display_duration_ms, hold_last_frame: req.hold_last_frame,
-                geometry: resolved_geometry, live_source: req.live_source, layer_style: req.layer_style,
-                slices: req.slices, preload: req.preload,
+                file_path: req.file_path,
+                is_image: req.is_image,
+                fade_in_ms: req.fade_in_ms,
+                loop_count: req.loop_count,
+                initial_seek_action_ms: req.initial_seek_action_ms,
+                start_ms: req.start_ms,
+                end_ms: req.end_ms,
+                screen_index: req.screen_index,
+                output_id: req.output_id,
+                audio_voice_id: req.audio_voice_id,
+                display_duration_ms: req.display_duration_ms,
+                hold_last_frame: req.hold_last_frame,
+                geometry: resolved_geometry,
+                live_source: req.live_source,
+                layer_style: req.layer_style,
+                presentation_video_layout: req.presentation_video_layout,
+                slices: req.slices,
+                preload: req.preload,
             });
         }
         let mut voices = Vec::with_capacity(ids.len());
         for id in ids {
-            let audio_voice_id = if voices.is_empty() { req.audio_voice_id } else { None };
+            let audio_voice_id = if voices.is_empty() {
+                req.audio_voice_id
+            } else {
+                None
+            };
             let voice = match self.show_content(ContentRequest {
-                file_path: req.file_path, is_image: req.is_image, fade_in_ms: req.fade_in_ms,
-                loop_count: req.loop_count, start_ms: req.start_ms, end_ms: req.end_ms,
+                file_path: req.file_path,
+                is_image: req.is_image,
+                fade_in_ms: req.fade_in_ms,
+                loop_count: req.loop_count,
+                start_ms: req.start_ms,
+                end_ms: req.end_ms,
                 initial_seek_action_ms: req.initial_seek_action_ms,
-                screen_index: None, output_id: Some(id), audio_voice_id,
-                display_duration_ms: req.display_duration_ms, hold_last_frame: req.hold_last_frame,
-                geometry: *geometry_for_output(id, &req.geometry, geometry_by_output), live_source: req.live_source, layer_style: req.layer_style,
-                slices: req.slices.clone(), preload: req.preload,
+                screen_index: None,
+                output_id: Some(id),
+                audio_voice_id,
+                display_duration_ms: req.display_duration_ms,
+                hold_last_frame: req.hold_last_frame,
+                geometry: *geometry_for_output(id, &req.geometry, geometry_by_output),
+                live_source: req.live_source,
+                layer_style: req.layer_style,
+                presentation_video_layout: req.presentation_video_layout,
+                slices: req.slices.clone(),
+                preload: req.preload,
             }) {
                 Ok(voice) => voice,
                 Err(error) => {
-                    for previous in voices { self.stop_content(previous, 0, 0); }
+                    for previous in voices {
+                        self.stop_content(previous, 0, 0);
+                    }
                     return Err(error);
                 }
             };
             voices.push(voice);
         }
         let primary = voices[0];
-        self.voice_groups.lock().map_err(|_| anyhow!("voice groups poisoned"))?.insert(primary, voices);
-        self.voice_group_completed.lock().map_err(|_| anyhow!("voice completion state poisoned"))?.insert(primary, HashSet::new());
+        self.voice_groups
+            .lock()
+            .map_err(|_| anyhow!("voice groups poisoned"))?
+            .insert(primary, voices);
+        self.voice_group_completed
+            .lock()
+            .map_err(|_| anyhow!("voice completion state poisoned"))?
+            .insert(primary, HashSet::new());
         Ok(primary)
     }
 
@@ -2161,64 +2470,139 @@ impl OutputEngine {
             });
         };
         let voice_id = Uuid::new_v4();
-        if !self.output_registry.lock().map_err(|_| anyhow!("output registry poisoned"))?
+        if !self
+            .output_registry
+            .lock()
+            .map_err(|_| anyhow!("output registry poisoned"))?
             .claim_voice(voice_id, &resolved_id)
         {
             return Err(anyhow!("Output destination '{resolved_id}' is unavailable"));
         }
-        self.voice_outputs.lock().map_err(|_| anyhow!("voice map poisoned"))?
+        self.voice_outputs
+            .lock()
+            .map_err(|_| anyhow!("voice map poisoned"))?
             .insert(voice_id, resolved_id.clone());
-        self.voices.lock().map_err(|_| anyhow!("voice map poisoned"))?
-            .insert(voice_id, OutputVoice { id: voice_id, started_at: Instant::now(), duration: None });
+        self.voices
+            .lock()
+            .map_err(|_| anyhow!("voice map poisoned"))?
+            .insert(
+                voice_id,
+                OutputVoice {
+                    id: voice_id,
+                    started_at: Instant::now(),
+                    duration: None,
+                },
+            );
 
         let config = output.config();
         let screens = self.list_screens();
-        if !output.position(&screens, config.monitor, &output_health_key(&config.id), true) {
+        if !output.position(
+            &screens,
+            config.monitor,
+            &output_health_key(&config.id),
+            true,
+        ) {
             self.release_voice_bookkeeping(voice_id, true);
-            return Err(anyhow!("Output destination '{}' has no connected monitor", config.id));
+            return Err(anyhow!(
+                "Output destination '{}' has no connected monitor",
+                config.id
+            ));
         }
         fade::set_overlay_alpha(&output.pipeline, 0);
-        let layer_key = slot::resolve_layer_key(layer_style.layer, output.slot_registry.next_layer_seq());
-        output.render_runtime.add_external_source(voice_id, source, geometry, layer_style, layer_key, fade_in_ms);
+        let layer_key =
+            slot::resolve_layer_key(layer_style.layer, output.slot_registry.next_layer_seq());
+        output.render_runtime.add_external_source(
+            voice_id,
+            source,
+            geometry,
+            layer_style,
+            layer_key,
+            fade_in_ms,
+        );
         Ok(voice_id)
     }
 
     pub fn show_external_bgra_source_multi(
-        &self, output_id: Option<&str>, output_ids: &[String], source: Arc<crate::engine::network_io::BgraFrameMailbox>,
-        geometry: VideoGeometry, layer_style: LayerStyle, fade_in_ms: u32,
+        &self,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        source: Arc<crate::engine::network_io::BgraFrameMailbox>,
+        geometry: VideoGeometry,
+        layer_style: LayerStyle,
+        fade_in_ms: u32,
     ) -> Result<VoiceId> {
         self.show_external_bgra_source_multi_with_geometry(
-            output_id, output_ids, source, geometry, layer_style, fade_in_ms,
+            output_id,
+            output_ids,
+            source,
+            geometry,
+            layer_style,
+            fade_in_ms,
             &std::collections::HashMap::new(),
         )
     }
 
     pub fn show_external_bgra_source_multi_with_geometry(
-        &self, output_id: Option<&str>, output_ids: &[String], source: Arc<crate::engine::network_io::BgraFrameMailbox>,
-        geometry: VideoGeometry, layer_style: LayerStyle, fade_in_ms: u32,
+        &self,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        source: Arc<crate::engine::network_io::BgraFrameMailbox>,
+        geometry: VideoGeometry,
+        layer_style: LayerStyle,
+        fade_in_ms: u32,
         geometry_by_output: &std::collections::HashMap<String, VideoGeometry>,
     ) -> Result<VoiceId> {
-        let ids: Vec<&str> = output_ids.iter().map(String::as_str).filter(|id| !id.trim().is_empty()).fold(Vec::new(), |mut ids, id| { if !ids.contains(&id) { ids.push(id); } ids });
+        let ids: Vec<&str> = output_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .fold(Vec::new(), |mut ids, id| {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+                ids
+            });
         if ids.is_empty() {
-            let resolved_geometry = self.pipeline_for_output(output_id)
+            let resolved_geometry = self
+                .pipeline_for_output(output_id)
                 .map(|(id, _)| *geometry_for_output(&id, &geometry, geometry_by_output))
                 .unwrap_or(geometry);
-            return self.show_external_bgra_source(output_id, source, resolved_geometry, layer_style, fade_in_ms);
+            return self.show_external_bgra_source(
+                output_id,
+                source,
+                resolved_geometry,
+                layer_style,
+                fade_in_ms,
+            );
         }
         let mut voices = Vec::with_capacity(ids.len());
         for id in ids {
             let output_geometry = *geometry_for_output(id, &geometry, geometry_by_output);
-            match self.show_external_bgra_source(Some(id), Arc::clone(&source), output_geometry, layer_style, fade_in_ms) {
+            match self.show_external_bgra_source(
+                Some(id),
+                Arc::clone(&source),
+                output_geometry,
+                layer_style,
+                fade_in_ms,
+            ) {
                 Ok(voice) => voices.push(voice),
                 Err(error) => {
-                    for previous in voices { self.stop_content(previous, 0, 0); }
+                    for previous in voices {
+                        self.stop_content(previous, 0, 0);
+                    }
                     return Err(error);
                 }
             }
         }
         let primary = voices[0];
-        self.voice_groups.lock().map_err(|_| anyhow!("voice groups poisoned"))?.insert(primary, voices);
-        self.voice_group_completed.lock().map_err(|_| anyhow!("voice completion state poisoned"))?.insert(primary, HashSet::new());
+        self.voice_groups
+            .lock()
+            .map_err(|_| anyhow!("voice groups poisoned"))?
+            .insert(primary, voices);
+        self.voice_group_completed
+            .lock()
+            .map_err(|_| anyhow!("voice completion state poisoned"))?
+            .insert(primary, HashSet::new());
         Ok(primary)
     }
 
@@ -2240,8 +2624,15 @@ impl OutputEngine {
     }
 
     pub fn devamp_voice(&self, voice_id: VoiceId, stop_at_end: bool) {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
-            for member in members { self.devamp_voice_single(member, stop_at_end); }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
+            for member in members {
+                self.devamp_voice_single(member, stop_at_end);
+            }
             return;
         }
         self.devamp_voice_single(voice_id, stop_at_end);
@@ -2249,7 +2640,9 @@ impl OutputEngine {
 
     fn devamp_voice_single(&self, voice_id: VoiceId, stop_at_end: bool) {
         if let Some(output) = self.pipeline_for_voice(voice_id) {
-            let Some(_permit) = output.enter_mpv_call() else { return };
+            let Some(_permit) = output.enter_mpv_call() else {
+                return;
+            };
             if let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) {
                 slot::devamp_slot(&slot, stop_at_end);
             }
@@ -2266,10 +2659,24 @@ impl OutputEngine {
     /// Resolve the owner and slot before dropping ownership.  This ordering
     /// matters when a stop arrives concurrently with a destination update.
     pub fn stop_content(&self, voice_id: VoiceId, visual_fade_ms: u32, audio_fade_ms: u32) {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|mut m| m.remove(&voice_id)) {
-            self.voice_group_completed.lock().ok().map(|mut m| { m.remove(&voice_id); });
-            self.voice_group_completion_emitted.lock().ok().map(|mut m| { m.remove(&voice_id); });
-            for member in members { self.stop_content_single(member, visual_fade_ms, audio_fade_ms); }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(&voice_id))
+        {
+            self.voice_group_completed.lock().ok().map(|mut m| {
+                m.remove(&voice_id);
+            });
+            self.voice_group_completion_emitted
+                .lock()
+                .ok()
+                .map(|mut m| {
+                    m.remove(&voice_id);
+                });
+            for member in members {
+                self.stop_content_single(member, visual_fade_ms, audio_fade_ms);
+            }
             return;
         }
         self.stop_content_single(voice_id, visual_fade_ms, audio_fade_ms);
@@ -2277,7 +2684,10 @@ impl OutputEngine {
 
     fn stop_content_single(&self, voice_id: VoiceId, visual_fade_ms: u32, audio_fade_ms: u32) {
         let output = self.pipeline_for_voice(voice_id);
-        let is_external = output.as_ref().is_some_and(|p| p.render_runtime.stop_external_source(voice_id, visual_fade_ms));
+        let is_external = output.as_ref().is_some_and(|p| {
+            p.render_runtime
+                .stop_external_source(voice_id, visual_fade_ms)
+        });
         let slot = output
             .as_ref()
             .and_then(|p| slot::slot_for_voice(&p.slot_registry, voice_id));
@@ -2350,14 +2760,38 @@ impl OutputEngine {
         }
         let mut keep_all = keep_audio.clone();
         keep_all.extend(keep_visual.iter().copied());
-        self.voices.lock().unwrap().retain(|voice, _| keep_all.contains(voice));
-        self.voice_outputs.lock().unwrap().retain(|voice, _| keep_all.contains(voice));
-        self.voice_groups.lock().unwrap().retain(|primary, members| keep_all.contains(primary) && members.iter().all(|voice| keep_all.contains(voice)));
-        self.voice_group_completed.lock().unwrap().retain(|primary, _| keep_all.contains(primary));
-        self.voice_group_completion_emitted.lock().unwrap().retain(|primary| keep_all.contains(primary));
-        self.cue_audio_voices.lock().unwrap().retain(|visual, audio| keep_visual.contains(visual) && keep_audio.contains(audio));
-        if let Ok(mut registry) = self.output_registry.lock() { registry.retain_voices(&keep_all); }
-        for output in self.all_pipelines() { output.hard_stop_except(&keep_visual); }
+        self.voices
+            .lock()
+            .unwrap()
+            .retain(|voice, _| keep_all.contains(voice));
+        self.voice_outputs
+            .lock()
+            .unwrap()
+            .retain(|voice, _| keep_all.contains(voice));
+        self.voice_groups
+            .lock()
+            .unwrap()
+            .retain(|primary, members| {
+                keep_all.contains(primary) && members.iter().all(|voice| keep_all.contains(voice))
+            });
+        self.voice_group_completed
+            .lock()
+            .unwrap()
+            .retain(|primary, _| keep_all.contains(primary));
+        self.voice_group_completion_emitted
+            .lock()
+            .unwrap()
+            .retain(|primary| keep_all.contains(primary));
+        self.cue_audio_voices
+            .lock()
+            .unwrap()
+            .retain(|visual, audio| keep_visual.contains(visual) && keep_audio.contains(audio));
+        if let Ok(mut registry) = self.output_registry.lock() {
+            registry.retain_voices(&keep_all);
+        }
+        for output in self.all_pipelines() {
+            output.hard_stop_except(&keep_visual);
+        }
     }
 
     pub fn is_current_voice(&self, voice_id: VoiceId) -> bool {
@@ -2396,50 +2830,82 @@ impl OutputEngine {
     }
 
     pub fn apply_geometry(&self, voice_id: VoiceId, geometry: &VideoGeometry) {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
-            for member in members { self.apply_geometry_single(member, geometry); }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
+            for member in members {
+                self.apply_geometry_single(member, geometry);
+            }
             return;
         }
         self.apply_geometry_single(voice_id, geometry);
     }
 
     pub fn apply_geometry_by_output(
-        &self, voice_id: VoiceId, fallback: &VideoGeometry,
+        &self,
+        voice_id: VoiceId,
+        fallback: &VideoGeometry,
         overrides: &std::collections::HashMap<String, VideoGeometry>,
     ) {
-        let members = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned());
+        let members = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned());
         if let Some(members) = members {
             for member in members {
-                let geometry = self.output_id_for_voice(member)
+                let geometry = self
+                    .output_id_for_voice(member)
                     .map(|id| geometry_for_output(&id, fallback, overrides))
                     .unwrap_or(fallback);
                 self.apply_geometry_single(member, geometry);
             }
             return;
         }
-        let geometry = self.output_id_for_voice(voice_id)
+        let geometry = self
+            .output_id_for_voice(voice_id)
             .map(|id| geometry_for_output(&id, fallback, overrides))
             .unwrap_or(fallback);
         self.apply_geometry_single(voice_id, geometry);
     }
 
     fn apply_geometry_single(&self, voice_id: VoiceId, geometry: &VideoGeometry) {
-        let Some(output) = self.pipeline_for_voice(voice_id) else { return };
-        if output.render_runtime.apply_external_geometry(voice_id, geometry) { return; }
-        let Some(_permit) = output.enter_mpv_call() else { return };
-        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else { return };
+        let Some(output) = self.pipeline_for_voice(voice_id) else {
+            return;
+        };
+        if output
+            .render_runtime
+            .apply_external_geometry(voice_id, geometry)
+        {
+            return;
+        }
+        let Some(_permit) = output.enter_mpv_call() else {
+            return;
+        };
+        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else {
+            return;
+        };
         apply_scalar_geometry(&slot.lib, slot.mpv_ctx.0, geometry);
-        let applied = try_apply_crop(&slot.lib, slot.mpv_ctx.0, geometry);
         if let Ok(mut state) = slot.state.lock() {
             state.geometry = *geometry;
-            state.crop_applied = applied || !geometry.has_crop();
         }
+        output.render_runtime.mark_overlay_dirty();
         output.render_runtime.wake();
     }
 
     pub fn set_layer_props(&self, voice_id: VoiceId, style: &LayerStyle) {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
-            for member in members { self.set_layer_props_single(member, style); }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
+            for member in members {
+                self.set_layer_props_single(member, style);
+            }
             return;
         }
         self.set_layer_props_single(voice_id, style);
@@ -2447,7 +2913,12 @@ impl OutputEngine {
 
     fn set_layer_props_single(&self, voice_id: VoiceId, style: &LayerStyle) {
         if let Some(output) = self.pipeline_for_voice(voice_id) {
-            if output.render_runtime.set_external_layer_style(voice_id, style) { return; }
+            if output
+                .render_runtime
+                .set_external_layer_style(voice_id, style)
+            {
+                return;
+            }
             if let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) {
                 slot::set_layer_style(&slot, style);
             }
@@ -2456,13 +2927,24 @@ impl OutputEngine {
 
     pub fn get_voice_opacity(&self, voice_id: VoiceId) -> f32 {
         self.pipeline_for_voice(voice_id)
-            .and_then(|p| p.render_runtime.external_opacity(voice_id).or_else(|| slot::slot_for_voice(&p.slot_registry, voice_id).map(|s| slot::opacity_of(&s))))
+            .and_then(|p| {
+                p.render_runtime.external_opacity(voice_id).or_else(|| {
+                    slot::slot_for_voice(&p.slot_registry, voice_id).map(|s| slot::opacity_of(&s))
+                })
+            })
             .unwrap_or(0.0)
     }
 
     pub fn set_voice_opacity(&self, voice_id: VoiceId, opacity: f32) {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
-            for member in members { self.set_voice_opacity_single(member, opacity); }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
+            for member in members {
+                self.set_voice_opacity_single(member, opacity);
+            }
             return;
         }
         self.set_voice_opacity_single(voice_id, opacity);
@@ -2470,7 +2952,12 @@ impl OutputEngine {
 
     fn set_voice_opacity_single(&self, voice_id: VoiceId, opacity: f32) {
         if let Some(output) = self.pipeline_for_voice(voice_id) {
-            if output.render_runtime.set_external_opacity(voice_id, opacity) { return; }
+            if output
+                .render_runtime
+                .set_external_opacity(voice_id, opacity)
+            {
+                return;
+            }
             if let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) {
                 slot::set_opacity_direct(&slot, opacity);
             }
@@ -2478,35 +2965,64 @@ impl OutputEngine {
     }
 
     pub fn begin_eof_fade_out(&self, voice_id: VoiceId, fade_ms: u32) -> bool {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
             let mut ok = false;
-            for member in members { ok |= self.begin_eof_fade_out_single(member, fade_ms); }
+            for member in members {
+                ok |= self.begin_eof_fade_out_single(member, fade_ms);
+            }
             return ok;
         }
         self.begin_eof_fade_out_single(voice_id, fade_ms)
     }
 
     fn begin_eof_fade_out_single(&self, voice_id: VoiceId, fade_ms: u32) -> bool {
-        let Some(output) = self.pipeline_for_voice(voice_id) else { return false };
-        if output.render_runtime.fade_external_opacity(voice_id, 0.0, fade_ms) { return true; }
-        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else { return false };
+        let Some(output) = self.pipeline_for_voice(voice_id) else {
+            return false;
+        };
+        if output
+            .render_runtime
+            .fade_external_opacity(voice_id, 0.0, fade_ms)
+        {
+            return true;
+        }
+        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else {
+            return false;
+        };
         slot::animate_opacity(&slot, 0.0, fade_ms);
         true
     }
 
     pub fn start_preloaded(&self, voice_id: VoiceId) -> bool {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
             let mut ok = false;
-            for member in members { ok |= self.start_preloaded_single(member); }
+            for member in members {
+                ok |= self.start_preloaded_single(member);
+            }
             return ok;
         }
         self.start_preloaded_single(voice_id)
     }
 
     fn start_preloaded_single(&self, voice_id: VoiceId) -> bool {
-        let Some(output) = self.pipeline_for_voice(voice_id) else { return false };
-        let Some(_permit) = output.enter_mpv_call() else { return false };
-        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else { return false };
+        let Some(output) = self.pipeline_for_voice(voice_id) else {
+            return false;
+        };
+        let Some(_permit) = output.enter_mpv_call() else {
+            return false;
+        };
+        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else {
+            return false;
+        };
         slot::start_preloaded(&slot)
     }
 
@@ -2533,7 +3049,10 @@ impl OutputEngine {
     }
 
     pub fn attached_cue_audio_voice(&self, visual_voice_id: VoiceId) -> Option<VoiceId> {
-        self.cue_audio_voices.lock().ok().and_then(|voices| voices.get(&visual_voice_id).copied())
+        self.cue_audio_voices
+            .lock()
+            .ok()
+            .and_then(|voices| voices.get(&visual_voice_id).copied())
     }
 
     /// Current playback position of a voice's video (mpv `time-pos`), in ms.
@@ -2586,6 +3105,7 @@ impl OutputEngine {
             display_duration_ms: None,
             hold_last_frame: false,
             geometry: VideoGeometry::default(),
+            presentation_video_layout: None,
             live_source: false,
             layer_style: LayerStyle::default(),
             slices: Vec::new(),
@@ -2602,8 +3122,15 @@ impl OutputEngine {
     }
 
     pub fn pause_voice(&self, voice_id: VoiceId) -> Result<()> {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
-            for member in members { self.pause_voice_single(member)?; }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
+            for member in members {
+                self.pause_voice_single(member)?;
+            }
             return Ok(());
         }
         self.pause_voice_single(voice_id)
@@ -2612,12 +3139,20 @@ impl OutputEngine {
     fn pause_voice_single(&self, voice_id: VoiceId) -> Result<()> {
         let output = self.pipeline_for_voice(voice_id);
         if let Some(output) = output {
-            let Some(_permit) = output.enter_mpv_call() else { return Ok(()) };
-            let Some(ctx) = slot::slot_for_voice(&output.slot_registry, voice_id)
-                .map(|slot| slot.mpv_ctx.0)
-            else { return Ok(()) };
+            let Some(_permit) = output.enter_mpv_call() else {
+                return Ok(());
+            };
+            let Some(ctx) =
+                slot::slot_for_voice(&output.slot_registry, voice_id).map(|slot| slot.mpv_ctx.0)
+            else {
+                return Ok(());
+            };
             unsafe {
-                (output.mpv.lib.mpv_set_property_string)(ctx, cs("pause").as_ptr(), cs("yes").as_ptr());
+                (output.mpv.lib.mpv_set_property_string)(
+                    ctx,
+                    cs("pause").as_ptr(),
+                    cs("yes").as_ptr(),
+                );
             }
         }
         if let Some(aid) = self.video_audio_voice(voice_id) {
@@ -2627,8 +3162,15 @@ impl OutputEngine {
     }
 
     pub fn resume_voice(&self, voice_id: VoiceId) -> Result<()> {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
-            for member in members { self.resume_voice_single(member)?; }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
+            for member in members {
+                self.resume_voice_single(member)?;
+            }
             return Ok(());
         }
         self.resume_voice_single(voice_id)
@@ -2637,12 +3179,20 @@ impl OutputEngine {
     fn resume_voice_single(&self, voice_id: VoiceId) -> Result<()> {
         let output = self.pipeline_for_voice(voice_id);
         if let Some(output) = output {
-            let Some(_permit) = output.enter_mpv_call() else { return Ok(()) };
-            let Some(ctx) = slot::slot_for_voice(&output.slot_registry, voice_id)
-                .map(|slot| slot.mpv_ctx.0)
-            else { return Ok(()) };
+            let Some(_permit) = output.enter_mpv_call() else {
+                return Ok(());
+            };
+            let Some(ctx) =
+                slot::slot_for_voice(&output.slot_registry, voice_id).map(|slot| slot.mpv_ctx.0)
+            else {
+                return Ok(());
+            };
             unsafe {
-                (output.mpv.lib.mpv_set_property_string)(ctx, cs("pause").as_ptr(), cs("no").as_ptr());
+                (output.mpv.lib.mpv_set_property_string)(
+                    ctx,
+                    cs("pause").as_ptr(),
+                    cs("no").as_ptr(),
+                );
             }
         }
         if let Some(aid) = self.video_audio_voice(voice_id) {
@@ -2662,8 +3212,15 @@ impl OutputEngine {
 
     /// Seek a voice's video (and re-anchor its paired audio voice).
     pub fn seek_voice_ms(&self, voice_id: VoiceId, position_ms: u64) {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
-            for member in members { self.seek_voice_ms_single(member, position_ms); }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
+            for member in members {
+                self.seek_voice_ms_single(member, position_ms);
+            }
             return;
         }
         self.seek_voice_ms_single(voice_id, position_ms);
@@ -2673,21 +3230,36 @@ impl OutputEngine {
     /// source position using its trim/loop settings once the source duration
     /// is known, including when the request arrives immediately after GO.
     pub fn seek_voice_action_ms(&self, voice_id: VoiceId, position_ms: u64) {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|m| m.get(&voice_id).cloned()) {
-            for member in members { self.seek_voice_action_ms_single(member, position_ms); }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&voice_id).cloned())
+        {
+            for member in members {
+                self.seek_voice_action_ms_single(member, position_ms);
+            }
             return;
         }
         self.seek_voice_action_ms_single(voice_id, position_ms);
     }
 
     fn seek_voice_action_ms_single(&self, voice_id: VoiceId, position_ms: u64) {
-        let Some(output) = self.pipeline_for_voice(voice_id) else { return };
-        let Some(_permit) = output.enter_mpv_call() else { return };
-        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else { return };
+        let Some(output) = self.pipeline_for_voice(voice_id) else {
+            return;
+        };
+        let Some(_permit) = output.enter_mpv_call() else {
+            return;
+        };
+        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else {
+            return;
+        };
         if slot::queue_seek_action_if_loading(&slot, position_ms) {
             return;
         }
-        if let Some(duration_ms) = slot::duration_ms(&slot).or_else(|| slot::loaded_duration_ms(&slot)) {
+        if let Some(duration_ms) =
+            slot::duration_ms(&slot).or_else(|| slot::loaded_duration_ms(&slot))
+        {
             let file_ms = slot::action_seek_file_ms(&slot, position_ms, duration_ms);
             // A seek issued after FILE_LOADED but before the first
             // PLAYBACK_RESTART used to be queued for an event that had
@@ -2704,9 +3276,15 @@ impl OutputEngine {
     }
 
     fn seek_voice_ms_single(&self, voice_id: VoiceId, position_ms: u64) {
-        let Some(output) = self.pipeline_for_voice(voice_id) else { return };
-        let Some(_permit) = output.enter_mpv_call() else { return };
-        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else { return };
+        let Some(output) = self.pipeline_for_voice(voice_id) else {
+            return;
+        };
+        let Some(_permit) = output.enter_mpv_call() else {
+            return;
+        };
+        let Some(slot) = slot::slot_for_voice(&output.slot_registry, voice_id) else {
+            return;
+        };
         if slot::queue_seek_if_loading(&slot, position_ms) {
             // FILE_LOADED will issue the seek after mpv has accepted the new
             // file. The paired audio voice is re-anchored there as well.
@@ -2774,9 +3352,9 @@ impl OutputEngine {
     }
 
     fn is_visible_locked(&self) -> bool {
-        self.active_display_pipelines().into_iter().any(|p| {
-            p.config().enabled && p.visible.load(Ordering::Relaxed)
-        })
+        self.active_display_pipelines()
+            .into_iter()
+            .any(|p| p.config().enabled && p.visible.load(Ordering::Relaxed))
     }
 
     // ── OSD / timer ──────────────────────────────────────────────────────────
@@ -2787,14 +3365,22 @@ impl OutputEngine {
     pub fn set_output_timer(&self, text: Option<&str>) {
         let text = text.unwrap_or("");
         for output in self.active_output_pipelines() {
-            let Some(_permit) = output.enter_mpv_call() else { continue };
+            let Some(_permit) = output.enter_mpv_call() else {
+                continue;
+            };
             // The OSD only renders over a decoded surface (see
             // OVERLAY_HAS_DUMMY), and the overlay is only composited while
             // flagged active.
             if text.is_empty() {
-                output.pipeline.timer_osd_active.store(false, Ordering::Relaxed);
+                output
+                    .pipeline
+                    .timer_osd_active
+                    .store(false, Ordering::Relaxed);
             } else {
-                output.pipeline.timer_osd_active.store(true, Ordering::Relaxed);
+                output
+                    .pipeline
+                    .timer_osd_active
+                    .store(true, Ordering::Relaxed);
                 ensure_overlay_surface(&output.pipeline);
             }
             unsafe {
@@ -2844,7 +3430,17 @@ impl OutputEngine {
             _ => margin.to_string(),
         };
         for output in self.active_output_pipelines() {
-            let Some(_permit) = output.enter_mpv_call() else { continue };
+            let Some(_permit) = output.enter_mpv_call() else {
+                continue;
+            };
+            let effective_margin = match position {
+                TimerPosition::Center => 0,
+                _ => margin,
+            };
+            output
+                .pipeline
+                .osd_margin
+                .store(effective_margin, Ordering::Relaxed);
             unsafe {
                 prop_str(&output.mpv.lib, output.mpv.ctx.0, "osd-font", font);
                 prop_str(
@@ -2855,8 +3451,18 @@ impl OutputEngine {
                 );
                 prop_str(&output.mpv.lib, output.mpv.ctx.0, "osd-align-x", align_x);
                 prop_str(&output.mpv.lib, output.mpv.ctx.0, "osd-align-y", align_y);
-                prop_str(&output.mpv.lib, output.mpv.ctx.0, "osd-margin-x", &margin_str);
-                prop_str(&output.mpv.lib, output.mpv.ctx.0, "osd-margin-y", &margin_str);
+                prop_str(
+                    &output.mpv.lib,
+                    output.mpv.ctx.0,
+                    "osd-margin-x",
+                    &margin_str,
+                );
+                prop_str(
+                    &output.mpv.lib,
+                    output.mpv.ctx.0,
+                    "osd-margin-y",
+                    &margin_str,
+                );
             }
         }
     }
@@ -2940,36 +3546,288 @@ impl OutputEngine {
         output_id: Option<&str>,
         screen_index: Option<u32>,
     ) {
-        let Some((resolved_id, output)) = self.pipeline_for_output(output_id) else {
-            match output_id {
-                Some(id) => log::warn!(
-                    "[output] text overlay ignored: output destination '{id}' is unavailable"
-                ),
-                None => log::warn!("[output] text overlay ignored: {NO_VIDEO_OUTPUT}"),
+        self.show_text_overlay_with_geometry_for_outputs(
+            ass_text,
+            output_id,
+            &[],
+            screen_index,
+            &VideoGeometry::default(),
+            &HashMap::new(),
+        );
+    }
+
+    pub fn show_text_overlay_with_geometry_for_outputs(
+        &self,
+        ass_text: &str,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        screen_index: Option<u32>,
+        geometry: &VideoGeometry,
+        geometry_by_output: &HashMap<String, VideoGeometry>,
+    ) {
+        let targets: Vec<Option<&str>> = if output_ids.is_empty() {
+            vec![output_id]
+        } else {
+            output_ids.iter().map(|id| Some(id.as_str())).collect()
+        };
+        for target in targets {
+            let Some((resolved_id, output)) = self.pipeline_for_output(target) else {
+                if let Some(id) = target {
+                    log::warn!(
+                        "[output] text overlay ignored: output destination '{id}' is unavailable"
+                    );
+                } else {
+                    log::warn!("[output] text overlay ignored: {NO_VIDEO_OUTPUT}");
+                }
+                continue;
+            };
+            let cfg = output.config();
+            let monitor = if target.is_some() {
+                cfg.monitor
+            } else {
+                screen_index.or(cfg.monitor)
+            };
+            let screens = self.list_screens();
+            if !output.position(&screens, monitor, &output_health_key(&resolved_id), true) {
+                log::warn!(
+                    "[output] text overlay skipped: monitor for output '{}' is unavailable",
+                    resolved_id
+                );
+                continue;
             }
-            return;
-        };
-        let cfg = output.config();
-        let monitor = if output_id.is_some() { cfg.monitor } else { screen_index.or(cfg.monitor) };
-        let screens = self.list_screens();
-        if !output.position(&screens, monitor, &output_health_key(&resolved_id), true) {
-            // Keep a missing-monitor output hidden.  In particular, do not
-            // create an OSD surface that could later appear on the primary
-            // display after a monitor hot-plug or window-manager change.
-            log::warn!(
-                "[output] text overlay skipped: monitor for output '{}' is unavailable",
-                resolved_id
+            let Some(_permit) = output.enter_mpv_call() else {
+                continue;
+            };
+            output
+                .pipeline
+                .text_overlay_active
+                .store(true, Ordering::Relaxed);
+            output.render_runtime.set_text_overlay_active(true);
+            ensure_overlay_surface(&output.pipeline);
+            let (implicit_res_x, res_y) = ass_overlay_implicit_reference_size(
+                output.render_runtime.shared.width.load(Ordering::Relaxed),
+                output.render_runtime.shared.height.load(Ordering::Relaxed),
             );
-            return;
+            let resolved_geometry = geometry_for_output(&resolved_id, geometry, geometry_by_output);
+            let res_x = ass_overlay_geometry_res_x(resolved_geometry);
+            let margin = output.pipeline.osd_margin.load(Ordering::Relaxed);
+            let rendered = transform_ass_overlay(
+                ass_text,
+                resolved_geometry,
+                res_x,
+                implicit_res_x,
+                res_y,
+                margin,
+            );
+            unsafe {
+                osd_overlay_set_with_id(
+                    &output.mpv.lib,
+                    output.mpv.ctx.0,
+                    TEXT_OSD_OVERLAY_ID,
+                    &rendered,
+                    res_x,
+                );
+            }
+            fade::set_overlay_alpha(&output.pipeline, 0);
         }
-        let Some(_permit) = output.enter_mpv_call() else {
-            return;
+    }
+
+    pub fn show_timer_overlay_on_outputs(
+        &self,
+        owner: Uuid,
+        ass_text: &str,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        screen_index: Option<u32>,
+    ) {
+        self.show_timer_overlay_with_geometry_for_outputs(
+            owner,
+            ass_text,
+            output_id,
+            output_ids,
+            screen_index,
+            &VideoGeometry::default(),
+            &HashMap::new(),
+        );
+    }
+
+    pub fn show_timer_overlay_with_geometry_for_outputs(
+        &self,
+        owner: Uuid,
+        ass_text: &str,
+        output_id: Option<&str>,
+        output_ids: &[String],
+        screen_index: Option<u32>,
+        geometry: &VideoGeometry,
+        geometry_by_output: &HashMap<String, VideoGeometry>,
+    ) {
+        let mut targets: Vec<Option<&str>> = if output_ids.is_empty() {
+            vec![output_id]
+        } else {
+            output_ids.iter().map(|id| Some(id.as_str())).collect()
         };
-        output.pipeline.text_overlay_active.store(true, Ordering::Relaxed);
-        output.render_runtime.set_text_overlay_active(true);
-        ensure_overlay_surface(&output.pipeline);
-        unsafe { osd_overlay_set(&output.mpv.lib, output.mpv.ctx.0, ass_text); }
-        fade::set_overlay_alpha(&output.pipeline, 0);
+        if targets.is_empty() {
+            targets.push(output_id);
+        }
+        for target in targets {
+            let Some((resolved_id, output)) = self.pipeline_for_output(target) else {
+                continue;
+            };
+            let cfg = output.config();
+            let monitor = if target.is_some() {
+                cfg.monitor
+            } else {
+                screen_index.or(cfg.monitor)
+            };
+            if !output.position(
+                &self.list_screens(),
+                monitor,
+                &output_health_key(&cfg.id),
+                true,
+            ) {
+                continue;
+            }
+            let Some(_permit) = output.enter_mpv_call() else {
+                continue;
+            };
+            if let Ok(mut owners) = output.pipeline.timer_overlay_owners.lock() {
+                owners.insert(owner);
+            }
+            output.render_runtime.set_text_overlay_active(true);
+            ensure_overlay_surface(&output.pipeline);
+            let (implicit_res_x, res_y) = ass_overlay_implicit_reference_size(
+                output.render_runtime.shared.width.load(Ordering::Relaxed),
+                output.render_runtime.shared.height.load(Ordering::Relaxed),
+            );
+            let resolved_geometry = geometry_for_output(&resolved_id, geometry, geometry_by_output);
+            let res_x = ass_overlay_geometry_res_x(resolved_geometry);
+            let margin = output.pipeline.osd_margin.load(Ordering::Relaxed);
+            let rendered = transform_ass_overlay(
+                ass_text,
+                resolved_geometry,
+                res_x,
+                implicit_res_x,
+                res_y,
+                margin,
+            );
+            unsafe {
+                osd_overlay_set_with_id(
+                    &output.mpv.lib,
+                    output.mpv.ctx.0,
+                    timer_overlay_id(owner),
+                    &rendered,
+                    res_x,
+                );
+            }
+            fade::set_overlay_alpha(&output.pipeline, 0);
+        }
+    }
+
+    pub fn clear_timer_overlay_on_outputs(
+        &self,
+        owner: Uuid,
+        _output_id: Option<&str>,
+        _output_ids: &[String],
+    ) {
+        // Resolve by runtime ownership, not by the cue's current routing. The
+        // default output may have changed since GO, and a retired destination
+        // can still be present while its render thread shuts down.
+        for output in self.all_pipelines() {
+            let owns_overlay = match output.pipeline.timer_overlay_owners.lock() {
+                Ok(owners) => owners.contains(&owner),
+                Err(poisoned) => poisoned.into_inner().contains(&owner),
+            };
+            if !owns_overlay {
+                continue;
+            }
+            let permit = output.enter_mpv_call();
+            if let Some(_permit) = permit.as_ref() {
+                unsafe {
+                    osd_overlay_remove_with_id(
+                        &output.mpv.lib,
+                        output.mpv.ctx.0,
+                        timer_overlay_id(owner),
+                    );
+                }
+            } else if !output.mpv_destroyed.load(Ordering::Acquire) {
+                continue;
+            }
+            match output.pipeline.timer_overlay_owners.lock() {
+                Ok(mut owners) => {
+                    owners.remove(&owner);
+                }
+                Err(poisoned) => {
+                    poisoned.into_inner().remove(&owner);
+                }
+            }
+            let timer_active = match output.pipeline.timer_overlay_owners.lock() {
+                Ok(owners) => !owners.is_empty(),
+                Err(poisoned) => !poisoned.into_inner().is_empty(),
+            };
+            let text_active = output.pipeline.text_overlay_active.load(Ordering::Relaxed);
+            output
+                .render_runtime
+                .set_text_overlay_active(timer_active || text_active);
+            output.render_runtime.mark_overlay_dirty();
+            drop(permit);
+            if !timer_active {
+                release_overlay_surface_if_idle(&output.pipeline);
+            }
+            if !output.has_visual_content()
+                && !timer_active
+                && !text_active
+                && !output.pipeline.timer_osd_active.load(Ordering::Relaxed)
+            {
+                fade::set_overlay_alpha(&output.pipeline, 255);
+            }
+        }
+    }
+
+    /// Clear every runtime-owned Timer overlay while preserving Text overlays
+    /// and the underlying visual slots. Used when a workspace is replaced.
+    pub fn clear_all_timer_overlays(&self) {
+        for output in self.all_pipelines() {
+            let has_owners = match output.pipeline.timer_overlay_owners.lock() {
+                Ok(owners) => !owners.is_empty(),
+                Err(poisoned) => !poisoned.into_inner().is_empty(),
+            };
+            if !has_owners {
+                continue;
+            }
+            let permit = output.enter_mpv_call();
+            let timer_active = if let Some(_permit) = permit.as_ref() {
+                remove_timer_overlay_owners(
+                    &output.pipeline,
+                    &output.mpv.lib,
+                    output.mpv.ctx.0,
+                    None,
+                )
+            } else if output.mpv_destroyed.load(Ordering::Acquire) {
+                match output.pipeline.timer_overlay_owners.lock() {
+                    Ok(mut owners) => owners.clear(),
+                    Err(poisoned) => poisoned.into_inner().clear(),
+                }
+                false
+            } else {
+                continue;
+            };
+            let text_active = output.pipeline.text_overlay_active.load(Ordering::Relaxed);
+            output
+                .render_runtime
+                .set_text_overlay_active(timer_active || text_active);
+            output.render_runtime.mark_overlay_dirty();
+            drop(permit);
+            if !timer_active {
+                release_overlay_surface_if_idle(&output.pipeline);
+            }
+            if !output.has_visual_content()
+                && !timer_active
+                && !text_active
+                && !output.pipeline.timer_osd_active.load(Ordering::Relaxed)
+            {
+                fade::set_overlay_alpha(&output.pipeline, 255);
+            }
+        }
     }
 
     /// Clear the text set via [`show_text_overlay`].
@@ -2981,14 +3839,29 @@ impl OutputEngine {
     }
 
     pub fn clear_text_overlay_on_output(&self, output_id: Option<&str>) {
-        let Some((_, output)) = self.pipeline_for_output(output_id) else { return };
-        let Some(_permit) = output.enter_mpv_call() else { return };
-        output.pipeline.text_overlay_active.store(false, Ordering::Relaxed);
-        output.render_runtime.set_text_overlay_active(false);
-        unsafe { osd_overlay_remove(&output.mpv.lib, output.mpv.ctx.0); }
+        let Some((_, output)) = self.pipeline_for_output(output_id) else {
+            return;
+        };
+        let Some(_permit) = output.enter_mpv_call() else {
+            return;
+        };
+        output
+            .pipeline
+            .text_overlay_active
+            .store(false, Ordering::Relaxed);
+        let timer_active = output
+            .pipeline
+            .timer_overlay_owners
+            .lock()
+            .is_ok_and(|owners| !owners.is_empty());
+        output.render_runtime.set_text_overlay_active(timer_active);
+        unsafe {
+            osd_overlay_remove(&output.mpv.lib, output.mpv.ctx.0);
+        }
         release_overlay_surface_if_idle(&output.pipeline);
         output.render_runtime.mark_overlay_dirty();
         if !output.has_visual_content()
+            && !timer_active
             && !output.pipeline.timer_osd_active.load(Ordering::Relaxed)
         {
             fade::set_overlay_alpha(&output.pipeline, 255);
@@ -3036,14 +3909,28 @@ impl OutputEngine {
         let monitor = screen_index.or(cfg.monitor);
         let screens = self.list_screens();
         output.position(&screens, monitor, &output_health_key(&cfg.id), true);
-        let Some(_permit) = output.enter_mpv_call() else { return };
+        let Some(_permit) = output.enter_mpv_call() else {
+            return;
+        };
 
         // The pattern replaces whatever the overlay context held (incl. the
         // transparent OSD dummy) and makes the overlay composite opaque.
-        output.pipeline.test_pattern_active.store(true, Ordering::Relaxed);
-        output.pipeline.text_overlay_active.store(false, Ordering::Relaxed);
-        output.pipeline.timer_osd_active.store(false, Ordering::Relaxed);
-        output.pipeline.overlay_has_dummy.store(false, Ordering::Relaxed);
+        output
+            .pipeline
+            .test_pattern_active
+            .store(true, Ordering::Relaxed);
+        output
+            .pipeline
+            .text_overlay_active
+            .store(false, Ordering::Relaxed);
+        output
+            .pipeline
+            .timer_osd_active
+            .store(false, Ordering::Relaxed);
+        output
+            .pipeline
+            .overlay_has_dummy
+            .store(false, Ordering::Relaxed);
         output.render_runtime.set_text_overlay_active(false);
 
         // Pattern resolution: match the target screen so the grid is 1:1.
@@ -3063,9 +3950,19 @@ impl OutputEngine {
         unsafe {
             // Patterns behave like images: play immediately, no paused-load
             // handshake, and no keep-open (a previous held video may have set it).
-            (output.mpv.lib.mpv_set_property_string)(output.mpv.ctx.0, cs("pause").as_ptr(), cs("no").as_ptr());
-            (output.mpv.lib.mpv_set_property_string)(output.mpv.ctx.0, cs("keep-open").as_ptr(), cs("no").as_ptr());
-            if let Ok(mut p) = output.pipeline.pending_video_start.lock() { *p = None; }
+            (output.mpv.lib.mpv_set_property_string)(
+                output.mpv.ctx.0,
+                cs("pause").as_ptr(),
+                cs("no").as_ptr(),
+            );
+            (output.mpv.lib.mpv_set_property_string)(
+                output.mpv.ctx.0,
+                cs("keep-open").as_ptr(),
+                cs("no").as_ptr(),
+            );
+            if let Ok(mut p) = output.pipeline.pending_video_start.lock() {
+                *p = None;
+            }
 
             let opts = if pattern.is_file() {
                 // A custom image needs image-display-duration to hold on screen.
@@ -3103,14 +4000,21 @@ impl OutputEngine {
 
     /// Clear the test pattern: stop playback and return to opaque black.
     pub fn clear_test_pattern(&self) {
-        let Some(output) = self.default_pipeline() else { return };
-        let Some(_permit) = output.enter_mpv_call() else { return };
+        let Some(output) = self.default_pipeline() else {
+            return;
+        };
+        let Some(_permit) = output.enter_mpv_call() else {
+            return;
+        };
         unsafe {
             let stop = cs("stop");
             let args: [*const c_char; 2] = [stop.as_ptr(), std::ptr::null()];
             (output.mpv.lib.mpv_command)(output.mpv.ctx.0, args.as_ptr());
         }
-        output.pipeline.test_pattern_active.store(false, Ordering::Relaxed);
+        output
+            .pipeline
+            .test_pattern_active
+            .store(false, Ordering::Relaxed);
         // Timer/Text OSD may still be live — give them their surface back.
         if overlay_active(&output.pipeline) {
             ensure_overlay_surface(&output.pipeline);
@@ -3128,7 +4032,9 @@ impl OutputEngine {
     /// the effect of the Preferences selection without waiting for the next
     /// visual cue.  `None` (floating) restores the windowed floating rect.
     pub fn apply_output_screen(&self, screen_index: Option<u32>) {
-        let Some(output) = self.default_pipeline() else { return };
+        let Some(output) = self.default_pipeline() else {
+            return;
+        };
         let cfg = output.config();
         let screens = self.list_screens();
         output.position(&screens, screen_index, &output_health_key(&cfg.id), true);
@@ -3143,7 +4049,9 @@ impl OutputEngine {
     /// to fullscreen-on-primary here would black out the operator's main
     /// display the moment they open a show file without the projector attached.
     pub fn apply_output_screen_on_load(&self, screen_index: Option<u32>) {
-        let Some(output) = self.default_pipeline() else { return };
+        let Some(output) = self.default_pipeline() else {
+            return;
+        };
         let cfg = output.config();
         let screens = self.list_screens();
         output.position(&screens, screen_index, &output_health_key(&cfg.id), true);
@@ -3172,24 +4080,60 @@ impl OutputEngine {
             out.push(match s {
                 OutputStatus::Completed { voice_id } => {
                     if let Some(primary) = self.group_primary_for_voice(voice_id) {
-                        let members = self.voice_groups.lock().ok().and_then(|groups| groups.get(&primary).cloned()).unwrap_or_default();
-                        let complete = self.voice_group_completed.lock().ok().map(|mut done| {
-                            group_completion_ready(done.entry(primary).or_default(), &members, voice_id)
-                        }).unwrap_or(false);
-                        if !complete { continue; }
-                        if !self.voice_group_completion_emitted.lock().ok().map(|mut emitted| emitted.insert(primary)).unwrap_or(false) { continue; }
+                        let members = self
+                            .voice_groups
+                            .lock()
+                            .ok()
+                            .and_then(|groups| groups.get(&primary).cloned())
+                            .unwrap_or_default();
+                        let complete = self
+                            .voice_group_completed
+                            .lock()
+                            .ok()
+                            .map(|mut done| {
+                                group_completion_ready(
+                                    done.entry(primary).or_default(),
+                                    &members,
+                                    voice_id,
+                                )
+                            })
+                            .unwrap_or(false);
+                        if !complete {
+                            continue;
+                        }
+                        if !self
+                            .voice_group_completion_emitted
+                            .lock()
+                            .ok()
+                            .map(|mut emitted| emitted.insert(primary))
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        }
                         OutputStatus::Completed { voice_id: primary }
                     } else {
                         let canonical = self.canonical_voice_id(voice_id);
-                        if !completed_groups.insert(canonical) { continue; }
-                        OutputStatus::Completed { voice_id: canonical }
+                        if !completed_groups.insert(canonical) {
+                            continue;
+                        }
+                        OutputStatus::Completed {
+                            voice_id: canonical,
+                        }
                     }
-                },
-                OutputStatus::Duration { voice_id, duration_ms } => {
+                }
+                OutputStatus::Duration {
+                    voice_id,
+                    duration_ms,
+                } => {
                     let canonical = self.canonical_voice_id(voice_id);
-                    if !duration_groups.insert(canonical) { continue; }
-                    OutputStatus::Duration { voice_id: canonical, duration_ms }
-                },
+                    if !duration_groups.insert(canonical) {
+                        continue;
+                    }
+                    OutputStatus::Duration {
+                        voice_id: canonical,
+                        duration_ms,
+                    }
+                }
                 OutputStatus::Error { voice_id, message } => {
                     let canonical = self.canonical_voice_id(voice_id);
                     // One failed destination makes the fan-out cue unsafe to
@@ -3198,8 +4142,11 @@ impl OutputEngine {
                     if self.group_primary_for_voice(voice_id).is_some() {
                         self.stop_content(canonical, 0, 0);
                     }
-                    OutputStatus::Error { voice_id: canonical, message }
-                },
+                    OutputStatus::Error {
+                        voice_id: canonical,
+                        message,
+                    }
+                }
             });
         }
         out
@@ -3226,7 +4173,9 @@ impl OutputEngine {
     fn position_window(&self, screen_index: Option<u32>) {
         self.apply_output_screen(screen_index);
         use tauri::Emitter;
-        let _ = self.app_handle.emit("output-window-visible", self.is_visible());
+        let _ = self
+            .app_handle
+            .emit("output-window-visible", self.is_visible());
     }
 
     fn active_output_pipelines(&self) -> Vec<Arc<NativeOutputPipeline>> {
@@ -3252,19 +4201,35 @@ impl OutputEngine {
     }
 
     fn release_voice_bookkeeping(&self, voice_id: VoiceId, remove_external: bool) {
-        if let Some(members) = self.voice_groups.lock().ok().and_then(|mut m| m.remove(&voice_id)) {
-            self.voice_group_completed.lock().ok().map(|mut m| { m.remove(&voice_id); });
-            self.voice_group_completion_emitted.lock().ok().map(|mut m| { m.remove(&voice_id); });
-            for member in members { self.release_voice_bookkeeping_single(member, remove_external); }
+        if let Some(members) = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|mut m| m.remove(&voice_id))
+        {
+            self.voice_group_completed.lock().ok().map(|mut m| {
+                m.remove(&voice_id);
+            });
+            self.voice_group_completion_emitted
+                .lock()
+                .ok()
+                .map(|mut m| {
+                    m.remove(&voice_id);
+                });
+            for member in members {
+                self.release_voice_bookkeeping_single(member, remove_external);
+            }
             return;
         }
         self.release_voice_bookkeeping_single(voice_id, remove_external);
     }
 
     fn release_voice_bookkeeping_single(&self, voice_id: VoiceId, remove_external: bool) {
-        if remove_external { if let Some(output) = self.pipeline_for_voice(voice_id) {
-            output.render_runtime.remove_external_source(voice_id);
-        } }
+        if remove_external {
+            if let Some(output) = self.pipeline_for_voice(voice_id) {
+                output.render_runtime.remove_external_source(voice_id);
+            }
+        }
         self.voices.lock().unwrap().remove(&voice_id);
         self.voice_outputs.lock().unwrap().remove(&voice_id);
         self.output_registry.lock().unwrap().release_voice(voice_id);
@@ -3305,11 +4270,23 @@ impl OutputEngine {
     }
 
     fn canonical_voice_id(&self, voice_id: VoiceId) -> VoiceId {
-        self.voice_groups.lock().ok().and_then(|groups| groups.iter().find_map(|(primary, members)| members.contains(&voice_id).then_some(*primary))).unwrap_or(voice_id)
+        self.voice_groups
+            .lock()
+            .ok()
+            .and_then(|groups| {
+                groups
+                    .iter()
+                    .find_map(|(primary, members)| members.contains(&voice_id).then_some(*primary))
+            })
+            .unwrap_or(voice_id)
     }
 
     fn group_primary_for_voice(&self, voice_id: VoiceId) -> Option<VoiceId> {
-        self.voice_groups.lock().ok().and_then(|groups| groups.iter().find_map(|(primary, members)| members.contains(&voice_id).then_some(*primary)))
+        self.voice_groups.lock().ok().and_then(|groups| {
+            groups
+                .iter()
+                .find_map(|(primary, members)| members.contains(&voice_id).then_some(*primary))
+        })
     }
 }
 
@@ -3412,8 +4389,14 @@ fn output_health_key(id: &str) -> String {
     format!("output-screen-{id}")
 }
 
-fn group_completion_ready(done: &mut HashSet<VoiceId>, members: &[VoiceId], voice_id: VoiceId) -> bool {
-    if !members.contains(&voice_id) { return false; }
+fn group_completion_ready(
+    done: &mut HashSet<VoiceId>,
+    members: &[VoiceId],
+    voice_id: VoiceId,
+) -> bool {
+    if !members.contains(&voice_id) {
+        return false;
+    }
     done.insert(voice_id);
     done.len() == members.len()
 }
@@ -3474,7 +4457,6 @@ mod grouped_output_tests {
 
         assert_eq!(keep, HashSet::from([primary, secondary, nested_member]));
     }
-
 }
 
 fn validate_output_destinations(
@@ -3520,15 +4502,18 @@ fn output_graph_is_unchanged(
     if !network_configuration_current {
         return false;
     }
-    let enabled_count = destinations.iter().filter(|destination| destination.enabled).count();
+    let enabled_count = destinations
+        .iter()
+        .filter(|destination| destination.enabled)
+        .count();
     enabled_count == active_configs.len()
         && destinations
             .iter()
             .filter(|destination| destination.enabled)
             .all(|destination| {
-                active_configs
-                    .get(&destination.id)
-                    .is_some_and(|current| current == &OutputPipelineConfig::from_destination(destination))
+                active_configs.get(&destination.id).is_some_and(|current| {
+                    current == &OutputPipelineConfig::from_destination(destination)
+                })
             })
 }
 
@@ -3552,7 +4537,9 @@ fn network_output_config(
             srt: Some(destination.network.srt.clone()),
         },
     };
-    config.validate().map_err(|error| anyhow!("{}: {error}", destination.name))?;
+    config
+        .validate()
+        .map_err(|error| anyhow!("{}: {error}", destination.name))?;
     Ok(Some(config))
 }
 
@@ -3569,24 +4556,16 @@ pub(super) unsafe fn get_prop_i64(lib: &MpvLib, ctx: *mut c_void, name: &str) ->
     (ret == 0).then_some(val)
 }
 
-/// Apply the pixel `video-crop` derived from `geometry` — possible only once
-/// the source dimensions (`video-params/w|h`) are known.  Returns `false`
-/// when they are not yet available (caller keeps the crop pending).
-pub(super) fn try_apply_crop(lib: &MpvLib, ctx: *mut c_void, geometry: &VideoGeometry) -> bool {
-    unsafe {
-        let w = get_prop_i64(lib, ctx, "video-params/w").unwrap_or(0);
-        let h = get_prop_i64(lib, ctx, "video-params/h").unwrap_or(0);
-        if w <= 0 || h <= 0 {
-            return false;
-        }
-        match geometry.crop_rect_px(w as u32, h as u32) {
-            Some((cw, ch, cx, cy)) => {
-                prop_str(lib, ctx, "video-crop", &format!("{cw}x{ch}+{cx}+{cy}"));
-            }
-            None => prop_str(lib, ctx, "video-crop", ""),
-        }
-        true
-    }
+pub(super) unsafe fn get_prop_double(lib: &MpvLib, ctx: *mut c_void, name: &str) -> Option<f64> {
+    let mut value = 0.0;
+    let name = cs(name);
+    let ret = (lib.mpv_get_property)(
+        ctx,
+        name.as_ptr(),
+        MPV_FORMAT_DOUBLE,
+        &mut value as *mut f64 as *mut c_void,
+    );
+    (ret == 0).then_some(value)
 }
 
 /// Push a cue's [`VideoGeometry`] to mpv.
@@ -3598,32 +4577,23 @@ pub(super) fn try_apply_crop(lib: &MpvLib, ctx: *mut c_void, geometry: &VideoGeo
 /// The scalar properties (`keepaspect`, `panscan`, `video-zoom`,
 /// `video-pan-x/y`, `video-rotate`) are global mpv properties that persist
 /// across `loadfile`, so every load — and every live edit — sets **all** of
-/// them (a cue without geometry resets the previous cue's values).  The crop
-/// is pixel-based: applied immediately when the source dimensions are known,
-/// otherwise parked in [`PENDING_CROP`] for the `VIDEO_RECONFIG` handler.
-pub(super) fn apply_geometry_props(pipeline: &PipelineState, lib: &MpvLib, ctx: *mut c_void, geometry: &VideoGeometry) {
+/// them (a cue without geometry resets the previous cue's values). Source
+/// clipping is applied by the final compositor so it cannot change mpv layout.
+pub(super) fn apply_geometry_props(
+    pipeline: &PipelineState,
+    lib: &MpvLib,
+    ctx: *mut c_void,
+    geometry: &VideoGeometry,
+) {
     let Some(_permit) = pipeline.enter_mpv_call() else {
         return;
     };
     // Remember the cue geometry most recently pushed to mpv.
-    if let Ok(mut g) = pipeline.last_cue_geometry.lock() { *g = *geometry; }
+    if let Ok(mut g) = pipeline.last_cue_geometry.lock() {
+        *g = *geometry;
+    }
 
     apply_scalar_geometry(lib, ctx, geometry);
-
-    let pending_crop = if geometry.has_crop() {
-        // Pixel crop needs the source dimensions; park it when unknown.
-        if try_apply_crop(lib, ctx, geometry) {
-            None
-        } else {
-            Some(*geometry)
-        }
-    } else {
-        // No crop on this cue: clear any crop left by the previous cue.
-        // (An empty string needs no dimensions.)
-        unsafe { prop_str(lib, ctx, "video-crop", "") };
-        None
-    };
-    if let Ok(mut p) = pipeline.pending_crop.lock() { *p = pending_crop; }
 }
 
 /// Push a geometry's scalar mpv properties (everything except the pixel
@@ -3636,6 +4606,8 @@ pub(super) fn apply_scalar_geometry(lib: &MpvLib, ctx: *mut c_void, geometry: &V
     let props = compose_display_props(geometry, &OutputTransform::default());
     unsafe {
         let (keepaspect, panscan) = geometry.fit_props();
+        // Clear any per-file/container crop override left in this context.
+        prop_str(lib, ctx, "video-crop", "");
         prop_str(lib, ctx, "keepaspect", keepaspect);
         prop_str(lib, ctx, "panscan", panscan);
         prop_str(lib, ctx, "video-zoom", &format!("{:.6}", props.zoom_log2));
@@ -3658,27 +4630,180 @@ pub(super) unsafe fn prop_str(lib: &MpvLib, ctx: *mut c_void, name: &str, value:
     (lib.mpv_set_property_string)(ctx, n.as_ptr(), v.as_ptr());
 }
 
-/// Show the Text Cue ASS string via mpv's `osd-overlay` command.
-///
-/// `res_y=720` is the ASS script reference height, so `\fs` sizes stay
-/// proportional to the output regardless of its actual resolution.
-pub(super) unsafe fn osd_overlay_set(lib: &MpvLib, ctx: *mut c_void, ass_text: &str) {
+fn timer_overlay_id(owner: Uuid) -> i64 {
+    let id = (owner.as_u128() & 0x3fff_ffff_ffff_ffff) as i64 + 48;
+    if id == TEXT_OSD_OVERLAY_ID {
+        49
+    } else {
+        id
+    }
+}
+
+/// Remove Timer overlays not present in `keep`, and return whether any Timer
+/// overlay remains. The caller must hold the pipeline's mpv-call permit.
+fn remove_timer_overlay_owners(
+    pipeline: &PipelineState,
+    lib: &MpvLib,
+    ctx: *mut c_void,
+    keep: Option<&HashSet<VoiceId>>,
+) -> bool {
+    let removed = pipeline
+        .timer_overlay_owners
+        .lock()
+        .map(|mut owners| take_unkept_timer_overlay_owners(&mut owners, keep))
+        .unwrap_or_else(|poisoned| {
+            let mut owners = poisoned.into_inner();
+            take_unkept_timer_overlay_owners(&mut owners, keep)
+        });
+    for owner in removed {
+        unsafe {
+            osd_overlay_remove_with_id(lib, ctx, timer_overlay_id(owner));
+        }
+    }
+    let timer_active = match pipeline.timer_overlay_owners.lock() {
+        Ok(owners) => !owners.is_empty(),
+        Err(poisoned) => !poisoned.into_inner().is_empty(),
+    };
+    timer_active
+}
+
+fn take_unkept_timer_overlay_owners(
+    owners: &mut HashSet<Uuid>,
+    keep: Option<&HashSet<VoiceId>>,
+) -> Vec<Uuid> {
+    let removed: Vec<_> = owners
+        .iter()
+        .copied()
+        .filter(|owner| keep.map_or(true, |keep| !keep.contains(owner)))
+        .collect();
+    for owner in &removed {
+        owners.remove(owner);
+    }
+    removed
+}
+
+/// Return mpv's implicit PlayResX for the current output. Geometry uses this
+/// only to preserve the physical OSD margin on its fixed authoring canvas.
+fn ass_overlay_implicit_reference_size(width: u32, height: u32) -> (i64, i64) {
+    const PLAY_RES_Y: i64 = 720;
+    let width = width.max(1) as f64;
+    let height = height.max(1) as f64;
+    // mpv's implicit PlayResX uses truncation of PlayResY * aspect.
+    let res_x = (width * PLAY_RES_Y as f64 / height).max(1.0) as i64;
+    (res_x, PLAY_RES_Y)
+}
+
+/// Keep identity overlays on mpv's legacy implicit PlayResX. Geometry uses a
+/// stable 16:9 authoring canvas so resizing an output does not move its anchor.
+fn ass_overlay_geometry_res_x(geometry: &VideoGeometry) -> i64 {
+    if geometry.pan_x == 0.0 && geometry.pan_y == 0.0 && geometry.scale == 1.0 {
+        0
+    } else {
+        1280
+    }
+}
+
+/// Apply the pan/scale subset of VideoGeometry to an ASS overlay. Identity
+/// geometry deliberately returns the exact original string, so Text Cue's
+/// legacy alignment and mpv margins remain unchanged.
+fn transform_ass_overlay(
+    ass_text: &str,
+    geometry: &VideoGeometry,
+    res_x: i64,
+    implicit_res_x: i64,
+    res_y: i64,
+    osd_margin: u32,
+) -> String {
+    if res_x == 0 {
+        return ass_text.to_owned();
+    }
+
+    let scale = geometry.scale.clamp(0.05, 8.0);
+    let width = res_x.max(1) as f64;
+    let height = res_y.max(1) as f64;
+    // mpv scales its legacy horizontal OSD margin in the implicit output
+    // canvas. Convert that same physical margin into our fixed 1280 canvas.
+    let margin_x = (osd_margin as f64 * width / implicit_res_x.max(1) as f64).min(width / 2.0);
+    let margin_y = (osd_margin as f64).min(height / 2.0);
+    let alignment = ass_alignment(ass_text);
+    let row = (alignment - 1) / 3;
+    let column = (alignment - 1) % 3;
+    let anchor_x = match column {
+        0 => margin_x,
+        1 => width / 2.0,
+        _ => width - margin_x,
+    };
+    // ASS alignment rows count from bottom to top.
+    let anchor_y = match row {
+        0 => height - margin_y,
+        1 => height / 2.0,
+        _ => margin_y,
+    };
+    // Keep the legacy anchor fixed while scaling glyphs. Pan is normalized
+    // against the output canvas and remains independent of the scale value.
+    let x = anchor_x + geometry.pan_x * width;
+    let y = anchor_y + geometry.pan_y * height;
+    let tags = format!(
+        "\\fscx{:.3}\\fscy{:.3}\\pos({:.0},{:.0})",
+        scale * 100.0,
+        scale * 100.0,
+        x,
+        y
+    );
+
+    if let Some(close) = ass_text.find('}') {
+        let mut result = String::with_capacity(ass_text.len() + tags.len());
+        result.push_str(&ass_text[..close]);
+        result.push_str(&tags);
+        result.push_str(&ass_text[close..]);
+        result
+    } else {
+        format!("{{{tags}}}{ass_text}")
+    }
+}
+
+fn ass_alignment(ass_text: &str) -> u8 {
+    let bytes = ass_text.as_bytes();
+    bytes
+        .windows(3)
+        .position(|tag| tag[0] == b'\\' && tag[1] == b'a' && tag[2] == b'n')
+        .and_then(|index| bytes.get(index + 3))
+        .and_then(|digit| (*digit as char).to_digit(10))
+        .filter(|alignment| (1..=9).contains(alignment))
+        .map(|alignment| alignment as u8)
+        .unwrap_or(5)
+}
+
+unsafe fn osd_overlay_set_with_id(
+    lib: &MpvLib,
+    ctx: *mut c_void,
+    id_value: i64,
+    ass_text: &str,
+    res_x: i64,
+) {
     let Ok(data_v) = CString::new(ass_text) else {
         log::warn!("[output] osd-overlay text contains an interior NUL — ignored");
         return;
     };
-    let (name, id, format, data_k, res_y) =
-        (cs("name"), cs("id"), cs("format"), cs("data"), cs("res_y"));
+    let (name, id, format, data_k, res_x_key, res_y) = (
+        cs("name"),
+        cs("id"),
+        cs("format"),
+        cs("data"),
+        cs("res_x"),
+        cs("res_y"),
+    );
     let (name_v, format_v) = (cs("osd-overlay"), cs("ass-events"));
 
-    let mut keys: [*const c_char; 5] = [
+    let mut keys: [*const c_char; 6] = [
         name.as_ptr(),
         id.as_ptr(),
         format.as_ptr(),
         data_k.as_ptr(),
+        res_x_key.as_ptr(),
         res_y.as_ptr(),
     ];
-    let mut values: [MpvNode; 5] = [
+    let mut values: [MpvNode; 6] = [
         MpvNode {
             u: MpvNodeUnion {
                 string: name_v.as_ptr(),
@@ -3686,9 +4811,7 @@ pub(super) unsafe fn osd_overlay_set(lib: &MpvLib, ctx: *mut c_void, ass_text: &
             format: MPV_FORMAT_STRING,
         },
         MpvNode {
-            u: MpvNodeUnion {
-                int64: TEXT_OSD_OVERLAY_ID,
-            },
+            u: MpvNodeUnion { int64: id_value },
             format: MPV_FORMAT_INT64,
         },
         MpvNode {
@@ -3704,6 +4827,10 @@ pub(super) unsafe fn osd_overlay_set(lib: &MpvLib, ctx: *mut c_void, ass_text: &
             format: MPV_FORMAT_STRING,
         },
         MpvNode {
+            u: MpvNodeUnion { int64: res_x },
+            format: MPV_FORMAT_INT64,
+        },
+        MpvNode {
             u: MpvNodeUnion { int64: 720 },
             format: MPV_FORMAT_INT64,
         },
@@ -3713,11 +4840,15 @@ pub(super) unsafe fn osd_overlay_set(lib: &MpvLib, ctx: *mut c_void, ass_text: &
 
 /// Remove the Text Cue `osd-overlay` (`format=none`).
 pub(super) unsafe fn osd_overlay_remove(lib: &MpvLib, ctx: *mut c_void) {
-    let (name, id, format) = (cs("name"), cs("id"), cs("format"));
-    let (name_v, format_v) = (cs("osd-overlay"), cs("none"));
+    osd_overlay_remove_with_id(lib, ctx, TEXT_OSD_OVERLAY_ID);
+}
 
-    let mut keys: [*const c_char; 3] = [name.as_ptr(), id.as_ptr(), format.as_ptr()];
-    let mut values: [MpvNode; 3] = [
+unsafe fn osd_overlay_remove_with_id(lib: &MpvLib, ctx: *mut c_void, id_value: i64) {
+    let (name, id, format, data) = (cs("name"), cs("id"), cs("format"), cs("data"));
+    let (name_v, format_v, data_v) = (cs("osd-overlay"), cs("none"), cs(""));
+
+    let mut keys: [*const c_char; 4] = [name.as_ptr(), id.as_ptr(), format.as_ptr(), data.as_ptr()];
+    let mut values: [MpvNode; 4] = [
         MpvNode {
             u: MpvNodeUnion {
                 string: name_v.as_ptr(),
@@ -3725,14 +4856,18 @@ pub(super) unsafe fn osd_overlay_remove(lib: &MpvLib, ctx: *mut c_void) {
             format: MPV_FORMAT_STRING,
         },
         MpvNode {
-            u: MpvNodeUnion {
-                int64: TEXT_OSD_OVERLAY_ID,
-            },
+            u: MpvNodeUnion { int64: id_value },
             format: MPV_FORMAT_INT64,
         },
         MpvNode {
             u: MpvNodeUnion {
                 string: format_v.as_ptr(),
+            },
+            format: MPV_FORMAT_STRING,
+        },
+        MpvNode {
+            u: MpvNodeUnion {
+                string: data_v.as_ptr(),
             },
             format: MPV_FORMAT_STRING,
         },
@@ -3774,14 +4909,168 @@ mod tests {
     use super::*;
 
     #[test]
+    fn media_info_probe_waits_for_display_aspect_after_dimensions_load() {
+        // FILE_LOADED can expose dimensions before VIDEO_RECONFIG publishes
+        // the display aspect. The metadata probe must keep waiting then.
+        assert!(!media_probe_can_return(
+            true,
+            true,
+            Some(1280),
+            Some(720),
+            None,
+        ));
+        assert!(media_probe_can_return(
+            true,
+            true,
+            Some(1280),
+            Some(720),
+            Some(16.0 / 9.0),
+        ));
+    }
+
+    #[test]
+    fn media_info_probe_keeps_missing_aspect_unresolved_until_deadline() {
+        assert!(!media_probe_can_return(
+            true,
+            true,
+            Some(852),
+            Some(480),
+            None,
+        ));
+        assert!(!media_probe_can_return(
+            true,
+            true,
+            Some(852),
+            Some(480),
+            Some(f64::NAN),
+        ));
+        assert!(!media_probe_can_return(
+            true,
+            true,
+            Some(852),
+            Some(480),
+            Some(0.0),
+        ));
+    }
+
+    #[test]
+    fn duration_probe_keeps_its_file_loaded_early_return() {
+        assert!(!media_probe_can_return(false, false, None, None, None));
+        assert!(media_probe_can_return(true, false, None, None, None));
+    }
+
+    #[test]
+    #[ignore = "requires QLISA_PRESENTATION_ASPECT_FIXTURE_DIR and the pinned libmpv runtime"]
+    fn libmpv_probe_waits_for_aspect_on_imported_presentation_media() {
+        let fixture_dir = std::env::var_os("QLISA_PRESENTATION_ASPECT_FIXTURE_DIR")
+            .expect("set QLISA_PRESENTATION_ASPECT_FIXTURE_DIR to the imported media folder");
+        let lib = MpvLib::load().expect("load the pinned libmpv runtime");
+        let fixture_dir = Path::new(&fixture_dir);
+        let fixtures = [
+            ("slide-3-video-0.mp4", 16.0 / 9.0),
+            ("slide-4-video-1.mp4", 16.0 / 9.0),
+            ("slide-7-video-2.mp4", 1.775),
+            ("slide-8-video-3.mp4", 5.0 / 4.0),
+        ];
+
+        for (filename, expected_aspect) in fixtures {
+            let path = fixture_dir.join(filename);
+            for attempt in 0..10 {
+                let probe = OutputEngine::probe_media_info(&lib, &path)
+                    .unwrap_or_else(|| panic!("libmpv did not probe {}", path.display()));
+                let aspect = probe.display_aspect.unwrap_or_else(|| {
+                    panic!(
+                        "libmpv omitted display aspect for {} on attempt {}",
+                        path.display(),
+                        attempt + 1
+                    )
+                });
+                assert!(
+                    (aspect - expected_aspect).abs() < 0.0001,
+                    "unexpected aspect {aspect} for {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn geometry_resolves_by_stable_output_id_with_legacy_fallback() {
         let fallback = VideoGeometry::default();
-        let led = VideoGeometry { fit_mode: FitMode::Fill, ..VideoGeometry::default() };
-        let tv = VideoGeometry { pan_x: 0.25, ..VideoGeometry::default() };
+        let led = VideoGeometry {
+            fit_mode: FitMode::Fill,
+            ..VideoGeometry::default()
+        };
+        let tv = VideoGeometry {
+            pan_x: 0.25,
+            ..VideoGeometry::default()
+        };
         let overrides = HashMap::from([("led".to_string(), led), ("tv".to_string(), tv)]);
         assert_eq!(*geometry_for_output("led", &fallback, &overrides), led);
         assert_eq!(*geometry_for_output("tv", &fallback, &overrides), tv);
-        assert_eq!(*geometry_for_output("ndi-program", &fallback, &overrides), fallback);
+        assert_eq!(
+            *geometry_for_output("ndi-program", &fallback, &overrides),
+            fallback
+        );
+    }
+
+    #[test]
+    fn ass_overlay_geometry_preserves_legacy_text_and_transforms_each_output_independently() {
+        let ass = r#"{\an9\fnArial\fs60\c&H00FFFFFF&}Contest"#;
+        let identity = VideoGeometry::default();
+        assert_eq!(ass_overlay_geometry_res_x(&identity), 0);
+        assert_eq!(transform_ass_overlay(ass, &identity, 0, 1280, 720, 16), ass);
+
+        let landscape = VideoGeometry {
+            pan_x: 0.25,
+            scale: 1.5,
+            ..identity
+        };
+        let portrait = VideoGeometry {
+            pan_y: 0.1,
+            scale: 0.5,
+            ..identity
+        };
+        let landscape_ass = transform_ass_overlay(ass, &landscape, 1280, 1280, 720, 16);
+        let portrait_ass = transform_ass_overlay(ass, &portrait, 1280, 405, 720, 16);
+        assert!(landscape_ass.contains(r#"\fscx150.000\fscy150.000\pos(1584,16)"#));
+        assert!(portrait_ass.contains(r#"\fscx50.000\fscy50.000\pos(1229,88)"#));
+        assert_ne!(landscape_ass, portrait_ass);
+        assert_eq!(ass_overlay_implicit_reference_size(1920, 1080), (1280, 720));
+        assert_eq!(ass_overlay_implicit_reference_size(1919, 1080), (1279, 720));
+        assert_eq!(ass_overlay_implicit_reference_size(720, 1280), (405, 720));
+
+        let top_right = r#"{\an9\fnArial\fs60}Contest"#;
+        let portrait_margin = transform_ass_overlay(
+            top_right,
+            &VideoGeometry {
+                scale: 1.1,
+                ..identity
+            },
+            1280,
+            405,
+            720,
+            20,
+        );
+        assert!(
+            portrait_margin.contains(r#"\fscx110.000\fscy110.000\pos(1217,20)"#),
+            "scale changes glyphs, not the legacy portrait anchor: {portrait_margin}"
+        );
+        let portrait_pan = transform_ass_overlay(
+            top_right,
+            &VideoGeometry {
+                pan_x: 0.01,
+                ..identity
+            },
+            1280,
+            405,
+            720,
+            20,
+        );
+        assert!(
+            portrait_pan.contains(r#"\pos(1230,20)"#),
+            "portrait pan begins at the legacy margin anchor: {portrait_pan}"
+        );
     }
 
     fn screens(n: u32) -> Vec<ScreenInfo> {
@@ -3865,8 +5154,8 @@ mod tests {
 
     #[test]
     fn lifecycle_close_rejects_new_calls_and_waits_for_existing_permits() {
-        use std::sync::Arc;
         use std::sync::mpsc;
+        use std::sync::Arc;
         use std::time::Duration;
 
         let gate = Arc::new(MpvLifecycleGate::default());
@@ -3886,7 +5175,10 @@ mod tests {
         }
         assert!(gate.is_closing(), "closer must publish the closed state");
         assert!(gate.enter().is_none(), "closing rejects a new raw mpv call");
-        assert!(closed_rx.try_recv().is_err(), "existing permit keeps closer waiting");
+        assert!(
+            closed_rx.try_recv().is_err(),
+            "existing permit keeps closer waiting"
+        );
 
         drop(permit);
         closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -4021,5 +5313,24 @@ mod tests {
             detail: None,
         };
         assert!(OutputEngine::browser_monitor_for_output(&[network], Some("ndi")).is_err());
+    }
+
+    #[test]
+    fn timer_overlay_cleanup_keeps_protected_owner_and_removes_the_rest() {
+        let kept = Uuid::new_v4();
+        let stale = Uuid::new_v4();
+        let mut owners = HashSet::from([kept, stale]);
+        let keep = HashSet::from([kept]);
+
+        assert_eq!(
+            take_unkept_timer_overlay_owners(&mut owners, Some(&keep)),
+            vec![stale]
+        );
+        assert_eq!(owners, HashSet::from([kept]));
+        assert_eq!(
+            take_unkept_timer_overlay_owners(&mut owners, None),
+            vec![kept]
+        );
+        assert!(owners.is_empty());
     }
 }

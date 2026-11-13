@@ -66,15 +66,33 @@ function Get-RuntimeManifest {
     $manifestPath = Join-Path $script:Root 'scripts/runtime-manifest.json'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { Fail "Tracked runtime manifest is missing: $manifestPath" }
     $runtime = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    if ($runtime.schemaVersion -ne 1 -or $runtime.components -isnot [array]) { Fail 'scripts/runtime-manifest.json must have schemaVersion=1 and a components array.' }
-    $ffmpeg = @($runtime.components | Where-Object { $_.id -eq 'ffmpeg-gyan-full-9.0.2' })
-    $mpv = @($runtime.components | Where-Object { $_.id -eq 'libmpv' })
-    if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { Fail 'Runtime manifest must contain exactly one pinned FFmpeg and one libmpv record.' }
-    if ([string]$ffmpeg[0].archive.url -notmatch '^https://github\.com/GyanD/codexffmpeg/releases/download/9\.0\.2/ffmpeg-9\.0\.2-full_build\.zip$' -or
-        [string]$ffmpeg[0].archive.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
-        [string]$mpv[0].build.archiveUrl -notmatch '^https://github\.com/shinchiro/mpv-winbuild-cmake/releases/download/' -or
-        [string]$mpv[0].build.archiveSha256 -notmatch '^[a-fA-F0-9]{64}$') { Fail 'Runtime manifest upstream URLs or archive SHA-256 pins are incomplete.' }
-    return [pscustomobject]@{ Ffmpeg = $ffmpeg[0]; Mpv = $mpv[0] }
+    if ($runtime.schemaVersion -ne 1 -or $runtime.approvedKits -isnot [array] -or [string]::IsNullOrWhiteSpace([string]$runtime.recommendedKitId)) {
+        Fail 'scripts/runtime-manifest.json must have schemaVersion=1, recommendedKitId, and approvedKits.'
+    }
+    $recommended = @($runtime.approvedKits | Where-Object { $_.id -eq $runtime.recommendedKitId })
+    if ($recommended.Count -ne 1) { Fail 'Runtime recommendedKitId must match exactly one approved kit.' }
+    $kitIds = @($runtime.approvedKits | ForEach-Object { [string]$_.id })
+    if (@($kitIds | Select-Object -Unique).Count -ne $kitIds.Count) { Fail 'Runtime approved kit IDs must be unique.' }
+    foreach ($kit in @($runtime.approvedKits)) {
+        if ($kit.architecture -ne 'windows-x86_64' -or $kit.components -isnot [array]) { Fail "Runtime kit '$($kit.id)' has unsupported architecture or no components array." }
+        foreach ($componentId in @('ffmpeg', 'libmpv')) {
+            $components = @($kit.components | Where-Object { $_.id -eq $componentId })
+            if ($components.Count -ne 1) { Fail "Runtime kit '$($kit.id)' must have exactly one $componentId component." }
+            $asset = $components[0].asset
+            if ([string]$asset.fileName -notmatch '^[A-Za-z0-9._-]+\.zip$' -or
+                [string]$asset.url -notmatch '^https://github\.com/Ruslan-mad/Qlisa/releases/download/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.zip$' -or
+                [string]$asset.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or [string]$asset.format -ne 'zip') {
+                Fail "Runtime kit '$($kit.id)' $componentId primary URL or SHA-256 pin is invalid."
+            }
+            if ($components[0].runtimeFiles -isnot [array] -or @($components[0].runtimeFiles).Count -eq 0) { Fail "Runtime kit '$($kit.id)' $componentId has no runtime file hashes." }
+            foreach ($file in @($components[0].runtimeFiles)) {
+                if ([string]$file.fileName -notmatch '^[A-Za-z0-9._-]+$' -or [string]$file.sha256 -notmatch '^[a-fA-F0-9]{64}$') {
+                    Fail "Runtime kit '$($kit.id)' $componentId has invalid runtime file hash metadata."
+                }
+            }
+        }
+    }
+    return [pscustomobject]@{ RecommendedKit = $recommended[0]; ApprovedKits = @($runtime.approvedKits) }
 }
 function Assert-BundleConfiguration {
     $windows = Get-Content -Raw (Join-Path $script:Root 'src-tauri/tauri.windows.conf.json') | ConvertFrom-Json

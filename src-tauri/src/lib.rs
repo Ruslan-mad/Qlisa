@@ -10,6 +10,8 @@ pub mod main_window_state;
 pub mod machine_config;
 pub mod media_converter;
 pub mod media_runtime;
+pub mod document_import;
+pub mod presentation_media;
 pub mod preferences;
 pub mod project_open;
 pub mod qlab_import;
@@ -21,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use commands::{
+    document_cmds::import_document,
     cue_cmds::{
         add_cue, add_cue_to_group, add_number_action, add_targeted_cue, bulk_update_cues,
         clear_cue_numbers, control_cue_preview, duplicate_cue, duplicate_cues, get_all_cues, get_cue, get_cues, get_workspace_cue_catalog,
@@ -88,6 +91,7 @@ use commands::{
     },
     transport_cmds::{
         get_browser_surface_state, go, go_cue, hard_stop_all, pause_cue, resume_cue, seek_cue,
+        step_presentation,
         seek_cue_media, set_master_volume, stop_all, stop_cue, stop_cue_explicit,
     },
     undo_cmds::{can_redo, can_undo, copy_cue, copy_cues, paste_cue, redo, undo},
@@ -640,6 +644,7 @@ pub fn run() {
             // Transport
             go,
             go_cue,
+            step_presentation,
             get_browser_surface_state,
             stop_all,
             hard_stop_all,
@@ -681,6 +686,7 @@ pub fn run() {
             ungroup,
             set_group_mode,
             set_playlist_loop,
+            import_document,
             add_cue_to_group,
             remove_cue_from_group,
             move_to_top_level,

@@ -4,15 +4,46 @@ import { fileURLToPath } from "node:url";
 
 function requiredDownloads(manifest) {
   if (manifest?.schemaVersion !== 1) throw new Error("Runtime manifest: expected schemaVersion 1");
-  if (!Array.isArray(manifest.components)) throw new Error("Runtime manifest: components must be an array");
-  const ffmpeg = manifest.components.filter((component) => component?.kind === "static-runtime-build" && typeof component.id === "string" && component.id.startsWith("ffmpeg-"));
-  const mpv = manifest.components.filter((component) => component?.id === "libmpv");
-  if (ffmpeg.length !== 1) throw new Error(`Runtime manifest: expected exactly one FFmpeg static-runtime-build component, found ${ffmpeg.length}`);
-  if (mpv.length !== 1) throw new Error(`Runtime manifest: expected exactly one libmpv component, found ${mpv.length}`);
-  return [
-    ["FFmpeg", ffmpeg[0].archive?.url],
-    ["libmpv", mpv[0].build?.archiveUrl],
-  ];
+  if (typeof manifest.recommendedKitId !== "string" || !manifest.recommendedKitId.trim()) {
+    throw new Error("Runtime manifest: recommendedKitId is required");
+  }
+  if (!Array.isArray(manifest.approvedKits) || manifest.approvedKits.length === 0) {
+    throw new Error("Runtime manifest: approvedKits must be a non-empty array");
+  }
+  const ids = new Set();
+  let recommendedFound = false;
+  const downloads = [];
+  for (const kit of manifest.approvedKits) {
+    if (!kit || typeof kit.id !== "string" || !kit.id.trim() || ids.has(kit.id)) {
+      throw new Error("Runtime manifest: approved kit IDs must be unique non-empty strings");
+    }
+    ids.add(kit.id);
+    if (kit.id === manifest.recommendedKitId) recommendedFound = true;
+    if (kit.architecture !== "windows-x86_64") throw new Error(`Runtime manifest: unsupported architecture for kit ${kit.id}`);
+    if (!Array.isArray(kit.components)) throw new Error(`Runtime manifest: components must be an array for kit ${kit.id}`);
+    for (const id of ["ffmpeg", "libmpv"]) {
+      const components = kit.components.filter((component) => component?.id === id);
+      if (components.length !== 1) throw new Error(`Runtime manifest: expected exactly one ${id} component in kit ${kit.id}, found ${components.length}`);
+      const component = components[0];
+      const asset = component.asset;
+      if (!asset || typeof asset.fileName !== "string" || !asset.fileName.trim() ||
+          typeof asset.sha256 !== "string" || !/^[a-f\d]{64}$/i.test(asset.sha256) ||
+          asset.format !== "zip" || !Array.isArray(component.runtimeFiles) || component.runtimeFiles.length === 0) {
+        throw new Error(`Runtime manifest: invalid ${id} asset or runtime-file metadata in kit ${kit.id}`);
+      }
+      const fileNames = new Set();
+      for (const file of component.runtimeFiles) {
+        if (!file || typeof file.fileName !== "string" || !file.fileName.trim() || fileNames.has(file.fileName) ||
+            typeof file.sha256 !== "string" || !/^[a-f\d]{64}$/i.test(file.sha256)) {
+          throw new Error(`Runtime manifest: invalid ${id} runtime-file hash metadata in kit ${kit.id}`);
+        }
+        fileNames.add(file.fileName);
+      }
+      downloads.push([`${kit.id} ${id === "ffmpeg" ? "FFmpeg" : "libmpv"}`, asset.url, asset.fileName]);
+    }
+  }
+  if (!recommendedFound) throw new Error(`Runtime manifest: recommended kit ${manifest.recommendedKitId} is not approved`);
+  return downloads;
 }
 
 function validateUrl(label, value, allowInsecureLocalhost = false) {
@@ -44,8 +75,10 @@ async function request(url, method, timeoutMs) {
 }
 
 export async function checkRuntimeDownloadUrls(manifest, { fetchRequest = request, timeoutMs = 10_000, allowInsecureLocalhost = false } = {}) {
-  for (const [label, value] of requiredDownloads(manifest)) {
+  for (const [label, value, fileName] of requiredDownloads(manifest)) {
     const url = validateUrl(label, value, allowInsecureLocalhost);
+    const urlFileName = decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "");
+    if (urlFileName !== fileName) throw new Error(`${label}: asset URL filename '${urlFileName}' does not match manifest filename '${fileName}'`);
     try {
       let response = await fetchRequest(url, "HEAD", timeoutMs);
       if (response.status === 405 || response.status === 501) response = await fetchRequest(url, "GET", timeoutMs);

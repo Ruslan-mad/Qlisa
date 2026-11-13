@@ -7,11 +7,12 @@
 
 import type { ImportReport } from "../../lib/types";
 import { useLocale } from "../../i18n";
+import { dialogActionButtonStyle, dialogActionFooterStyle } from "../common/dialogActionStyles";
 
 const overlay: React.CSSProperties = {
   position: "fixed", inset: 0, zIndex: 99999,
   background: "rgba(0,0,0,0.6)", display: "flex",
-  alignItems: "center", justifyContent: "center",
+  alignItems: "center", justifyContent: "center", padding: 16,
 };
 
 const panel: React.CSSProperties = {
@@ -20,7 +21,8 @@ const panel: React.CSSProperties = {
   borderRadius: 10,
   padding: "24px 28px",
   maxWidth: 620,
-  width: "90%",
+  width: "min(620px, calc(100vw - 32px))",
+  boxSizing: "border-box",
   maxHeight: "80vh",
   display: "flex",
   flexDirection: "column",
@@ -123,11 +125,11 @@ export function QlabImportDialog({
           <strong>{t("importUi.collectAndSave")}</strong> {t("importUi.selfContained")}
         </div>
 
+        <div style={dialogActionFooterStyle}>
         <button
           onClick={onClose}
           style={{
-            alignSelf: "flex-end",
-            padding: "6px 18px",
+            ...dialogActionButtonStyle,
             background: "var(--wc-accent)",
             border: "none",
             borderRadius: 5,
@@ -138,6 +140,7 @@ export function QlabImportDialog({
         >
           {t("common.close")}
         </button>
+        </div>
       </div>
     </div>
   );

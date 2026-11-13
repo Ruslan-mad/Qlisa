@@ -12,31 +12,51 @@ async function withServer(handler, run) {
 }
 
 function manifest(url) {
-  return { schemaVersion: 1, components: [
-    { id: "ffmpeg-test", kind: "static-runtime-build", archive: { url } },
-    { id: "libmpv", build: { archiveUrl: url } },
-    { id: "ndi-runtime", kind: "external-user-installed-runtime", sourceUrl: "https://example.test/ndi" },
-  ] };
+  let assetFileName = "runtime-package.zip";
+  try { assetFileName = decodeURIComponent(new URL(url).pathname.split("/").pop()) || assetFileName; } catch { /* URL validation reports malformed URLs. */ }
+  const component = (id, fileName) => ({
+    id,
+    asset: { fileName: assetFileName, url, sha256: "a".repeat(64), format: "zip" },
+    runtimeFiles: [{ fileName, sha256: "b".repeat(64) }],
+  });
+  return { schemaVersion: 1, recommendedKitId: "kit-test", approvedKits: [{
+    id: "kit-test",
+    architecture: "windows-x86_64",
+    components: [component("ffmpeg", "ffmpeg.exe"), component("libmpv", "libmpv-2.dll")],
+  }] };
 }
 
 const okResponse = { status: 200, ok: true };
 
-test("checks the real manifest schema and its exact required component URLs", async () => {
+test("checks the real manifest schema and every approved kit asset URL", async () => {
   const seen = [];
   const manifestPath = fileURLToPath(new URL("./runtime-manifest.json", import.meta.url));
   await checkRuntimeDownloads(manifestPath, { fetchRequest: async (url, method) => { seen.push([url, method]); return okResponse; } });
   const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(manifestPath, "utf8"));
-  assert.deepEqual(seen, [
-    [manifest.components.find((c) => c.kind === "static-runtime-build" && c.id.startsWith("ffmpeg-")).archive.url, "HEAD"],
-    [manifest.components.find((c) => c.id === "libmpv").build.archiveUrl, "HEAD"],
-  ]);
+  const expected = manifest.approvedKits.flatMap((kit) => kit.components.map((component) => [component.asset.url, "HEAD"]));
+  assert.deepEqual(seen, expected);
 });
 
-test("rejects invalid schema and duplicate or missing required components", async () => {
-  await assert.rejects(checkRuntimeDownloadUrls({ components: [] }), /schemaVersion 1/);
+test("rejects invalid schema, unapproved recommendation, duplicate kits or components, and invalid digests", async () => {
+  await assert.rejects(checkRuntimeDownloadUrls({ approvedKits: [] }), /schemaVersion 1/);
   const valid = manifest("https://example.test/archive");
-  await assert.rejects(checkRuntimeDownloadUrls({ ...valid, components: valid.components.filter((c) => c.id !== "libmpv") }), /exactly one libmpv/);
-  await assert.rejects(checkRuntimeDownloadUrls({ ...valid, components: [...valid.components, valid.components[0]] }), /exactly one FFmpeg/);
+  await assert.rejects(checkRuntimeDownloadUrls({ ...valid, recommendedKitId: "unknown" }), /not approved/);
+  await assert.rejects(checkRuntimeDownloadUrls({ ...valid, approvedKits: [...valid.approvedKits, valid.approvedKits[0]] }), /IDs must be unique/);
+  const missingMpv = structuredClone(valid);
+  missingMpv.approvedKits[0].components = missingMpv.approvedKits[0].components.filter((c) => c.id !== "libmpv");
+  await assert.rejects(checkRuntimeDownloadUrls(missingMpv), /exactly one libmpv/);
+  const duplicateFfmpeg = structuredClone(valid);
+  duplicateFfmpeg.approvedKits[0].components.push(duplicateFfmpeg.approvedKits[0].components[0]);
+  await assert.rejects(checkRuntimeDownloadUrls(duplicateFfmpeg), /exactly one ffmpeg/);
+  const invalidDigest = structuredClone(valid);
+  invalidDigest.approvedKits[0].components[0].asset.sha256 = "bad";
+  await assert.rejects(checkRuntimeDownloadUrls(invalidDigest), /invalid ffmpeg asset/);
+  const invalidFileDigest = structuredClone(valid);
+  invalidFileDigest.approvedKits[0].components[1].runtimeFiles[0].sha256 = "bad";
+  await assert.rejects(checkRuntimeDownloadUrls(invalidFileDigest), /invalid libmpv runtime-file hash/);
+  const mismatchedAssetName = structuredClone(valid);
+  mismatchedAssetName.approvedKits[0].components[0].asset.fileName = "other.zip";
+  await assert.rejects(checkRuntimeDownloadUrls(mismatchedAssetName), /filename.*does not match/);
 });
 
 test("accepts successful responses and follows redirects", async () => {
@@ -74,6 +94,6 @@ test("times out and rejects malformed or non-HTTPS URLs", async () => {
     await assert.rejects(checkRuntimeDownloadUrls(manifest(url)), /FFmpeg: (malformed|expected an HTTPS)/);
   }
   const missingUrl = manifest("https://example.test/archive");
-  delete missingUrl.components[0].archive.url;
+  delete missingUrl.approvedKits[0].components[0].asset.url;
   await assert.rejects(checkRuntimeDownloadUrls(missingUrl), /FFmpeg: missing download URL/);
 });

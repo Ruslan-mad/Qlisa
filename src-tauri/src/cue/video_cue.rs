@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
+use crate::cue::gain_envelope::GainEnvelope;
 
 use crate::engine::output_engine::{ContentRequest, LayerStyle, SurfaceId, VideoGeometry, VoiceId};
 use crate::engine::ring_command::FadeCurve as EngineFadeCurve;
@@ -26,7 +27,7 @@ use super::{
     },
     types::{
         combine_fade_specs, db_to_linear, eof_fade_remaining_ms, ContinueMode, CueColor, CueId,
-        CueState, CueType, FadeCurve, FadeSpec,
+        CueState, CueType, FadeCurve, FadeSpec, PresentationVideoLayout, PresentationVideoMode,
     },
 };
 
@@ -60,6 +61,8 @@ pub struct VideoCue {
     pub file_path: Option<PathBuf>,
     /// Playback volume in dB (−60 to +12).
     pub volume_db: f64,
+    /// Optional source-file gain automation for the paired audio voice.
+    pub gain_envelope: Option<GainEnvelope>,
     pub muted: bool,
     /// Audio fade-in applied to the decoded audio voice.
     pub fade_in: Option<FadeSpec>,
@@ -91,11 +94,22 @@ pub struct VideoCue {
     pub geometry_by_output: HashMap<String, VideoGeometry>,
     /// Compositing (stacking layer, base opacity, blend mode).
     pub layer_style: LayerStyle,
+    /// True only for Video Cues created from a presentation import.
+    pub presentation_video_imported: bool,
+    /// Original shape metadata for a video imported from a presentation.
+    pub presentation_video_layout: Option<PresentationVideoLayout>,
+    /// Placement selected for an imported presentation video.
+    pub presentation_video_mode: PresentationVideoMode,
+    /// Whether the imported shape uses a supported, exact slide rectangle.
+    pub presentation_video_layout_supported: bool,
+    /// Why exact slide placement is unavailable, when applicable.
+    pub presentation_video_layout_error: Option<String>,
     /// QLab-style slices (markers + per-segment play counts).  Empty = plain
     /// playback.  When present, `loop_count` is ignored.
     pub slices: crate::cue::types::SliceList,
 
     is_disabled: bool,
+    background_screensaver: bool,
 
     // --- Runtime ---
     /// The video voice ID currently in use, if any.
@@ -146,6 +160,26 @@ pub struct VideoCue {
 }
 
 impl VideoCue {
+    fn validate_presentation_video_mode(&self) -> Result<()> {
+        if !self.presentation_video_imported
+            || self.presentation_video_mode != PresentationVideoMode::AsSlide
+        {
+            return Ok(());
+        }
+        let valid_layout = self.presentation_video_layout.is_some_and(|layout| {
+            self.presentation_video_layout_supported && layout.supports_exact_as_slide()
+        });
+        if valid_layout {
+            return Ok(());
+        }
+        let reason = self.presentation_video_layout_error.as_deref()
+            .unwrap_or("Исходное размещение не поддерживается");
+        Err(anyhow!(
+            "Video Cue '{}': режим «Как на слайде» недоступен: {reason}. Выберите «На весь экран».",
+            self.name
+        ))
+    }
+
     fn load_legacy_audio(&mut self, path: &Path) -> Result<bool> {
         let Some((samples, channels, sample_rate)) = crate::cue::media_decode::decode_audio_track_legacy(path)? else {
             if let Some(stream) = self.stream_source.take() {
@@ -175,6 +209,7 @@ impl VideoCue {
             continue_mode: ContinueMode::DoNotContinue,
             file_path: None,
             volume_db: 0.0,
+            gain_envelope: None,
             muted: false,
             fade_in: None,
             fade_out: None,
@@ -191,8 +226,14 @@ impl VideoCue {
             geometry: VideoGeometry::default(),
             geometry_by_output: HashMap::new(),
             layer_style: LayerStyle { black_bars: true, ..LayerStyle::default() },
+            presentation_video_imported: false,
+            presentation_video_layout: None,
+            presentation_video_mode: PresentationVideoMode::Fullscreen,
+            presentation_video_layout_supported: false,
+            presentation_video_layout_error: None,
             slices: crate::cue::types::SliceList::default(),
             is_disabled: false,
+            background_screensaver: false,
             active_voice_id: None,
             decoded_samples: None,
             stream_path: None,
@@ -333,6 +374,12 @@ impl VideoCue {
         } else {
             return Ok(None);
         };
+        if let Some(envelope) = &self.gain_envelope {
+            // SAFETY: this voice has not been submitted to the audio engine.
+            unsafe {
+                voice.set_initial_gain_envelope(envelope.to_rt().map_err(|error| anyhow!(error))?);
+            }
+        }
         voice.inner.set_muted(self.muted);
         if self.loop_count > 0 || !self.slices.is_empty() {
             if let Some(stream) = &voice.stream {
@@ -490,6 +537,7 @@ impl VideoCue {
     }
 
     fn start_video_action(&mut self, context: &CueContext) -> Result<()> {
+        self.validate_presentation_video_mode()?;
         // GO marks the cue Running before this action starts. Detect its old
         // retained EOF layer from the engine state, so a retrigger after
         // pre-wait also releases exactly this cue's previous picture.
@@ -550,6 +598,14 @@ impl VideoCue {
             display_duration_ms: None,
             hold_last_frame: self.hold_last_frame,
             geometry: self.geometry,
+            presentation_video_layout: if self.presentation_video_imported
+                && self.presentation_video_mode == PresentationVideoMode::AsSlide
+                && self.presentation_video_layout_supported
+            {
+                self.presentation_video_layout
+            } else {
+                None
+            },
             live_source: false,
             layer_style: self.layer_style,
             slices,
@@ -621,7 +677,11 @@ impl VideoCue {
         initial_frame: u64,
         gain: f32,
     ) -> Result<Voice> {
-        let stream_result = match self.stream_source.clone().filter(|stream| {
+        // The preloaded decoder belongs to exactly one Voice. Reusing it on
+        // a fast replay lets the previous Voice's fade/stop and the new
+        // Voice's pause/resume mutate the same stream state concurrently.
+        // Consume the preload once; later GO calls start an independent source.
+        let stream_result = match self.stream_source.take().filter(|stream| {
             !stream.is_cancelled() && (!stream.is_eof() || stream.buffered_samples() > 0 || self.loop_count > 0)
         }) {
             Some(stream) => {
@@ -629,7 +689,6 @@ impl VideoCue {
             }
             None => crate::cue::media_decode::StreamingAudioSource::start_at(path, info, initial_frame),
         }?;
-        self.stream_source = Some(Arc::clone(&stream_result));
         Ok(Voice::new_stream(stream_result, gain, 0.0))
     }
 
@@ -685,6 +744,12 @@ impl Cue for VideoCue {
     }
     fn set_disabled(&mut self, d: bool) {
         self.is_disabled = d;
+    }
+    fn background_screensaver(&self) -> bool {
+        self.background_screensaver
+    }
+    fn set_background_screensaver(&mut self, enabled: bool) {
+        self.background_screensaver = enabled;
     }
     fn state(&self) -> CueState {
         self.state
@@ -758,6 +823,7 @@ impl Cue for VideoCue {
     }
 
     fn go(&mut self, context: &CueContext) -> Result<()> {
+        self.validate_presentation_video_mode()?;
         if self.state == CueState::Running {
             return Ok(()); // Ignore duplicate GO.
         }
@@ -801,6 +867,7 @@ impl Cue for VideoCue {
     }
 
     fn preload(&mut self, context: &CueContext) -> Result<()> {
+        self.validate_presentation_video_mode()?;
         if self.state == CueState::Running || self.preloaded {
             return Ok(());
         }
@@ -1231,6 +1298,7 @@ impl Cue for VideoCue {
             muted: self.muted,
             pan: 0.0,
             level_matrix: self.level_matrix.clone(),
+            gain_envelope: self.gain_envelope.clone(),
         })
     }
 
@@ -1241,6 +1309,9 @@ impl Cue for VideoCue {
         if let Some(muted) = patch.muted { self.muted = muted; }
         if let Some(level_matrix) = patch.level_matrix {
             self.level_matrix = level_matrix;
+        }
+        if let Some(gain_envelope) = patch.gain_envelope {
+            self.gain_envelope = gain_envelope;
         }
     }
 
@@ -1285,7 +1356,7 @@ impl Cue for VideoCue {
     // -----------------------------------------------------------------------
 
     fn serialize(&self) -> Value {
-        json!({
+        let mut value = json!({
             "type": "video",
             "cue_type": "video",
             "id": self.id,
@@ -1298,6 +1369,7 @@ impl Cue for VideoCue {
             "continue_mode": self.continue_mode,
             "file_path": self.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             "volume_db": self.volume_db,
+            "gain_envelope": self.gain_envelope,
             "muted": self.muted,
             "fade_in_ms": self.fade_in.as_ref().map(|f| f.duration_ms),
             "fade_in_curve": self.fade_in.as_ref().map(|f| f.curve),
@@ -1321,8 +1393,18 @@ impl Cue for VideoCue {
             "slices": self.slices,
             "level_matrix": self.level_matrix,
             "is_disabled": self.is_disabled,
+            "background_screensaver": self.background_screensaver,
             "cached_duration_ms": self.cached_duration.map(|d| d.as_millis() as u64),
-        })
+        });
+        if self.presentation_video_imported {
+            let object = value.as_object_mut().expect("cue serialization is an object");
+            object.insert("presentation_video_imported".into(), json!(true));
+            object.insert("presentation_video_layout".into(), json!(self.presentation_video_layout));
+            object.insert("presentation_video_layout_supported".into(), json!(self.presentation_video_layout_supported));
+            object.insert("presentation_video_layout_error".into(), json!(self.presentation_video_layout_error));
+            object.insert("presentation_video_mode".into(), json!(self.presentation_video_mode));
+        }
+        value
     }
 }
 
@@ -1374,6 +1456,14 @@ impl CueFactory for VideoCueFactory {
         }
         if let Some(db) = value.get("volume_db").and_then(|v| v.as_f64()) {
             cue.volume_db = db;
+        }
+        if let Some(raw) = value.get("gain_envelope") {
+            if !raw.is_null() {
+                let envelope = serde_json::from_value::<GainEnvelope>(raw.clone())
+                    .map_err(|error| anyhow!("Invalid gain_envelope: {error}"))?;
+                envelope.validate().map_err(|error| anyhow!("Invalid gain_envelope: {error}"))?;
+                cue.gain_envelope = (!envelope.points.is_empty()).then_some(envelope);
+            }
         }
         cue.muted = value.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
         if let Some(ms) = value.get("fade_in_ms").and_then(|v| v.as_u64()) {
@@ -1452,6 +1542,42 @@ impl CueFactory for VideoCueFactory {
                 cue.geometry_by_output = overrides;
             }
         }
+        cue.presentation_video_imported = value.get("presentation_video_imported").and_then(Value::as_bool).unwrap_or(false);
+        if cue.presentation_video_imported {
+        cue.presentation_video_layout_supported = value.get("presentation_video_layout_supported").and_then(Value::as_bool).unwrap_or(false);
+        cue.presentation_video_layout_error = value.get("presentation_video_layout_error").and_then(Value::as_str).map(str::to_owned);
+        if let Some(layout) = value.get("presentation_video_layout") {
+            if !layout.is_null() {
+                match serde_json::from_value(layout.clone()) {
+                    Ok(layout) => cue.presentation_video_layout = Some(layout),
+                    Err(error) => {
+                        cue.presentation_video_layout_supported = false;
+                        cue.presentation_video_layout_error.get_or_insert_with(|| {
+                            format!("Некорректные данные размещения видео: {error}")
+                        });
+                    }
+                }
+            }
+        }
+        cue.presentation_video_layout_supported = cue.presentation_video_layout_supported
+            && cue.presentation_video_layout.is_some_and(|layout| layout.supports_exact_as_slide());
+        if value.get("presentation_video_layout_supported").and_then(Value::as_bool) == Some(true)
+            && !cue.presentation_video_layout_supported
+        {
+            cue.presentation_video_layout_error.get_or_insert_with(|| "Исходное размещение не является поддерживаемой прямоугольной областью слайда".into());
+        }
+        if let Some(mode) = value.get("presentation_video_mode") {
+            cue.presentation_video_mode = serde_json::from_value(mode.clone())
+                .map_err(|error| anyhow!("Invalid presentation_video_mode: {error}"))?;
+        }
+        if cue.presentation_video_mode == crate::cue::types::PresentationVideoMode::AsSlide
+            && !cue.presentation_video_layout_supported
+        {
+            cue.presentation_video_layout_error.get_or_insert_with(|| {
+                "Исходное размещение не является поддерживаемой прямоугольной областью слайда".into()
+            });
+        }
+        }
         if let Some(ls) = value.get("layer_style") {
             if let Ok(mut style) = serde_json::from_value::<LayerStyle>(ls.clone()) {
                 style.black_bars = ls.get("black_bars").and_then(Value::as_bool).unwrap_or(true);
@@ -1474,6 +1600,7 @@ impl CueFactory for VideoCueFactory {
         if let Some(b) = value.get("is_disabled").and_then(|v| v.as_bool()) {
             cue.is_disabled = b;
         }
+        cue.background_screensaver = value.get("background_screensaver").and_then(Value::as_bool).unwrap_or(false);
         if let Some(ms) = value.get("cached_duration_ms").and_then(|v| v.as_u64()) {
             cue.cached_duration = Some(Duration::from_millis(ms));
         }
@@ -1489,8 +1616,124 @@ impl CueFactory for VideoCueFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cue::context::CueContext;
+    use crate::engine::{dmx_engine::DmxEngine, engine_traits::OutputEngineApi, output_engine::ContentRequest};
     use crate::cue::group_cue::GroupCue;
     use crate::engine::output_engine::FitMode;
+    use crossbeam_channel::unbounded;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingOutput(AtomicUsize);
+
+    impl OutputEngineApi for CountingOutput {
+        fn show_content(&self, _request: ContentRequest<'_>) -> Result<VoiceId> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("Unexpected output start"))
+        }
+        fn stop_content(&self, _voice_id: VoiceId, _visual_fade_ms: u32, _audio_fade_ms: u32) {}
+        fn hard_stop_current(&self) {}
+        fn panic_stop(&self) {}
+        fn video_audio_voice(&self, _voice_id: VoiceId) -> Option<VoiceId> { None }
+        fn resync_audio_to_video(&self, _voice_id: VoiceId) {}
+        fn get_voice_opacity(&self, _voice_id: VoiceId) -> f32 { 1.0 }
+        fn set_voice_opacity(&self, _voice_id: VoiceId, _opacity: f32) {}
+        fn stop_voice(&self, _voice_id: VoiceId, _fade_ms: u32) -> Result<()> { Ok(()) }
+        fn pause_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
+        fn resume_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
+        fn seek_voice_ms(&self, _voice_id: VoiceId, _position_ms: u64) {}
+        fn show_text_overlay(&self, _text: &str, _screen_index: Option<u32>) {}
+        fn clear_text_overlay(&self) {}
+        fn begin_eof_fade_out(&self, _voice_id: VoiceId, _fade_ms: u32) -> bool { false }
+        fn devamp_voice(&self, _voice_id: VoiceId, _stop_at_end: bool) {}
+        fn start_preloaded(&self, _voice_id: VoiceId) -> bool { false }
+    }
+
+    fn context(output: Arc<CountingOutput>) -> CueContext {
+        let (events, _receiver) = unbounded();
+        CueContext::new(
+            crate::engine::audio_engine::AudioEngine::new_silent(&crate::preferences::MachineAudioConfig::default()),
+            output,
+            events,
+            0,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Arc::new(DmxEngine::new()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            256,
+        )
+    }
+
+    #[test]
+    fn presentation_video_fields_are_only_serialized_for_imported_rows() {
+        let ordinary = VideoCue::new().serialize();
+        assert!(ordinary.get("presentation_video_imported").is_none());
+        assert!(ordinary.get("presentation_video_mode").is_none());
+
+        let mut imported = VideoCue::new();
+        imported.presentation_video_imported = true;
+        imported.presentation_video_layout_error = Some("unsupported shape".into());
+        let serialized = imported.serialize();
+        assert_eq!(serialized["presentation_video_imported"], true);
+        assert_eq!(serialized["presentation_video_layout_supported"], false);
+        assert_eq!(serialized["presentation_video_layout_error"], "unsupported shape");
+        assert!(serialized["presentation_video_layout"].is_null());
+    }
+
+    #[test]
+    fn malformed_as_slide_mode_is_preserved_and_blocks_go_and_load_output() {
+        let serialized = serde_json::json!({
+            "type": "video",
+            "file_path": "not-opened.mp4",
+            "presentation_video_imported": true,
+            "presentation_video_mode": "as_slide",
+            "presentation_video_layout_supported": true,
+            "presentation_video_layout": {
+                "slide_width": 16,
+                "slide_height": 9,
+                "x": 0.8,
+                "y": 0.0,
+                "width": 0.3,
+                "height": 1.0,
+                "rotation": 0,
+                "crop_left": 0.0,
+                "crop_top": 0.0,
+                "crop_right": 0.0,
+                "crop_bottom": 0.0
+            }
+        });
+        let loaded = VideoCueFactory.from_json(serialized.clone()).expect("unsupported placement should not discard its cue");
+        let saved = loaded.serialize();
+        assert_eq!(saved["type"], "video");
+        assert_eq!(saved["presentation_video_mode"], "as_slide");
+        assert_eq!(saved["presentation_video_layout_supported"], false);
+        assert!(saved["presentation_video_layout_error"].is_string());
+
+        let mut malformed_layout = serialized;
+        malformed_layout["presentation_video_layout"]["width"] = json!("not-a-number");
+        let loaded = VideoCueFactory.from_json(malformed_layout)
+            .expect("malformed layout metadata must leave the Video Cue available");
+        assert_eq!(loaded.serialize()["presentation_video_mode"], "as_slide");
+        assert_eq!(loaded.serialize()["presentation_video_layout_supported"], false);
+
+        let mut cue = VideoCue::new();
+        cue.file_path = Some(PathBuf::from("not-opened.mp4"));
+        cue.presentation_video_imported = true;
+        cue.presentation_video_mode = PresentationVideoMode::AsSlide;
+        cue.presentation_video_layout_supported = false;
+        cue.presentation_video_layout_error = Some("Рамка меняет пропорции видео".into());
+        let output = Arc::new(CountingOutput(AtomicUsize::new(0)));
+        let context = context(Arc::clone(&output));
+
+        let go_error = cue.go(&context).expect_err("invalid as-slide mode must refuse GO");
+        assert!(go_error.to_string().contains("Рамка меняет пропорции видео"));
+        assert!(cue.preload(&context).is_err(), "Load Cue must refuse invalid placement");
+        assert_eq!(output.0.load(Ordering::SeqCst), 0, "invalid placement must fail before show_content");
+        assert_eq!(cue.state(), CueState::Standby, "refused playback must preserve the cue in Standby");
+    }
 
     #[test]
     fn natural_completion_retains_held_handle_but_explicit_reset_clears_it() {
@@ -1555,12 +1798,79 @@ mod tests {
     }
 
     #[test]
+    fn video_audio_gain_envelope_roundtrips_and_legacy_video_is_unity() {
+        let cue = VideoCueFactory.from_json(serde_json::json!({
+            "type": "video",
+            "gain_envelope": [
+                { "time_ms": 0, "gain": 0.0 },
+                { "time_ms": 900, "gain": 2.0 }
+            ]
+        })).unwrap();
+        assert_eq!(cue.serialize()["gain_envelope"], serde_json::json!([
+            { "time_ms": 0, "gain": 0.0 },
+            { "time_ms": 900, "gain": 2.0 }
+        ]));
+        let legacy = VideoCueFactory.from_json(serde_json::json!({ "type": "video" })).unwrap();
+        assert!(legacy.serialize()["gain_envelope"].is_null());
+        assert_eq!(crate::cue::gain_envelope::GainEnvelopeRt::default().gain_at_ms(500.0), 1.0);
+    }
+
+    #[test]
+    fn rejects_invalid_nonempty_gain_envelopes() {
+        for invalid in [
+            serde_json::json!({"gain": 0.5}),
+            serde_json::json!([
+                { "time_ms": 100, "gain": 0.5 },
+                { "time_ms": 100, "gain": 0.25 }
+            ]),
+            serde_json::Value::Array((0..129).map(|i| serde_json::json!({ "time_ms": i, "gain": 0.5 })).collect()),
+            serde_json::json!([{ "time_ms": 0, "gain": 2.5 }]),
+        ] {
+            let error = VideoCueFactory.from_json(serde_json::json!({
+                "type": "video",
+                "gain_envelope": invalid
+            })).err().expect("invalid envelope must be rejected");
+            assert!(error.to_string().contains("gain_envelope"), "{error}");
+        }
+    }
+
+    #[test]
     fn from_json_without_geometry_uses_defaults() {
         let json = serde_json::json!({ "type": "video", "name": "Legacy" });
         let cue = VideoCueFactory.from_json(json).expect("legacy load");
         assert!(cue.visual_geometry().unwrap().is_default());
         let json = cue.serialize();
         assert_eq!(json["hold_last_frame"], false);
+    }
+
+    #[test]
+    fn repeated_video_go_uses_independent_audio_streams() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tiny_slice.mp3");
+        let info = crate::cue::media_decode::probe_audio_track(&path)
+            .expect("probe video audio fixture")
+            .expect("fixture has an audio track");
+        let mut cue = VideoCue::new();
+        cue.stream_path = Some(path.clone());
+        cue.decoded_channels = info.channels;
+        cue.decoded_sample_rate = info.sample_rate;
+        cue.start_stream_source(path.clone(), info)
+            .expect("preload video audio source");
+
+        let first = cue.start_stream_voice(path.clone(), info, 0, 1.0)
+            .expect("first video playback voice");
+        let first_source = first.stream.as_ref().expect("first voice streams").clone();
+        assert!(cue.stream_source.is_none(), "GO must consume the one-shot preload");
+
+        let second = cue.start_stream_voice(path, info, 0, 1.0)
+            .expect("replayed video playback voice");
+        let second_source = second.stream.as_ref().expect("second voice streams").clone();
+        assert_ne!(first_source.id(), second_source.id());
+
+        first_source.cancel();
+        assert!(first_source.is_cancelled());
+        assert!(!second_source.is_cancelled(), "stopping the old voice must not cancel its replacement");
+        second_source.cancel();
     }
 
     #[test]

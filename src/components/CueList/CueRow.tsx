@@ -869,7 +869,7 @@ function CueRowImpl({
         const target = e.target;
         if (target instanceof Element && target.closest("input, textarea, button, [contenteditable='true'], [role='textbox']")) return;
         if (editingCell !== null) return;
-        if (cue.cue_type === "group" || cue.cue_type === "number") {
+        if (cue.cue_type === "group" || cue.cue_type === "number" || cue.cue_type === "presentation") {
           onToggleExpand?.(cue.id);
           return;
         }

@@ -25,11 +25,11 @@
 //! | `inkue-output-render`    | glutin context + mpv RenderContext + render loop |
 //! | `inkue-output-mpv-events`| mpv_wait_event (PLAYBACK_RESTART, EOF, …) |
 
-use std::ffi::{CStr, CString, c_void};
-use std::num::NonZeroU32;
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::ffi::{c_void, CStr, CString};
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -57,18 +57,18 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 #[cfg(not(target_os = "macos"))]
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
-use crate::engine::mpv_sys::{
-    MpvLib, MpvOpenglFbo, MpvOpenglInitParams, MpvRenderParam,
-    MPV_RENDER_PARAM_API_TYPE, MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
-    MPV_RENDER_PARAM_FLIP_Y, MPV_RENDER_PARAM_OPENGL_FBO,
-    MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, MPV_RENDER_UPDATE_FRAME,
-};
-use super::types::{LayerStyle, MpvCtx, VideoGeometry};
 use super::fade;
 use super::slot;
+use super::types::{LayerStyle, MpvCtx, VideoGeometry};
 use super::PipelineState;
-use crate::engine::network_io::{BgraFrame, BgraFrameMailbox, NetworkFrameSink};
 use super::VoiceId;
+use crate::cue::types::PresentationVideoLayout;
+use crate::engine::mpv_sys::{
+    MpvLib, MpvOpenglFbo, MpvOpenglInitParams, MpvRenderParam, MPV_RENDER_PARAM_API_TYPE,
+    MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, MPV_RENDER_PARAM_FLIP_Y, MPV_RENDER_PARAM_OPENGL_FBO,
+    MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, MPV_RENDER_UPDATE_FRAME,
+};
+use crate::engine::network_io::{BgraFrame, BgraFrameMailbox, NetworkFrameSink};
 use crate::preferences::FloatingWindowGeometry;
 
 // ---------------------------------------------------------------------------
@@ -124,7 +124,9 @@ impl MonitorFrameMailbox {
         }
         if let Ok(mut latest) = self.latest.try_lock() {
             if self.session.load(Ordering::Acquire) == session
-                && latest.as_ref().map_or(true, |(current, _, _, _)| capture_sequence_is_newer(sequence, *current))
+                && latest.as_ref().map_or(true, |(current, _, _, _)| {
+                    capture_sequence_is_newer(sequence, *current)
+                })
             {
                 *latest = Some((sequence, session, captured_at_us, Arc::new(frame)));
                 self.published_sequence.store(sequence, Ordering::Release);
@@ -137,20 +139,41 @@ impl MonitorFrameMailbox {
         }
     }
 
-    fn read_after(&self, sequence: u64, session: u64) -> Option<(u64, u64, u64, Option<Arc<BgraFrame>>)> {
-        if self.session.load(Ordering::Acquire) != session { return None; }
+    fn read_after(
+        &self,
+        sequence: u64,
+        session: u64,
+    ) -> Option<(u64, u64, u64, Option<Arc<BgraFrame>>)> {
+        if self.session.load(Ordering::Acquire) != session {
+            return None;
+        }
         let latest = self.latest.lock().ok()?;
         let (current, current_session, captured_at_us, frame) = latest.as_ref()?;
-        (*current_session == session).then(|| (*current, session, *captured_at_us,
-            capture_sequence_is_newer(*current, sequence).then(|| Arc::clone(frame))))
+        (*current_session == session).then(|| {
+            (
+                *current,
+                session,
+                *captured_at_us,
+                capture_sequence_is_newer(*current, sequence).then(|| Arc::clone(frame)),
+            )
+        })
     }
 
     fn select_session(&self, session: u64) -> bool {
         let mut current = self.session.load(Ordering::Acquire);
         loop {
-            if session < current { return false; }
-            if session == current { return true; }
-            match self.session.compare_exchange_weak(current, session, Ordering::AcqRel, Ordering::Acquire) {
+            if session < current {
+                return false;
+            }
+            if session == current {
+                return true;
+            }
+            match self.session.compare_exchange_weak(
+                current,
+                session,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => break,
                 Err(actual) => current = actual,
             }
@@ -172,10 +195,28 @@ impl MonitorFrameMailbox {
     }
 }
 
-struct ExternalSource { mailbox: Arc<BgraFrameMailbox>, cursor: Arc<AtomicU64>, state: Mutex<ExternalState> }
-struct ExternalState { geometry: VideoGeometry, layer_key: u64, blend_mode: i32, anim: slot::OpacityAnim, pending_remove: bool }
+struct ExternalSource {
+    mailbox: Arc<BgraFrameMailbox>,
+    cursor: Arc<AtomicU64>,
+    state: Mutex<ExternalState>,
+}
+struct ExternalState {
+    geometry: VideoGeometry,
+    layer_key: u64,
+    blend_mode: i32,
+    anim: slot::OpacityAnim,
+    pending_remove: bool,
+}
 #[derive(Clone)]
-struct ExternalDraw { voice: VoiceId, mailbox: Arc<BgraFrameMailbox>, cursor: Arc<AtomicU64>, geometry: VideoGeometry, layer_key: u64, blend_mode: i32, opacity: f32 }
+struct ExternalDraw {
+    voice: VoiceId,
+    mailbox: Arc<BgraFrameMailbox>,
+    cursor: Arc<AtomicU64>,
+    geometry: VideoGeometry,
+    layer_key: u64,
+    blend_mode: i32,
+    opacity: f32,
+}
 
 pub(crate) struct RenderRuntime {
     pub shared: Arc<RenderShared>,
@@ -205,9 +246,24 @@ pub(crate) struct RenderRuntime {
 impl RenderRuntime {
     pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
-            shared: Arc::new(RenderShared { signal: Arc::new((Mutex::new(false), Condvar::new())), shutting_down: AtomicBool::new(false), text_overlay_active: AtomicBool::new(false), visible: AtomicBool::new(false), successful_physical_presents: AtomicU64::new(0), width: AtomicU32::new(1920), height: AtomicU32::new(1080), warp: Mutex::new(None), warp_dirty: AtomicBool::new(false), overlay_dirty: AtomicBool::new(false), network_capture_active: AtomicBool::new(false), monitor_capture_active: AtomicBool::new(false) }),
-            #[cfg(not(target_os = "macos"))] window: Mutex::new(None),
-            #[cfg(target_os = "macos")] mac_window: Mutex::new(None),
+            shared: Arc::new(RenderShared {
+                signal: Arc::new((Mutex::new(false), Condvar::new())),
+                shutting_down: AtomicBool::new(false),
+                text_overlay_active: AtomicBool::new(false),
+                visible: AtomicBool::new(false),
+                successful_physical_presents: AtomicU64::new(0),
+                width: AtomicU32::new(1920),
+                height: AtomicU32::new(1080),
+                warp: Mutex::new(None),
+                warp_dirty: AtomicBool::new(false),
+                overlay_dirty: AtomicBool::new(false),
+                network_capture_active: AtomicBool::new(false),
+                monitor_capture_active: AtomicBool::new(false),
+            }),
+            #[cfg(not(target_os = "macos"))]
+            window: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            mac_window: Mutex::new(None),
             output_id: Mutex::new(String::new()),
             floating_output: AtomicBool::new(true),
             floating_geometry: Mutex::new(None),
@@ -217,12 +273,20 @@ impl RenderRuntime {
             visibility_callback: Mutex::new(None),
             monitor_frames: MonitorFrameMailbox::default(),
             frame_sink: Mutex::new(None),
-            external_sources: Mutex::new(HashMap::new()), external_dirty: AtomicBool::new(false),
+            external_sources: Mutex::new(HashMap::new()),
+            external_dirty: AtomicBool::new(false),
         })
     }
-    pub(super) fn wake(&self) { if let Ok(mut r) = self.shared.signal.0.lock() { *r = true; self.shared.signal.1.notify_one(); } }
+    pub(super) fn wake(&self) {
+        if let Ok(mut r) = self.shared.signal.0.lock() {
+            *r = true;
+            self.shared.signal.1.notify_one();
+        }
+    }
     pub(crate) fn successful_physical_present_count(&self) -> u64 {
-        self.shared.successful_physical_presents.load(Ordering::Relaxed)
+        self.shared
+            .successful_physical_presents
+            .load(Ordering::Relaxed)
     }
     /// Stop the GL loop.  This is intentionally irreversible: a native output
     /// pipeline is retired rather than restarted after its mpv contexts are
@@ -252,106 +316,358 @@ impl RenderRuntime {
             callback(visible);
         }
     }
-    pub(super) fn show(&self) { self.shared.visible.store(true, Ordering::Relaxed); self.notify_visibility(true); #[cfg(not(target_os = "macos"))] if let Ok(w) = self.window.lock() { if let Some(w) = w.as_ref() { w.set_visible(true); } } self.wake(); }
-    pub(super) fn hide(&self) { self.shared.visible.store(false, Ordering::Relaxed); self.notify_visibility(false); #[cfg(not(target_os = "macos"))] if let Ok(w) = self.window.lock() { if let Some(w) = w.as_ref() { w.set_visible(false); } } }
-    pub(super) fn mark_overlay_dirty(&self) { self.shared.overlay_dirty.store(true, Ordering::Relaxed); self.wake(); }
-    pub(super) fn set_text_overlay_active(&self, v: bool) { self.shared.text_overlay_active.store(v, Ordering::Relaxed); self.wake(); }
-    pub(super) fn set_warp(&self, m: Option<[f32; 9]>) { if let Ok(mut w) = self.shared.warp.lock() { *w = m; } self.shared.warp_dirty.store(true, Ordering::Relaxed); self.wake(); }
-    pub(super) fn set_size(&self, w: u32, h: u32) { self.shared.width.store(w.max(1), Ordering::Relaxed); self.shared.height.store(h.max(1), Ordering::Relaxed); self.wake(); }
+    pub(super) fn show(&self) {
+        self.shared.visible.store(true, Ordering::Relaxed);
+        self.notify_visibility(true);
+        #[cfg(not(target_os = "macos"))]
+        if let Ok(w) = self.window.lock() {
+            if let Some(w) = w.as_ref() {
+                w.set_visible(true);
+            }
+        }
+        self.wake();
+    }
+    pub(super) fn hide(&self) {
+        self.shared.visible.store(false, Ordering::Relaxed);
+        self.notify_visibility(false);
+        #[cfg(not(target_os = "macos"))]
+        if let Ok(w) = self.window.lock() {
+            if let Some(w) = w.as_ref() {
+                w.set_visible(false);
+            }
+        }
+    }
+    pub(super) fn mark_overlay_dirty(&self) {
+        self.shared.overlay_dirty.store(true, Ordering::Relaxed);
+        self.wake();
+    }
+    pub(super) fn set_text_overlay_active(&self, v: bool) {
+        self.shared.text_overlay_active.store(v, Ordering::Relaxed);
+        self.wake();
+    }
+    pub(super) fn set_warp(&self, m: Option<[f32; 9]>) {
+        if let Ok(mut w) = self.shared.warp.lock() {
+            *w = m;
+        }
+        self.shared.warp_dirty.store(true, Ordering::Relaxed);
+        self.wake();
+    }
+    pub(super) fn set_size(&self, w: u32, h: u32) {
+        self.shared.width.store(w.max(1), Ordering::Relaxed);
+        self.shared.height.store(h.max(1), Ordering::Relaxed);
+        self.wake();
+    }
     pub(super) fn set_network_frame_sink(&self, sink: Option<NetworkFrameSink>) {
         let active = sink.is_some();
-        if let Ok(mut current) = self.frame_sink.lock() { *current = sink; }
-        self.shared.network_capture_active.store(active, Ordering::Relaxed);
+        if let Ok(mut current) = self.frame_sink.lock() {
+            *current = sink;
+        }
+        self.shared
+            .network_capture_active
+            .store(active, Ordering::Relaxed);
         self.wake();
     }
     fn network_frame_sink(&self) -> Option<NetworkFrameSink> {
-        self.frame_sink.lock().ok().and_then(|current| current.clone())
+        self.frame_sink
+            .lock()
+            .ok()
+            .and_then(|current| current.clone())
     }
     pub(super) fn set_monitor_capture(&self, active: bool, session: u64) -> bool {
-        if !self.monitor_frames.select_session(session) { return false; }
-        self.shared.monitor_capture_active.store(active, Ordering::Release);
-        if !active {
-            if let Ok(mut latest) = self.monitor_frames.latest.lock() { *latest = None; }
+        if !self.monitor_frames.select_session(session) {
+            return false;
         }
-        if active { self.wake(); }
+        self.shared
+            .monitor_capture_active
+            .store(active, Ordering::Release);
+        if !active {
+            if let Ok(mut latest) = self.monitor_frames.latest.lock() {
+                *latest = None;
+            }
+        }
+        if active {
+            self.wake();
+        }
         true
     }
     pub(super) fn monitor_capture_enabled(&self) -> bool {
         self.shared.monitor_capture_active.load(Ordering::Acquire)
     }
     pub(super) fn disable_monitor_capture(&self) {
-        self.shared.monitor_capture_active.store(false, Ordering::Release);
-        if let Ok(mut latest) = self.monitor_frames.latest.lock() { *latest = None; }
+        self.shared
+            .monitor_capture_active
+            .store(false, Ordering::Release);
+        if let Ok(mut latest) = self.monitor_frames.latest.lock() {
+            *latest = None;
+        }
     }
-    pub(super) fn monitor_frame_after(&self, sequence: u64, session: u64) -> Option<(u64, u64, u64, Option<Arc<BgraFrame>>)> {
+    pub(super) fn monitor_frame_after(
+        &self,
+        sequence: u64,
+        session: u64,
+    ) -> Option<(u64, u64, u64, Option<Arc<BgraFrame>>)> {
         self.monitor_frames.read_after(sequence, session)
     }
-    pub(super) fn monitor_capture_diagnostics(&self) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64, f64) {
+    pub(super) fn monitor_capture_diagnostics(
+        &self,
+    ) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64, f64) {
         let mailbox = &self.monitor_frames;
         let started = mailbox.started_at_us.load(Ordering::Relaxed);
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros().min(u64::MAX as u128) as u64).unwrap_or(started);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros().min(u64::MAX as u128) as u64)
+            .unwrap_or(started);
         let elapsed = now.saturating_sub(started).max(1);
         let fps = mailbox.published.load(Ordering::Relaxed) as f64 * 1_000_000.0 / elapsed as f64;
-        (mailbox.attempts.load(Ordering::Relaxed), mailbox.captured.load(Ordering::Relaxed),
-            mailbox.skipped_pbo.load(Ordering::Relaxed), mailbox.dropped_stale.load(Ordering::Relaxed),
-            mailbox.published.load(Ordering::Relaxed), mailbox.copy_total_us.load(Ordering::Relaxed),
-            mailbox.copy_max_us.load(Ordering::Relaxed), mailbox.copy_samples.load(Ordering::Relaxed),
-            mailbox.mailbox_lock_drops.load(Ordering::Relaxed), fps)
+        (
+            mailbox.attempts.load(Ordering::Relaxed),
+            mailbox.captured.load(Ordering::Relaxed),
+            mailbox.skipped_pbo.load(Ordering::Relaxed),
+            mailbox.dropped_stale.load(Ordering::Relaxed),
+            mailbox.published.load(Ordering::Relaxed),
+            mailbox.copy_total_us.load(Ordering::Relaxed),
+            mailbox.copy_max_us.load(Ordering::Relaxed),
+            mailbox.copy_samples.load(Ordering::Relaxed),
+            mailbox.mailbox_lock_drops.load(Ordering::Relaxed),
+            fps,
+        )
     }
-    pub(super) fn add_external_source(&self, voice: VoiceId, source: Arc<BgraFrameMailbox>, geometry: VideoGeometry, style: LayerStyle, layer_key: u64, fade_in_ms: u32) {
+    pub(super) fn add_external_source(
+        &self,
+        voice: VoiceId,
+        source: Arc<BgraFrameMailbox>,
+        geometry: VideoGeometry,
+        style: LayerStyle,
+        layer_key: u64,
+        fade_in_ms: u32,
+    ) {
         let base = style.opacity.clamp(0.0, 1.0) as f32;
         let mut anim = slot::OpacityAnim::resting(if fade_in_ms == 0 { base } else { 0.0 });
-        if fade_in_ms > 0 { anim.animate_to(base, fade_in_ms); }
-        if let Ok(mut sources) = self.external_sources.lock() { sources.insert(voice, ExternalSource { mailbox: source, cursor: Arc::new(AtomicU64::new(0)), state: Mutex::new(ExternalState { geometry, layer_key, blend_mode: style.blend_mode.shader_id(), anim, pending_remove: false }) }); }
+        if fade_in_ms > 0 {
+            anim.animate_to(base, fade_in_ms);
+        }
+        if let Ok(mut sources) = self.external_sources.lock() {
+            sources.insert(
+                voice,
+                ExternalSource {
+                    mailbox: source,
+                    cursor: Arc::new(AtomicU64::new(0)),
+                    state: Mutex::new(ExternalState {
+                        geometry,
+                        layer_key,
+                        blend_mode: style.blend_mode.shader_id(),
+                        anim,
+                        pending_remove: false,
+                    }),
+                },
+            );
+        }
         self.external_dirty.store(true, Ordering::Release);
         self.wake();
     }
     pub(super) fn stop_external_source(&self, voice: VoiceId, fade_out_ms: u32) -> bool {
         let found = if let Ok(mut sources) = self.external_sources.lock() {
-            if fade_out_ms == 0 { sources.remove(&voice).is_some() }
-            else if let Some(source) = sources.get(&voice) { if let Ok(mut state) = source.state.lock() { state.pending_remove = true; state.anim.animate_to(0.0, fade_out_ms); true } else { false } } else { false }
-        } else { false };
-        if found { self.external_dirty.store(true, Ordering::Release); self.wake(); }
+            if fade_out_ms == 0 {
+                sources.remove(&voice).is_some()
+            } else if let Some(source) = sources.get(&voice) {
+                if let Ok(mut state) = source.state.lock() {
+                    state.pending_remove = true;
+                    state.anim.animate_to(0.0, fade_out_ms);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if found {
+            self.external_dirty.store(true, Ordering::Release);
+            self.wake();
+        }
         found
     }
     pub(super) fn remove_external_source(&self, voice: VoiceId) {
-        if let Ok(mut sources) = self.external_sources.lock() { sources.remove(&voice); }
+        if let Ok(mut sources) = self.external_sources.lock() {
+            sources.remove(&voice);
+        }
         self.external_dirty.store(true, Ordering::Release);
         self.wake();
     }
     pub(super) fn clear_external_sources(&self) {
-        if let Ok(mut sources) = self.external_sources.lock() { sources.clear(); }
+        if let Ok(mut sources) = self.external_sources.lock() {
+            sources.clear();
+        }
         self.external_dirty.store(true, Ordering::Release);
         self.wake();
     }
     pub(super) fn clear_external_sources_except(&self, keep: &std::collections::HashSet<VoiceId>) {
-        if let Ok(mut sources) = self.external_sources.lock() { sources.retain(|voice, _| keep.contains(voice)); }
+        if let Ok(mut sources) = self.external_sources.lock() {
+            sources.retain(|voice, _| keep.contains(voice));
+        }
         self.external_dirty.store(true, Ordering::Release);
         self.wake();
     }
     fn tick_external_sources(&self) -> (Vec<ExternalDraw>, bool, bool) {
-        let mut draws = Vec::new(); let mut animating = false; let mut removed = false;
-        if let Ok(mut sources) = self.external_sources.lock() { sources.retain(|voice, source| {
-            let Ok(mut state) = source.state.lock() else { return true };
-            let (opacity, _) = state.anim.tick(); let running = state.anim.is_animating(); animating |= running;
-            if state.pending_remove && opacity <= 0.0 && !running { removed = true; return false; }
-            draws.push(ExternalDraw { voice: *voice, mailbox: Arc::clone(&source.mailbox), cursor: Arc::clone(&source.cursor), geometry: state.geometry, layer_key: state.layer_key, blend_mode: state.blend_mode, opacity }); true
-        }); }
+        let mut draws = Vec::new();
+        let mut animating = false;
+        let mut removed = false;
+        if let Ok(mut sources) = self.external_sources.lock() {
+            sources.retain(|voice, source| {
+                let Ok(mut state) = source.state.lock() else {
+                    return true;
+                };
+                let (opacity, _) = state.anim.tick();
+                let running = state.anim.is_animating();
+                animating |= running;
+                if state.pending_remove && opacity <= 0.0 && !running {
+                    removed = true;
+                    return false;
+                }
+                draws.push(ExternalDraw {
+                    voice: *voice,
+                    mailbox: Arc::clone(&source.mailbox),
+                    cursor: Arc::clone(&source.cursor),
+                    geometry: state.geometry,
+                    layer_key: state.layer_key,
+                    blend_mode: state.blend_mode,
+                    opacity,
+                });
+                true
+            });
+        }
         draws.sort_by_key(|draw| draw.layer_key);
-        (draws, animating, self.external_dirty.swap(false, Ordering::AcqRel) || removed)
+        (
+            draws,
+            animating,
+            self.external_dirty.swap(false, Ordering::AcqRel) || removed,
+        )
     }
     pub(super) fn has_external_source(&self, voice: VoiceId) -> bool {
-        self.external_sources.lock().map(|sources| sources.contains_key(&voice)).unwrap_or(false)
+        self.external_sources
+            .lock()
+            .map(|sources| sources.contains_key(&voice))
+            .unwrap_or(false)
     }
-    fn external_animating(&self) -> bool { self.external_sources.lock().map(|sources| sources.values().any(|source| source.state.lock().map(|state| state.anim.is_animating()).unwrap_or(false))).unwrap_or(false) }
-    pub(super) fn apply_external_geometry(&self, voice: VoiceId, geometry: &VideoGeometry) -> bool { let changed = self.external_sources.lock().ok().and_then(|sources| sources.get(&voice).and_then(|source| source.state.lock().ok().map(|mut state| state.geometry = *geometry))).is_some(); if changed { self.external_dirty.store(true, Ordering::Release); self.wake(); } changed }
-    pub(super) fn set_external_layer_style(&self, voice: VoiceId, style: &LayerStyle) -> bool { let changed = self.external_sources.lock().ok().and_then(|sources| sources.get(&voice).and_then(|source| source.state.lock().ok().map(|mut state| { let seq = state.layer_key & 0xFF_FFFF_FFFF; state.layer_key = slot::resolve_layer_key(style.layer, seq); state.blend_mode = style.blend_mode.shader_id(); if !state.anim.is_animating() && !state.pending_remove { state.anim.set(style.opacity.clamp(0.0, 1.0) as f32); } }))).is_some(); if changed { self.external_dirty.store(true, Ordering::Release); self.wake(); } changed }
-    pub(super) fn external_opacity(&self, voice: VoiceId) -> Option<f32> { self.external_sources.lock().ok()?.get(&voice)?.state.lock().ok().map(|state| state.anim.current) }
-    pub(super) fn set_external_opacity(&self, voice: VoiceId, opacity: f32) -> bool { let changed = self.external_sources.lock().ok().and_then(|sources| sources.get(&voice).and_then(|source| source.state.lock().ok().map(|mut state| state.anim.set(opacity)))).is_some(); if changed { self.external_dirty.store(true, Ordering::Release); self.wake(); } changed }
-    pub(super) fn fade_external_opacity(&self, voice: VoiceId, target: f32, ms: u32) -> bool { let changed = self.external_sources.lock().ok().and_then(|sources| sources.get(&voice).and_then(|source| source.state.lock().ok().map(|mut state| state.anim.animate_to(target, ms.max(1))))).is_some(); if changed { self.external_dirty.store(true, Ordering::Release); self.wake(); } changed }
-    pub(super) fn toggle_fullscreen(&self) { super::render::toggle_fullscreen(self); }
-    pub(super) fn set_windowed_floating(&self) { super::render::set_windowed_floating(self); }
+    fn external_animating(&self) -> bool {
+        self.external_sources
+            .lock()
+            .map(|sources| {
+                sources.values().any(|source| {
+                    source
+                        .state
+                        .lock()
+                        .map(|state| state.anim.is_animating())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+    pub(super) fn apply_external_geometry(&self, voice: VoiceId, geometry: &VideoGeometry) -> bool {
+        let changed = self
+            .external_sources
+            .lock()
+            .ok()
+            .and_then(|sources| {
+                sources.get(&voice).and_then(|source| {
+                    source
+                        .state
+                        .lock()
+                        .ok()
+                        .map(|mut state| state.geometry = *geometry)
+                })
+            })
+            .is_some();
+        if changed {
+            self.external_dirty.store(true, Ordering::Release);
+            self.wake();
+        }
+        changed
+    }
+    pub(super) fn set_external_layer_style(&self, voice: VoiceId, style: &LayerStyle) -> bool {
+        let changed = self
+            .external_sources
+            .lock()
+            .ok()
+            .and_then(|sources| {
+                sources.get(&voice).and_then(|source| {
+                    source.state.lock().ok().map(|mut state| {
+                        let seq = state.layer_key & 0xFF_FFFF_FFFF;
+                        state.layer_key = slot::resolve_layer_key(style.layer, seq);
+                        state.blend_mode = style.blend_mode.shader_id();
+                        if !state.anim.is_animating() && !state.pending_remove {
+                            state.anim.set(style.opacity.clamp(0.0, 1.0) as f32);
+                        }
+                    })
+                })
+            })
+            .is_some();
+        if changed {
+            self.external_dirty.store(true, Ordering::Release);
+            self.wake();
+        }
+        changed
+    }
+    pub(super) fn external_opacity(&self, voice: VoiceId) -> Option<f32> {
+        self.external_sources
+            .lock()
+            .ok()?
+            .get(&voice)?
+            .state
+            .lock()
+            .ok()
+            .map(|state| state.anim.current)
+    }
+    pub(super) fn set_external_opacity(&self, voice: VoiceId, opacity: f32) -> bool {
+        let changed = self
+            .external_sources
+            .lock()
+            .ok()
+            .and_then(|sources| {
+                sources.get(&voice).and_then(|source| {
+                    source
+                        .state
+                        .lock()
+                        .ok()
+                        .map(|mut state| state.anim.set(opacity))
+                })
+            })
+            .is_some();
+        if changed {
+            self.external_dirty.store(true, Ordering::Release);
+            self.wake();
+        }
+        changed
+    }
+    pub(super) fn fade_external_opacity(&self, voice: VoiceId, target: f32, ms: u32) -> bool {
+        let changed = self
+            .external_sources
+            .lock()
+            .ok()
+            .and_then(|sources| {
+                sources.get(&voice).and_then(|source| {
+                    source
+                        .state
+                        .lock()
+                        .ok()
+                        .map(|mut state| state.anim.animate_to(target, ms.max(1)))
+                })
+            })
+            .is_some();
+        if changed {
+            self.external_dirty.store(true, Ordering::Release);
+            self.wake();
+        }
+        changed
+    }
+    pub(super) fn toggle_fullscreen(&self) {
+        super::render::toggle_fullscreen(self);
+    }
+    pub(super) fn set_windowed_floating(&self) {
+        super::render::set_windowed_floating(self);
+    }
     pub(super) fn configure_output_window(
         &self,
         output_id: &str,
@@ -360,14 +676,18 @@ impl RenderRuntime {
         always_on_top: bool,
         hide_cursor: bool,
     ) {
-        if let Ok(mut id) = self.output_id.lock() { *id = output_id.to_owned(); }
+        if let Ok(mut id) = self.output_id.lock() {
+            *id = output_id.to_owned();
+        }
         self.floating_output.store(floating, Ordering::Relaxed);
         self.floating_placement_dirty.store(true, Ordering::Relaxed);
         if let Ok(mut current) = self.floating_geometry.lock() {
             // Preferences are authoritative when they include a saved rect.
             // For old workspaces `None` deliberately does not erase a rect
             // recorded earlier in this live session.
-            if geometry.is_some() || current.is_none() { *current = geometry; }
+            if geometry.is_some() || current.is_none() {
+                *current = geometry;
+            }
         }
         self.apply_window_preferences(always_on_top, hide_cursor);
     }
@@ -396,11 +716,17 @@ impl RenderRuntime {
     }
     #[cfg(not(target_os = "macos"))]
     fn floating_geometry(&self) -> FloatingWindowGeometry {
-        self.floating_geometry.lock().ok().and_then(|g| g.clone()).unwrap_or_default()
+        self.floating_geometry
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_default()
     }
     #[cfg(not(target_os = "macos"))]
     fn record_floating_geometry(&self, window: &Window) -> Option<FloatingWindowGeometry> {
-        if !self.floating_output.load(Ordering::Relaxed) { return None; }
+        if !self.floating_output.load(Ordering::Relaxed) {
+            return None;
+        }
         let maximized = window.is_maximized();
         let mut current = self.floating_geometry.lock().ok()?;
         let mut next = current.clone().unwrap_or_default();
@@ -416,19 +742,27 @@ impl RenderRuntime {
             next.height = size.height.max(MIN_FLOATING_HEIGHT);
         }
         next.maximized = maximized;
-        if current.as_ref() == Some(&next) { return None; }
+        if current.as_ref() == Some(&next) {
+            return None;
+        }
         *current = Some(next.clone());
         Some(next)
     }
     #[cfg(not(target_os = "macos"))]
-    fn is_floating(&self) -> bool { self.floating_output.load(Ordering::Relaxed) }
+    fn is_floating(&self) -> bool {
+        self.floating_output.load(Ordering::Relaxed)
+    }
     #[cfg(not(target_os = "macos"))]
     fn take_floating_placement_dirty(&self) -> bool {
         self.floating_placement_dirty.swap(false, Ordering::Relaxed)
     }
     #[cfg(not(target_os = "macos"))]
     fn output_id(&self) -> Option<String> {
-        self.output_id.lock().ok().map(|id| id.clone()).filter(|id| !id.is_empty())
+        self.output_id
+            .lock()
+            .ok()
+            .map(|id| id.clone())
+            .filter(|id| !id.is_empty())
     }
 }
 
@@ -476,8 +810,13 @@ impl GeometryPersistQueue {
     }
 
     fn submit(&self, mut pending: PendingGeometryPersist) {
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-        let Ok(mut latest) = self.latest_generation.lock() else { return; };
+        let generation = self
+            .next_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let Ok(mut latest) = self.latest_generation.lock() else {
+            return;
+        };
         if let Some((_, current)) = latest.iter_mut().find(|(id, _)| id == &pending.output_id) {
             *current = generation;
         } else if latest.len() < 64 {
@@ -492,8 +831,13 @@ impl GeometryPersistQueue {
         pending.generation = generation;
         drop(latest);
 
-        let Ok(mut current) = self.pending.lock() else { return; };
-        if let Some(existing) = current.iter_mut().find(|existing| existing.output_id == pending.output_id) {
+        let Ok(mut current) = self.pending.lock() else {
+            return;
+        };
+        if let Some(existing) = current
+            .iter_mut()
+            .find(|existing| existing.output_id == pending.output_id)
+        {
             *existing = pending;
         } else if current.len() < 64 {
             current.push(pending);
@@ -506,7 +850,12 @@ impl GeometryPersistQueue {
     }
 
     fn flush(&self) {
-        let pending = self.pending.lock().ok().map(|mut current| std::mem::take(&mut *current)).unwrap_or_default();
+        let pending = self
+            .pending
+            .lock()
+            .ok()
+            .map(|mut current| std::mem::take(&mut *current))
+            .unwrap_or_default();
         for pending in pending {
             self.persist_if_latest(pending);
         }
@@ -516,7 +865,9 @@ impl GeometryPersistQueue {
         if !self.is_latest(&pending.output_id, pending.generation) {
             return;
         }
-        let Ok(_write_guard) = crate::state::app_state::GLOBAL_PREFERENCES_WRITE_GATE.lock() else { return; };
+        let Ok(_write_guard) = crate::state::app_state::GLOBAL_PREFERENCES_WRITE_GATE.lock() else {
+            return;
+        };
         // Close flush and a newer move can race with a worker that already
         // removed an older item from `pending`. Recheck after taking the same
         // global write gate used by every Preferences writer.
@@ -533,7 +884,12 @@ impl GeometryPersistQueue {
         self.latest_generation
             .lock()
             .ok()
-            .and_then(|latest| latest.iter().find(|(id, _)| id == output_id).map(|(_, current)| *current == generation))
+            .and_then(|latest| {
+                latest
+                    .iter()
+                    .find(|(id, _)| id == output_id)
+                    .map(|(_, current)| *current == generation)
+            })
             .unwrap_or(false)
     }
 
@@ -601,7 +957,11 @@ pub(super) fn show(runtime: &RenderRuntime) {
     runtime.shared.visible.store(true, Ordering::Relaxed);
     runtime.notify_visibility(true);
     #[cfg(not(target_os = "macos"))]
-    if let Ok(w) = runtime.window.lock() { if let Some(w) = w.as_ref() { w.set_visible(true); } }
+    if let Ok(w) = runtime.window.lock() {
+        if let Some(w) = w.as_ref() {
+            w.set_visible(true);
+        }
+    }
     #[cfg(target_os = "macos")]
     super::macos_window::show(runtime);
     // Wake the render loop so it commits the first frame immediately.  On
@@ -614,20 +974,26 @@ pub(super) fn hide(runtime: &RenderRuntime) {
     runtime.shared.visible.store(false, Ordering::Relaxed);
     runtime.notify_visibility(false);
     #[cfg(not(target_os = "macos"))]
-    if let Ok(w) = runtime.window.lock() { if let Some(w) = w.as_ref() { w.set_visible(false); } }
+    if let Ok(w) = runtime.window.lock() {
+        if let Some(w) = w.as_ref() {
+            w.set_visible(false);
+        }
+    }
     #[cfg(target_os = "macos")]
     super::macos_window::hide(runtime);
 }
 
 pub(super) fn toggle_fullscreen(runtime: &RenderRuntime) {
     #[cfg(not(target_os = "macos"))]
-    if let Ok(w) = runtime.window.lock() { if let Some(w) = w.as_ref() {
-        if w.fullscreen().is_some() {
-            w.set_fullscreen(None);
-        } else {
-            w.set_fullscreen(Some(Fullscreen::Borderless(w.current_monitor())));
+    if let Ok(w) = runtime.window.lock() {
+        if let Some(w) = w.as_ref() {
+            if w.fullscreen().is_some() {
+                w.set_fullscreen(None);
+            } else {
+                w.set_fullscreen(Some(Fullscreen::Borderless(w.current_monitor())));
+            }
         }
-    } }
+    }
     #[cfg(target_os = "macos")]
     super::macos_window::toggle_fullscreen(runtime);
 }
@@ -643,8 +1009,16 @@ pub(super) fn toggle_fullscreen(runtime: &RenderRuntime) {
 /// the taskbar, pins the window to the monitor, and works on Wayland where
 /// `set_outer_position` is a no-op.
 #[cfg(not(target_os = "macos"))]
-pub(super) fn set_fullscreen_on_rect(runtime: &RenderRuntime, x: i32, y: i32, width: u32, height: u32) {
-    let Ok(wg) = runtime.window.lock() else { return };
+pub(super) fn set_fullscreen_on_rect(
+    runtime: &RenderRuntime,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) {
+    let Ok(wg) = runtime.window.lock() else {
+        return;
+    };
     let Some(w) = wg.as_ref() else { return };
     // A monitor-bound output is deliberately not a normal desktop window.
     // Removing its chrome and resize affordances prevents minimize, drag, and
@@ -687,29 +1061,33 @@ pub(super) fn set_output_warp(runtime: &RenderRuntime, matrix: Option<[f32; 9]>)
 /// `position_on_screen` when the operator switches back to "Floating window".
 pub(super) fn set_windowed_floating(runtime: &RenderRuntime) {
     #[cfg(not(target_os = "macos"))]
-    if let Ok(wg) = runtime.window.lock() { if let Some(w) = wg.as_ref() {
-        // GO and preview setup call placement repeatedly.  Only restore when
-        // the destination changed (or at first creation); otherwise a user
-        // who has just moved/maximized this ordinary window would be snapped
-        // back to its previously saved rect on every cue.
-        if !runtime.take_floating_placement_dirty() { return; }
-        w.set_fullscreen(None);
-        // A floating destination is an ordinary operator window: title bar,
-        // system move/resize controls, minimize and maximize all stay usable.
-        // Physical monitor outputs go through `set_fullscreen_on_rect` and are
-        // kept borderless/input-locked instead.
-        w.set_decorations(true);
-        w.set_resizable(true);
-        w.set_maximized(false);
+    if let Ok(wg) = runtime.window.lock() {
+        if let Some(w) = wg.as_ref() {
+            // GO and preview setup call placement repeatedly.  Only restore when
+            // the destination changed (or at first creation); otherwise a user
+            // who has just moved/maximized this ordinary window would be snapped
+            // back to its previously saved rect on every cue.
+            if !runtime.take_floating_placement_dirty() {
+                return;
+            }
+            w.set_fullscreen(None);
+            // A floating destination is an ordinary operator window: title bar,
+            // system move/resize controls, minimize and maximize all stay usable.
+            // Physical monitor outputs go through `set_fullscreen_on_rect` and are
+            // kept borderless/input-locked instead.
+            w.set_decorations(true);
+            w.set_resizable(true);
+            w.set_maximized(false);
 
-        let rect = clamp_floating_geometry(
-            runtime.floating_geometry(),
-            &available_monitor_rects(w),
-        );
-        w.set_outer_position(PhysicalPosition::new(rect.x, rect.y));
-        let _ = w.request_inner_size(PhysicalSize::new(rect.width, rect.height));
-        if rect.maximized { w.set_maximized(true); }
-    } }
+            let rect =
+                clamp_floating_geometry(runtime.floating_geometry(), &available_monitor_rects(w));
+            w.set_outer_position(PhysicalPosition::new(rect.x, rect.y));
+            let _ = w.request_inner_size(PhysicalSize::new(rect.width, rect.height));
+            if rect.maximized {
+                w.set_maximized(true);
+            }
+        }
+    }
     #[cfg(target_os = "macos")]
     super::macos_window::set_windowed(runtime);
 }
@@ -721,16 +1099,29 @@ pub(super) fn set_windowed_floating(runtime: &RenderRuntime) {
 /// auto-hide regions.
 #[cfg(not(target_os = "macos"))]
 fn available_monitor_rects(window: &Window) -> Vec<FloatingRect> {
-    window.available_monitors().map(|monitor| {
-        let p = monitor.position();
-        let s = monitor.size();
-        FloatingRect { x: p.x, y: p.y, width: s.width, height: s.height }
-    }).collect()
+    window
+        .available_monitors()
+        .map(|monitor| {
+            let p = monitor.position();
+            let s = monitor.size();
+            FloatingRect {
+                x: p.x,
+                y: p.y,
+                width: s.width,
+                height: s.height,
+            }
+        })
+        .collect()
 }
 
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FloatingRect { x: i32, y: i32, width: u32, height: u32 }
+struct FloatingRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
 
 /// Clamp a saved floating rect to a currently available display.  The display
 /// with the greatest overlap wins; if the old display vanished, the first
@@ -740,15 +1131,26 @@ fn clamp_floating_geometry(
     saved: FloatingWindowGeometry,
     monitors: &[FloatingRect],
 ) -> FloatingWindowGeometry {
-    let Some(target) = monitors.iter().copied().max_by_key(|monitor| {
-        overlap_area(saved.x, saved.y, saved.width, saved.height, *monitor)
-    }).or_else(|| monitors.first().copied()) else {
+    let Some(target) = monitors
+        .iter()
+        .copied()
+        .max_by_key(|monitor| overlap_area(saved.x, saved.y, saved.width, saved.height, *monitor))
+        .or_else(|| monitors.first().copied())
+    else {
         return saved;
     };
-    let width = saved.width.clamp(MIN_FLOATING_WIDTH.min(target.width), target.width.max(1));
-    let height = saved.height.clamp(MIN_FLOATING_HEIGHT.min(target.height), target.height.max(1));
-    let right = target.x.saturating_add(target.width.saturating_sub(width) as i32);
-    let bottom = target.y.saturating_add(target.height.saturating_sub(height) as i32);
+    let width = saved
+        .width
+        .clamp(MIN_FLOATING_WIDTH.min(target.width), target.width.max(1));
+    let height = saved
+        .height
+        .clamp(MIN_FLOATING_HEIGHT.min(target.height), target.height.max(1));
+    let right = target
+        .x
+        .saturating_add(target.width.saturating_sub(width) as i32);
+    let bottom = target
+        .y
+        .saturating_add(target.height.saturating_sub(height) as i32);
     FloatingWindowGeometry {
         x: saved.x.clamp(target.x, right),
         y: saved.y.clamp(target.y, bottom),
@@ -762,8 +1164,12 @@ fn clamp_floating_geometry(
 fn overlap_area(x: i32, y: i32, width: u32, height: u32, monitor: FloatingRect) -> i64 {
     let right = x.saturating_add(width.min(i32::MAX as u32) as i32);
     let bottom = y.saturating_add(height.min(i32::MAX as u32) as i32);
-    let monitor_right = monitor.x.saturating_add(monitor.width.min(i32::MAX as u32) as i32);
-    let monitor_bottom = monitor.y.saturating_add(monitor.height.min(i32::MAX as u32) as i32);
+    let monitor_right = monitor
+        .x
+        .saturating_add(monitor.width.min(i32::MAX as u32) as i32);
+    let monitor_bottom = monitor
+        .y
+        .saturating_add(monitor.height.min(i32::MAX as u32) as i32);
     let w = (right.min(monitor_right) - x.max(monitor.x)).max(0) as i64;
     let h = (bottom.min(monitor_bottom) - y.max(monitor.y)).max(0) as i64;
     w * h
@@ -791,8 +1197,18 @@ pub(super) fn init(
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
 
     let render_thread = spawn_render_thread(
-        SendableHandles { rwh, rdh, width, height },
-        lib, mpv_ctx, slot_registry, Arc::clone(&runtime), pipeline, ready_tx,
+        SendableHandles {
+            rwh,
+            rdh,
+            width,
+            height,
+        },
+        lib,
+        mpv_ctx,
+        slot_registry,
+        Arc::clone(&runtime),
+        pipeline,
+        ready_tx,
     )?;
 
     // On macOS, Tauri's NSApplication event loop hasn't started yet when setup()
@@ -836,9 +1252,9 @@ pub(super) fn init(
 // ---------------------------------------------------------------------------
 
 struct SendableHandles {
-    rwh:    RawWindowHandle,
-    rdh:    RawDisplayHandle,
-    width:  u32,
+    rwh: RawWindowHandle,
+    rdh: RawDisplayHandle,
+    width: u32,
     height: u32,
 }
 // SAFETY: RawWindowHandle / RawDisplayHandle are plain integer/pointer structs.
@@ -889,14 +1305,20 @@ fn persist_floating_geometry_now_locked(
     geometry: FloatingWindowGeometry,
 ) {
     use tauri::Manager;
-    let Some(state) = app_handle.try_state::<crate::state::AppState>() else { return; };
-    let Ok(snapshot) = state.global_preferences_snapshot() else { return; };
+    let Some(state) = app_handle.try_state::<crate::state::AppState>() else {
+        return;
+    };
+    let Ok(snapshot) = state.global_preferences_snapshot() else {
+        return;
+    };
     let Some(destination) = snapshot
         .display
         .output_destinations
         .iter()
         .find(|destination| destination.id == output_id && destination.monitor.is_none())
-    else { return; };
+    else {
+        return;
+    };
     if destination.floating_window.as_ref() != Some(&geometry) {
         if let Err(error) = state.update_global_preferences(|preferences| {
             if let Some(destination) = preferences
@@ -932,7 +1354,9 @@ fn schedule_floating_geometry_persist(
     runtime: &Arc<RenderRuntime>,
     geometry: FloatingWindowGeometry,
 ) {
-    let Some(output_id) = runtime.output_id() else { return; };
+    let Some(output_id) = runtime.output_id() else {
+        return;
+    };
     let queue = GEOMETRY_PERSIST_QUEUE.get_or_init(GeometryPersistQueue::start);
     queue.submit(PendingGeometryPersist {
         app_handle: app_handle.clone(),
@@ -944,7 +1368,9 @@ fn schedule_floating_geometry_persist(
 
 #[cfg(not(target_os = "macos"))]
 fn flush_floating_geometry_persist() {
-    if let Some(queue) = GEOMETRY_PERSIST_QUEUE.get() { queue.flush(); }
+    if let Some(queue) = GEOMETRY_PERSIST_QUEUE.get() {
+        queue.flush();
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -968,7 +1394,8 @@ static WINDOW_MANAGER: OnceLock<Result<WindowManager, String>> = OnceLock::new()
 fn window_manager() -> Result<&'static WindowManager> {
     WINDOW_MANAGER
         .get_or_init(|| {
-            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<WindowManager, String>>(1);
+            let (ready_tx, ready_rx) =
+                std::sync::mpsc::sync_channel::<Result<WindowManager, String>>(1);
             std::thread::Builder::new()
                 .name("inkue-output-window".into())
                 .spawn(move || {
@@ -981,16 +1408,20 @@ fn window_manager() -> Result<&'static WindowManager> {
                     };
                     let proxy = event_loop.create_proxy();
                     let _ = ready_tx.send(Ok(WindowManager { proxy }));
-                    let mut app = OutputApp { windows: HashMap::new() };
-                    let result = std::panic::catch_unwind(
-                        std::panic::AssertUnwindSafe(|| event_loop.run_app(&mut app)),
-                    );
+                    let mut app = OutputApp {
+                        windows: HashMap::new(),
+                    };
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        event_loop.run_app(&mut app)
+                    }));
                     if result.is_err() {
                         log::error!("[render] output window event loop panicked");
                     }
                 })
                 .map_err(|e| format!("spawn output-window thread: {e}"))?;
-            ready_rx.recv().map_err(|_| "output window thread exited before event loop was ready".to_string())?
+            ready_rx.recv().map_err(|_| {
+                "output window thread exited before event loop was ready".to_string()
+            })?
         })
         .as_ref()
         .map_err(|e| anyhow!(e.clone()))
@@ -1015,7 +1446,11 @@ impl ApplicationHandler<OutputCommand> for OutputApp {
     fn resumed(&mut self, _el: &ActiveEventLoop) {}
 
     fn user_event(&mut self, el: &ActiveEventLoop, command: OutputCommand) {
-        let OutputCommand::Create { runtime, app_handle, tx } = command;
+        let OutputCommand::Create {
+            runtime,
+            app_handle,
+            tx,
+        } = command;
         let attrs = WindowAttributes::default()
             .with_title("Qlisa Output")
             .with_visible(false)
@@ -1035,7 +1470,7 @@ impl ApplicationHandler<OutputCommand> for OutputApp {
         };
 
         let window = match el.create_window(attrs) {
-            Ok(w)  => Arc::new(w),
+            Ok(w) => Arc::new(w),
             Err(e) => {
                 let _ = tx.send(Err(anyhow!("create_window: {e}")));
                 return;
@@ -1044,33 +1479,45 @@ impl ApplicationHandler<OutputCommand> for OutputApp {
         window.set_cursor_visible(!runtime.window_preferences().1);
 
         let rwh: RawWindowHandle = match window.window_handle() {
-            Ok(h)  => h.as_raw(),
+            Ok(h) => h.as_raw(),
             Err(e) => {
                 let _ = tx.send(Err(anyhow!("window_handle: {e}")));
                 return;
             }
         };
         let rdh: RawDisplayHandle = match el.display_handle() {
-            Ok(h)  => h.as_raw(),
+            Ok(h) => h.as_raw(),
             Err(e) => {
                 let _ = tx.send(Err(anyhow!("display_handle: {e}")));
                 return;
             }
         };
 
-        if let Ok(mut w) = runtime.window.lock() { *w = Some(Arc::clone(&window)); }
+        if let Ok(mut w) = runtime.window.lock() {
+            *w = Some(Arc::clone(&window));
+        }
         let id = window.id();
-        let _ = tx.send(Ok(SendableHandles { rwh, rdh, width: 1920, height: 1080 }));
-        self.windows.insert(id, OutputWindow {
-            window,
-            app_handle,
-            modifiers: ModifiersState::empty(),
-            runtime,
-        });
+        let _ = tx.send(Ok(SendableHandles {
+            rwh,
+            rdh,
+            width: 1920,
+            height: 1080,
+        }));
+        self.windows.insert(
+            id,
+            OutputWindow {
+                window,
+                app_handle,
+                modifiers: ModifiersState::empty(),
+                runtime,
+            },
+        );
     }
 
     fn window_event(&mut self, _el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-        let Some(output) = self.windows.get_mut(&id) else { return; };
+        let Some(output) = self.windows.get_mut(&id) else {
+            return;
+        };
         let window = &output.window;
         match event {
             WindowEvent::CloseRequested => {
@@ -1086,13 +1533,21 @@ impl ApplicationHandler<OutputCommand> for OutputApp {
             WindowEvent::Resized(size) => {
                 output.runtime.set_size(size.width, size.height);
                 if let Some(geometry) = output.runtime.record_floating_geometry(window) {
-                    schedule_floating_geometry_persist(&output.app_handle, &output.runtime, geometry);
+                    schedule_floating_geometry_persist(
+                        &output.app_handle,
+                        &output.runtime,
+                        geometry,
+                    );
                 }
             }
 
             WindowEvent::Moved(_) => {
                 if let Some(geometry) = output.runtime.record_floating_geometry(window) {
-                    schedule_floating_geometry_persist(&output.app_handle, &output.runtime, geometry);
+                    schedule_floating_geometry_persist(
+                        &output.app_handle,
+                        &output.runtime,
+                        geometry,
+                    );
                 }
             }
 
@@ -1100,7 +1555,11 @@ impl ApplicationHandler<OutputCommand> for OutputApp {
                 output.modifiers = m.state();
             }
 
-            WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 // The output window would swallow these otherwise — GO / panic
                 // must keep working while the operator has it focused. Forward
                 // to the main webview, which replays them into the regular
@@ -1161,7 +1620,9 @@ fn x11_xkb_available() -> bool {
         // SAFETY: valid C string; the handle is closed again immediately.
         let h = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_LAZY) };
         if !h.is_null() {
-            unsafe { libc::dlclose(h); }
+            unsafe {
+                libc::dlclose(h);
+            }
             return true;
         }
     }
@@ -1191,12 +1652,15 @@ fn build_event_loop() -> Result<EventLoop<OutputCommand>> {
         use winit::platform::x11::EventLoopBuilderExtX11;
         b.with_any_thread(true).with_x11();
         log::info!("[render] output window backend: X11/XWayland (default)");
-        b.build().map_err(|e| anyhow!("EventLoop (Linux/XWayland): {e}"))
+        b.build()
+            .map_err(|e| anyhow!("EventLoop (Linux/XWayland): {e}"))
     } else {
         use winit::platform::wayland::EventLoopBuilderExtWayland;
         EventLoopBuilderExtWayland::with_any_thread(&mut b, true);
         if force_wayland {
-            log::info!("[render] output window backend: native Wayland (forced via INKUE_OUTPUT_BACKEND)");
+            log::info!(
+                "[render] output window backend: native Wayland (forced via INKUE_OUTPUT_BACKEND)"
+            );
         } else {
             log::warn!(
                 "[render] output window backend: native Wayland — XWayland unavailable \
@@ -1204,7 +1668,8 @@ fn build_event_loop() -> Result<EventLoop<OutputCommand>> {
                  Install the 'libxkbcommon-x11-0' package to enable the smoother XWayland path."
             );
         }
-        b.build().map_err(|e| anyhow!("EventLoop (Linux/Wayland): {e}"))
+        b.build()
+            .map_err(|e| anyhow!("EventLoop (Linux/Wayland): {e}"))
     }
 }
 
@@ -1216,11 +1681,14 @@ fn create_native_window(
 ) -> Result<(RawWindowHandle, RawDisplayHandle, u32, u32)> {
     let (tx, rx) = std::sync::mpsc::channel::<Result<SendableHandles>>();
     let manager = window_manager()?;
-    manager.proxy.send_event(OutputCommand::Create {
-        runtime,
-        app_handle: app_handle.clone(),
-        tx,
-    }).map_err(|e| anyhow!("send output-window create request: {e}"))?;
+    manager
+        .proxy
+        .send_event(OutputCommand::Create {
+            runtime,
+            app_handle: app_handle.clone(),
+            tx,
+        })
+        .map_err(|e| anyhow!("send output-window create request: {e}"))?;
     let h = rx.recv()??;
     Ok((h.rwh, h.rdh, h.width, h.height))
 }
@@ -1230,9 +1698,9 @@ fn create_native_window(
 // ---------------------------------------------------------------------------
 
 fn spawn_render_thread(
-    handles:  SendableHandles,
-    lib:      Arc<MpvLib>,
-    mpv_ctx:  Arc<MpvCtx>,
+    handles: SendableHandles,
+    lib: Arc<MpvLib>,
+    mpv_ctx: Arc<MpvCtx>,
     slot_registry: Arc<slot::SlotRegistry>,
     runtime: Arc<RenderRuntime>,
     pipeline: Arc<PipelineState>,
@@ -1241,7 +1709,15 @@ fn spawn_render_thread(
     std::thread::Builder::new()
         .name("inkue-output-render".into())
         .spawn(move || {
-            if let Err(e) = render_thread_main(handles, lib, mpv_ctx, slot_registry, runtime, pipeline, ready_tx) {
+            if let Err(e) = render_thread_main(
+                handles,
+                lib,
+                mpv_ctx,
+                slot_registry,
+                runtime,
+                pipeline,
+                ready_tx,
+            ) {
                 log::error!("[render] fatal: {e}");
             }
         })
@@ -1303,7 +1779,8 @@ static MONITOR_CAPTURE_FPS: OnceLock<u32> = OnceLock::new();
 
 fn monitor_capture_interval() -> Duration {
     let fps = *MONITOR_CAPTURE_FPS.get_or_init(|| {
-        std::env::var("QLISA_MONITOR_CAPTURE_FPS").ok()
+        std::env::var("QLISA_MONITOR_CAPTURE_FPS")
+            .ok()
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(MONITOR_MAX_CAPTURE_FPS)
             .clamp(1, MONITOR_MAX_CAPTURE_FPS)
@@ -1314,7 +1791,8 @@ fn monitor_capture_interval() -> Duration {
 fn advance_monitor_deadline(deadline: &mut std::time::Instant, now: std::time::Instant) {
     while *deadline <= now {
         let interval = monitor_capture_interval();
-        *deadline = deadline.checked_add(interval)
+        *deadline = deadline
+            .checked_add(interval)
             .unwrap_or_else(|| now + interval);
     }
 }
@@ -1324,9 +1802,9 @@ fn advance_monitor_deadline(deadline: &mut std::time::Instant, now: std::time::I
 // ---------------------------------------------------------------------------
 
 fn render_thread_main(
-    handles:  SendableHandles,
-    lib:      Arc<MpvLib>,
-    mpv_ctx:  Arc<MpvCtx>,
+    handles: SendableHandles,
+    lib: Arc<MpvLib>,
+    mpv_ctx: Arc<MpvCtx>,
     slot_registry: Arc<slot::SlotRegistry>,
     runtime: Arc<RenderRuntime>,
     pipeline: Arc<PipelineState>,
@@ -1354,7 +1832,8 @@ fn render_thread_main(
         .with_alpha_size(8)
         .build();
     let config = try_init!(unsafe {
-        display.find_configs(config_tpl)
+        display
+            .find_configs(config_tpl)
             .map_err(|e| anyhow!("find_configs: {e}"))?
             .next()
             .ok_or_else(|| anyhow!("no compatible GL config found"))
@@ -1371,7 +1850,8 @@ fn render_thread_main(
         .with_context_api(ContextApi::OpenGl(Some(gl_version)))
         .build(Some(handles.rwh));
     let not_current = try_init!(unsafe {
-        display.create_context(&config, &ctx_attrs)
+        display
+            .create_context(&config, &ctx_attrs)
             .map_err(|e| anyhow!("create_context: {e}"))
     });
 
@@ -1382,12 +1862,14 @@ fn render_thread_main(
         .with_srgb(Some(false))
         .build(handles.rwh, w0, h0);
     let surface = try_init!(unsafe {
-        display.create_window_surface(&config, &surf_attrs)
+        display
+            .create_window_surface(&config, &surf_attrs)
             .map_err(|e| anyhow!("create_window_surface: {e}"))
     });
 
     // ── 5. Make context current on THIS thread ────────────────────────────────
-    let ctx = try_init!(not_current.make_current(&surface)
+    let ctx = try_init!(not_current
+        .make_current(&surface)
         .map_err(|e| anyhow!("make_current: {e}")));
 
     // ── 6. vsync ──────────────────────────────────────────────────────────────
@@ -1421,28 +1903,44 @@ fn render_thread_main(
     // ── 9. mpv render context with OpenGL backend ─────────────────────────────
     let display_ptr = &*display_box as *const Display as *mut c_void;
     let mut gl_init = MpvOpenglInitParams {
-        get_proc_address:     gl_get_proc_address,
+        get_proc_address: gl_get_proc_address,
         get_proc_address_ctx: display_ptr,
     };
     let api_str = CString::new("opengl").unwrap();
     let flip_y: i32 = 1;
     let params = [
-        MpvRenderParam { type_: MPV_RENDER_PARAM_API_TYPE,           data: api_str.as_ptr() as *mut c_void },
-        MpvRenderParam { type_: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, data: &mut gl_init as *mut _ as *mut c_void },
-        MpvRenderParam { type_: 0, data: std::ptr::null_mut() },
+        MpvRenderParam {
+            type_: MPV_RENDER_PARAM_API_TYPE,
+            data: api_str.as_ptr() as *mut c_void,
+        },
+        MpvRenderParam {
+            type_: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
+            data: &mut gl_init as *mut _ as *mut c_void,
+        },
+        MpvRenderParam {
+            type_: 0,
+            data: std::ptr::null_mut(),
+        },
     ];
     let mut render_ctx: *mut c_void = std::ptr::null_mut();
-    let ret = unsafe { (lib.mpv_render_context_create)(&mut render_ctx, mpv_ctx.0, params.as_ptr()) };
+    let ret =
+        unsafe { (lib.mpv_render_context_create)(&mut render_ctx, mpv_ctx.0, params.as_ptr()) };
     if ret < 0 {
         let _ = ready_tx.send(Err(anyhow!("mpv_render_context_create: {ret}")));
         return Err(anyhow!("mpv_render_context_create: {ret}"));
     }
-    log::info!("[render] mpv render context created (OpenGL {}.{} Core)", gl_version.major, gl_version.minor);
+    log::info!(
+        "[render] mpv render context created (OpenGL {}.{} Core)",
+        gl_version.major,
+        gl_version.minor
+    );
     let _ = ready_tx.send(Ok(()));
 
     // ── 10. Update callback ───────────────────────────────────────────────────
     let signal_ptr = Arc::as_ptr(&runtime.shared.signal) as *mut c_void;
-    unsafe { (lib.mpv_render_context_set_update_callback)(render_ctx, Some(on_mpv_update), signal_ptr); }
+    unsafe {
+        (lib.mpv_render_context_set_update_callback)(render_ctx, Some(on_mpv_update), signal_ptr);
+    }
     // This guard is declared after the current GL context, so every render
     // context is released on this thread while that GL context is still live.
     // It also covers fallible shader setup below.
@@ -1485,13 +1983,17 @@ fn render_thread_main(
     // Off by default (0/unset = uncapped) — it trades some video smoothness, so it is a
     // knob the operator turns on only if the UI still lags after hwdec/XWayland.
     #[cfg(target_os = "linux")]
-    let min_present_interval: Option<Duration> = std::env::var("INKUE_OUTPUT_FPS").ok()
+    let min_present_interval: Option<Duration> = std::env::var("INKUE_OUTPUT_FPS")
+        .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|&fps| fps > 0)
         .map(|fps| Duration::from_micros(1_000_000 / fps as u64));
     #[cfg(target_os = "linux")]
     if let Some(iv) = min_present_interval {
-        log::info!("[render] output FPS cap enabled: ~{} fps", 1_000_000 / iv.as_micros().max(1) as u64);
+        log::info!(
+            "[render] output FPS cap enabled: ~{} fps",
+            1_000_000 / iv.as_micros().max(1) as u64
+        );
     }
     #[cfg(target_os = "linux")]
     let mut last_present = std::time::Instant::now();
@@ -1508,21 +2010,38 @@ fn render_thread_main(
             }
             if s.needs_render_init.swap(false, Ordering::AcqRel) {
                 let mut gl_init2 = MpvOpenglInitParams {
-                    get_proc_address:     gl_get_proc_address,
+                    get_proc_address: gl_get_proc_address,
                     get_proc_address_ctx: display_ptr,
                 };
                 let api_str2 = CString::new("opengl").unwrap();
                 let params2 = [
-                    MpvRenderParam { type_: MPV_RENDER_PARAM_API_TYPE,           data: api_str2.as_ptr() as *mut c_void },
-                    MpvRenderParam { type_: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, data: &mut gl_init2 as *mut _ as *mut c_void },
-                    MpvRenderParam { type_: 0, data: std::ptr::null_mut() },
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_API_TYPE,
+                        data: api_str2.as_ptr() as *mut c_void,
+                    },
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
+                        data: &mut gl_init2 as *mut _ as *mut c_void,
+                    },
+                    MpvRenderParam {
+                        type_: 0,
+                        data: std::ptr::null_mut(),
+                    },
                 ];
                 let mut rc: *mut c_void = std::ptr::null_mut();
-                let ret = unsafe { (lib.mpv_render_context_create)(&mut rc, s.mpv_ctx.0, params2.as_ptr()) };
+                let ret = unsafe {
+                    (lib.mpv_render_context_create)(&mut rc, s.mpv_ctx.0, params2.as_ptr())
+                };
                 if ret < 0 {
                     log::error!("[render] slot {} render context failed: {ret}", s.index);
                 } else {
-                    unsafe { (lib.mpv_render_context_set_update_callback)(rc, Some(on_mpv_update), signal_ptr); }
+                    unsafe {
+                        (lib.mpv_render_context_set_update_callback)(
+                            rc,
+                            Some(on_mpv_update),
+                            signal_ptr,
+                        );
+                    }
                     s.render_ctx.store(rc, Ordering::Release);
                     log::info!("[render] slot {} render context created", s.index);
                 }
@@ -1531,19 +2050,40 @@ fn render_thread_main(
 
         // Per-slot opacity animations pace the loop at 16 ms just like the
         // master fade.
-        let master_animating = pipeline.fade.lock().ok()
+        let master_animating = pipeline
+            .fade
+            .lock()
+            .ok()
             .map(|s| s.current_alpha != s.target_alpha)
             .unwrap_or(false);
-        let operator_ftb_animating = pipeline.operator_ftb.lock().ok()
+        let operator_ftb_animating = pipeline
+            .operator_ftb
+            .lock()
+            .ok()
             .map(|s| s.current_alpha != s.target_alpha)
             .unwrap_or(false);
         let slots_animating = slots.iter().any(|s| {
-            s.state.lock().map(|st| st.anim.is_animating()).unwrap_or(false)
+            s.state
+                .lock()
+                .map(|st| st.anim.is_animating())
+                .unwrap_or(false)
         });
-        let needs_animation = master_animating || operator_ftb_animating || slots_animating || runtime.external_animating();
-        let mut timeout = if needs_animation { Duration::from_millis(16) } else { Duration::from_millis(100) };
-        if runtime.shared.monitor_capture_active.load(Ordering::Acquire) {
-            let monitor_wait = next_monitor_capture.saturating_duration_since(std::time::Instant::now());
+        let needs_animation = master_animating
+            || operator_ftb_animating
+            || slots_animating
+            || runtime.external_animating();
+        let mut timeout = if needs_animation {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(100)
+        };
+        if runtime
+            .shared
+            .monitor_capture_active
+            .load(Ordering::Acquire)
+        {
+            let monitor_wait =
+                next_monitor_capture.saturating_duration_since(std::time::Instant::now());
             timeout = timeout.min(monitor_wait);
         }
 
@@ -1565,7 +2105,9 @@ fn render_thread_main(
         }
 
         let (alpha, done) = fade::tick_fade(&pipeline);
-        if done { fade::execute_pending(&pipeline); }
+        if done {
+            fade::execute_pending(&pipeline);
+        }
         let (operator_alpha, _) = fade::tick_operator_blackout(&pipeline);
 
         if runtime.is_shutting_down() {
@@ -1573,9 +2115,14 @@ fn render_thread_main(
         }
 
         // Overlay context (timer OSD / Text Cue / test patterns / win32 path).
-        let flags     = unsafe { (lib.mpv_render_context_update)(render_ctx) };
+        let flags = unsafe { (lib.mpv_render_context_update)(render_ctx) };
         let has_frame = flags & MPV_RENDER_UPDATE_FRAME != 0;
-        let text_active = runtime.shared.text_overlay_active.load(Ordering::Relaxed);
+        let timer_active = pipeline
+            .timer_overlay_owners
+            .lock()
+            .is_ok_and(|owners| !owners.is_empty());
+        let text_active =
+            runtime.shared.text_overlay_active.load(Ordering::Relaxed) || timer_active;
         // Warp params changed since the last pass — must redraw even without a
         // new mpv frame (paused video / held image), or alignment edits would
         // only show on the next frame.
@@ -1591,6 +2138,11 @@ fn render_thread_main(
             layer_key: u64,
             opacity: f32,
             blend_mode: i32,
+            geometry: VideoGeometry,
+            source_aspect: f32,
+            source_rotation: u32,
+            presentation_requested: bool,
+            presentation_frame: Option<PresentationFrame>,
             has_new_frame: bool,
             render_ctx: *mut c_void,
         }
@@ -1607,14 +2159,32 @@ fn render_thread_main(
             let sflags = unsafe { (lib.mpv_render_context_update)(rc) };
             let s_new_frame = sflags & MPV_RENDER_UPDATE_FRAME != 0;
             let (opacity, _still_animating) = slot::tick_slot(s);
-            let Some((voice, layer_key, blend_mode)) = s
-                .state
-                .lock()
-                .ok()
-                .map(|st| (st.voice_id, st.layer_key, st.blend_mode.shader_id()))
-            else { continue };
+            let Some((
+                voice,
+                layer_key,
+                blend_mode,
+                geometry,
+                source_aspect,
+                source_rotation,
+                presentation_layout,
+            )) = s.state.lock().ok().map(|st| {
+                (
+                    st.voice_id,
+                    st.layer_key,
+                    st.blend_mode.shader_id(),
+                    st.geometry,
+                    st.source_aspect as f32,
+                    st.source_rotation,
+                    st.presentation_video_layout,
+                )
+            })
+            else {
+                continue;
+            };
             if voice.is_none() {
-                if let Some(v) = slot_valid.get_mut(s.index) { *v = false; }
+                if let Some(v) = slot_valid.get_mut(s.index) {
+                    *v = false;
+                }
                 continue;
             }
             any_slot_frame |= s_new_frame;
@@ -1623,15 +2193,33 @@ fn render_thread_main(
                 layer_key,
                 opacity,
                 blend_mode,
+                geometry,
+                source_aspect,
+                source_rotation,
+                presentation_requested: presentation_layout.is_some(),
+                presentation_frame: presentation_layout
+                    .and_then(|layout| presentation_frame(layout, w_px, h_px)),
                 has_new_frame: s_new_frame,
                 render_ctx: rc,
             });
         }
         layers.sort_by_key(|l| l.layer_key);
-        let (external_sources, external_animating, external_dirty) = runtime.tick_external_sources();
+        let (external_sources, external_animating, external_dirty) =
+            runtime.tick_external_sources();
         let external_active = !external_sources.is_empty();
-        let current_external: std::collections::HashSet<_> = external_sources.iter().map(|source| source.voice).collect();
-        external_targets.retain(|voice, target| { if current_external.contains(voice) { true } else { unsafe { gl.delete_framebuffer(target.target.fbo); gl.delete_texture(target.target.tex); } false } });
+        let current_external: std::collections::HashSet<_> =
+            external_sources.iter().map(|source| source.voice).collect();
+        external_targets.retain(|voice, target| {
+            if current_external.contains(voice) {
+                true
+            } else {
+                unsafe {
+                    gl.delete_framebuffer(target.target.fbo);
+                    gl.delete_texture(target.target.tex);
+                }
+                false
+            }
+        });
 
         if runtime.is_shutting_down() {
             break 'render;
@@ -1645,11 +2233,20 @@ fn render_thread_main(
         // committed frame arrives immediately when the window is revealed.
         let network_sink = runtime.network_frame_sink();
         let capture_active = network_sink.is_some()
-            && runtime.shared.network_capture_active.load(Ordering::Relaxed);
-        let monitor_capture_active = runtime.shared.monitor_capture_active.load(Ordering::Relaxed);
+            && runtime
+                .shared
+                .network_capture_active
+                .load(Ordering::Relaxed);
+        let monitor_capture_active = runtime
+            .shared
+            .monitor_capture_active
+            .load(Ordering::Relaxed);
         let output_visible = runtime.shared.visible.load(Ordering::Relaxed);
-        if !output_visible && !capture_active && !monitor_capture_active { continue; }
-        let monitor_capture_due = monitor_capture_active && std::time::Instant::now() >= next_monitor_capture;
+        if !output_visible && !capture_active && !monitor_capture_active {
+            continue;
+        }
+        let monitor_capture_due =
+            monitor_capture_active && std::time::Instant::now() >= next_monitor_capture;
         if monitor_capture_due {
             // Consume the cadence slot before target setup or any early
             // continue, so an unavailable target cannot turn this into a
@@ -1660,9 +2257,21 @@ fn render_thread_main(
         // mpv, no animation, no active layers or overlay work.  Text/timer
         // overlays render unconditionally (mpv does not signal OSD-only
         // changes in idle mode).
-        if !has_frame && !any_slot_frame && alpha == 0 && operator_alpha == 0 && !text_active && !warp_dirty
-            && !needs_animation && !external_animating && !external_dirty && layers.is_empty()
-            && !external_active && !monitor_capture_due { continue; }
+        if !has_frame
+            && !any_slot_frame
+            && alpha == 0
+            && operator_alpha == 0
+            && !text_active
+            && !warp_dirty
+            && !needs_animation
+            && !external_animating
+            && !external_dirty
+            && layers.is_empty()
+            && !external_active
+            && !monitor_capture_due
+        {
+            continue;
+        }
         // Hidden display outputs render only for a due monitor sample or an
         // actual source change. This avoids turning a held image into a
         // full-resolution 10 fps compositor workload merely because the
@@ -1692,7 +2301,10 @@ fn render_thread_main(
                     Ok(readback) => network_readback = Some(readback),
                     Err(error) => {
                         log::warn!("[render] network readback unavailable: {error}");
-                        runtime.shared.network_capture_active.store(false, Ordering::Relaxed);
+                        runtime
+                            .shared
+                            .network_capture_active
+                            .store(false, Ordering::Relaxed);
                         continue;
                     }
                 }
@@ -1700,25 +2312,45 @@ fn render_thread_main(
         }
         if monitor_capture_active {
             let (preview_w, preview_h) = monitor_dimensions(w_px, h_px);
-            targets_ok &= ensure_warp_target(&gl, &mut monitor_target, preview_w, preview_h).is_ok();
+            targets_ok &=
+                ensure_warp_target(&gl, &mut monitor_target, preview_w, preview_h).is_ok();
             if monitor_readback.is_none() {
                 match NetworkReadback::new(&gl) {
                     Ok(readback) => monitor_readback = Some(readback),
                     Err(error) => {
                         log::warn!("[render] output monitor readback unavailable: {error}");
-                        runtime.shared.monitor_capture_active.store(false, Ordering::Relaxed);
+                        runtime
+                            .shared
+                            .monitor_capture_active
+                            .store(false, Ordering::Relaxed);
                     }
                 }
             }
         }
-        if external_active { targets_ok &= ensure_warp_target(&gl, &mut external_layer_target, w_px, h_px).is_ok(); }
+        if external_active {
+            targets_ok &= ensure_warp_target(&gl, &mut external_layer_target, w_px, h_px).is_ok();
+        }
         if slot_targets.len() < slots.len() {
             slot_targets.resize_with(slots.len(), || None);
             slot_valid.resize(slots.len(), false);
         }
         for l in &layers {
             if let Some(t) = slot_targets.get_mut(l.slot_index) {
-                targets_ok &= ensure_warp_target(&gl, t, w_px, h_px).is_ok();
+                let (target_w, target_h) = presentation_target_size(
+                    l.presentation_requested,
+                    l.presentation_frame,
+                    w_px,
+                    h_px,
+                );
+                let resized = t
+                    .as_ref()
+                    .map_or(true, |target| target.w != target_w || target.h != target_h);
+                if resized {
+                    if let Some(valid) = slot_valid.get_mut(l.slot_index) {
+                        *valid = false;
+                    }
+                }
+                targets_ok &= ensure_warp_target(&gl, t, target_w, target_h).is_ok();
             }
         }
         if !targets_ok {
@@ -1746,7 +2378,9 @@ fn render_thread_main(
                     }
                     Err(error) => {
                         log::warn!("[render] external frame upload: {error}");
-                        if let Some(target) = target { external_targets.insert(source.voice, target); }
+                        if let Some(target) = target {
+                            external_targets.insert(source.voice, target);
+                        }
                     }
                 }
             }
@@ -1768,16 +2402,35 @@ fn render_thread_main(
         let mut no_block: i32 = 0;
         let overlay_on = super::overlay_active(&pipeline);
         if let (true, Some(t)) = (overlay_on, &overlay_target) {
-            let mut fbo = MpvOpenglFbo { fbo: t.fbo.0.get() as i32, w: w_px as i32, h: h_px as i32, internal_format: 0 };
+            let mut fbo = MpvOpenglFbo {
+                fbo: t.fbo.0.get() as i32,
+                w: w_px as i32,
+                h: h_px as i32,
+                internal_format: 0,
+            };
             let mut flip = flip_y;
             let rp = [
-                MpvRenderParam { type_: MPV_RENDER_PARAM_OPENGL_FBO, data: &mut fbo  as *mut _ as *mut c_void },
-                MpvRenderParam { type_: MPV_RENDER_PARAM_FLIP_Y,     data: &mut flip as *mut _ as *mut c_void },
-                MpvRenderParam { type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: &mut no_block as *mut _ as *mut c_void },
-                MpvRenderParam { type_: 0, data: std::ptr::null_mut() },
+                MpvRenderParam {
+                    type_: MPV_RENDER_PARAM_OPENGL_FBO,
+                    data: &mut fbo as *mut _ as *mut c_void,
+                },
+                MpvRenderParam {
+                    type_: MPV_RENDER_PARAM_FLIP_Y,
+                    data: &mut flip as *mut _ as *mut c_void,
+                },
+                MpvRenderParam {
+                    type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                    data: &mut no_block as *mut _ as *mut c_void,
+                },
+                MpvRenderParam {
+                    type_: 0,
+                    data: std::ptr::null_mut(),
+                },
             ];
             let ret = unsafe { (lib.mpv_render_context_render)(render_ctx, rp.as_ptr()) };
-            if ret < 0 { log::warn!("[render] overlay render: {ret}"); }
+            if ret < 0 {
+                log::warn!("[render] overlay render: {ret}");
+            }
         }
         let overlay_valid = overlay_on;
 
@@ -1790,17 +2443,38 @@ fn render_thread_main(
                 continue;
             }
             if let Some(Some(t)) = slot_targets.get(l.slot_index) {
-                let mut fbo = MpvOpenglFbo { fbo: t.fbo.0.get() as i32, w: w_px as i32, h: h_px as i32, internal_format: 0 };
+                let mut fbo = MpvOpenglFbo {
+                    fbo: t.fbo.0.get() as i32,
+                    w: t.w as i32,
+                    h: t.h as i32,
+                    internal_format: 0,
+                };
                 let mut flip = flip_y;
                 let rp = [
-                    MpvRenderParam { type_: MPV_RENDER_PARAM_OPENGL_FBO, data: &mut fbo  as *mut _ as *mut c_void },
-                    MpvRenderParam { type_: MPV_RENDER_PARAM_FLIP_Y,     data: &mut flip as *mut _ as *mut c_void },
-                    MpvRenderParam { type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: &mut no_block as *mut _ as *mut c_void },
-                    MpvRenderParam { type_: 0, data: std::ptr::null_mut() },
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_OPENGL_FBO,
+                        data: &mut fbo as *mut _ as *mut c_void,
+                    },
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_FLIP_Y,
+                        data: &mut flip as *mut _ as *mut c_void,
+                    },
+                    MpvRenderParam {
+                        type_: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
+                        data: &mut no_block as *mut _ as *mut c_void,
+                    },
+                    MpvRenderParam {
+                        type_: 0,
+                        data: std::ptr::null_mut(),
+                    },
                 ];
                 let ret = unsafe { (lib.mpv_render_context_render)(l.render_ctx, rp.as_ptr()) };
-                if ret < 0 { log::warn!("[render] slot {} render: {ret}", l.slot_index); }
-                if let Some(v) = slot_valid.get_mut(l.slot_index) { *v = true; }
+                if ret < 0 {
+                    log::warn!("[render] slot {} render: {ret}", l.slot_index);
+                }
+                if let Some(v) = slot_valid.get_mut(l.slot_index) {
+                    *v = true;
+                }
             }
         }
 
@@ -1816,20 +2490,92 @@ fn render_thread_main(
         }
         let (mut slot_at, mut external_at) = (0usize, 0usize);
         while slot_at < layers.len() || external_at < external_sources.len() {
-            let external_next = match (layers.get(slot_at), external_sources.get(external_at)) { (Some(slot), Some(external)) => external.layer_key < slot.layer_key, (None, Some(_)) => true, _ => false };
+            let external_next = match (layers.get(slot_at), external_sources.get(external_at)) {
+                (Some(slot), Some(external)) => external.layer_key < slot.layer_key,
+                (None, Some(_)) => true,
+                _ => false,
+            };
             let dst = 1 - src;
-            let (backdrop_tex, dst_fbo) = match (&pingpong[src], &pingpong[dst]) { (Some(a), Some(b)) => (a.tex, b.fbo), _ => break };
+            let (backdrop_tex, dst_fbo) = match (&pingpong[src], &pingpong[dst]) {
+                (Some(a), Some(b)) => (a.tex, b.fbo),
+                _ => break,
+            };
             if external_next {
-                let external = &external_sources[external_at]; external_at += 1;
-                if external.opacity <= 0.0 { continue; }
-                let (Some(texture), Some(staging)) = (external_targets.get(&external.voice), external_layer_target.as_ref()) else { continue };
-                draw_geometry_pass(&gl, geometry_program, geometry_vao, texture.target.tex, external.geometry, texture.target.w, texture.target.h, w_px, h_px, staging.fbo);
-                draw_composite_pass(&gl, composite_program, composite_vao, backdrop_tex, staging.tex, external.blend_mode, external.opacity, false, w_px, h_px, dst_fbo);
+                let external = &external_sources[external_at];
+                external_at += 1;
+                if external.opacity <= 0.0 {
+                    continue;
+                }
+                let (Some(texture), Some(staging)) = (
+                    external_targets.get(&external.voice),
+                    external_layer_target.as_ref(),
+                ) else {
+                    continue;
+                };
+                draw_geometry_pass(
+                    &gl,
+                    geometry_program,
+                    geometry_vao,
+                    texture.target.tex,
+                    external.geometry,
+                    texture.target.w,
+                    texture.target.h,
+                    w_px,
+                    h_px,
+                    staging.fbo,
+                );
+                draw_composite_pass(
+                    &gl,
+                    composite_program,
+                    composite_vao,
+                    backdrop_tex,
+                    staging.tex,
+                    external.blend_mode,
+                    external.opacity,
+                    false,
+                    None,
+                    None,
+                    w_px,
+                    h_px,
+                    dst_fbo,
+                );
             } else {
-                let layer = &layers[slot_at]; slot_at += 1;
-                if layer.opacity <= 0.0 { continue; }
-                let Some(Some(layer_t)) = slot_targets.get(layer.slot_index) else { continue };
-                draw_composite_pass(&gl, composite_program, composite_vao, backdrop_tex, layer_t.tex, layer.blend_mode, layer.opacity, true, w_px, h_px, dst_fbo);
+                let layer = &layers[slot_at];
+                slot_at += 1;
+                if layer.presentation_requested && layer.presentation_frame.is_none() {
+                    continue;
+                }
+                if layer.opacity <= 0.0 {
+                    continue;
+                }
+                let Some(Some(layer_t)) = slot_targets.get(layer.slot_index) else {
+                    continue;
+                };
+                let crop_mask = layer.geometry.has_crop().then_some(CropMask {
+                    geometry: layer.geometry,
+                    source_aspect: layer.source_aspect,
+                    source_rotation: layer.source_rotation,
+                    output_aspect: layer
+                        .presentation_frame
+                        .map(|frame| frame.width as f32 / frame.height.max(1) as f32),
+                });
+                draw_composite_pass(
+                    &gl,
+                    composite_program,
+                    composite_vao,
+                    backdrop_tex,
+                    layer_t.tex,
+                    layer.blend_mode,
+                    layer.opacity,
+                    true,
+                    crop_mask,
+                    layer
+                        .presentation_frame
+                        .map(|frame| frame.uv_rect(w_px, h_px)),
+                    w_px,
+                    h_px,
+                    dst_fbo,
+                );
             }
             src = dst;
         }
@@ -1839,8 +2585,19 @@ fn render_thread_main(
                 let dst = 1 - src;
                 if let (Some(a), Some(b)) = (&pingpong[src], &pingpong[dst]) {
                     draw_composite_pass(
-                        &gl, composite_program, composite_vao,
-                        a.tex, t.tex, 0, 1.0, true, w_px, h_px, b.fbo,
+                        &gl,
+                        composite_program,
+                        composite_vao,
+                        a.tex,
+                        t.tex,
+                        0,
+                        1.0,
+                        true,
+                        None,
+                        None,
+                        w_px,
+                        h_px,
+                        b.fbo,
                     );
                     src = dst;
                 }
@@ -1858,15 +2615,36 @@ fn render_thread_main(
                 network_readback.as_mut(),
             ) {
                 match warp {
-                    Some(hinv) => draw_warp_pass_to(&gl, warp_program, warp_vao, tex, &hinv, w_px, h_px, Some(target.fbo)),
-                    None => draw_blit_pass_to(&gl, blit_program, blit_vao, tex, w_px, h_px, Some(target.fbo)),
+                    Some(hinv) => draw_warp_pass_to(
+                        &gl,
+                        warp_program,
+                        warp_vao,
+                        tex,
+                        &hinv,
+                        w_px,
+                        h_px,
+                        Some(target.fbo),
+                    ),
+                    None => draw_blit_pass_to(
+                        &gl,
+                        blit_program,
+                        blit_vao,
+                        tex,
+                        w_px,
+                        h_px,
+                        Some(target.fbo),
+                    ),
                 }
                 unsafe {
                     gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
                     gl.viewport(0, 0, w_px as i32, h_px as i32);
                 }
-                if alpha > 0 { draw_fade_quad(&gl, fade_program, fade_vao, alpha as f32 / 255.0); }
-                if operator_alpha > 0 { draw_fade_quad(&gl, fade_program, fade_vao, operator_alpha as f32 / 255.0); }
+                if alpha > 0 {
+                    draw_fade_quad(&gl, fade_program, fade_vao, alpha as f32 / 255.0);
+                }
+                if operator_alpha > 0 {
+                    draw_fade_quad(&gl, fade_program, fade_vao, operator_alpha as f32 / 255.0);
+                }
                 readback.publish_completed(&gl, sink);
                 readback.queue(&gl, target.fbo, w_px, h_px);
 
@@ -1875,26 +2653,50 @@ fn render_thread_main(
                 // and network capture, present the already-final FBO.
                 if output_visible {
                     draw_blit_pass_to(&gl, blit_program, blit_vao, target.tex, w_px, h_px, None);
-                    if let Err(e) = surface.swap_buffers(&ctx) { log::warn!("[render] swap: {e:?}"); }
-                    else if !runtime.shared.network_capture_active.load(Ordering::Relaxed) {
-                        runtime.shared.successful_physical_presents.fetch_add(1, Ordering::Relaxed);
+                    if let Err(e) = surface.swap_buffers(&ctx) {
+                        log::warn!("[render] swap: {e:?}");
+                    } else if !runtime
+                        .shared
+                        .network_capture_active
+                        .load(Ordering::Relaxed)
+                    {
+                        runtime
+                            .shared
+                            .successful_physical_presents
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 } else {
-                    unsafe { gl.flush(); }
+                    unsafe {
+                        gl.flush();
+                    }
                 }
             }
         } else if output_visible {
             if let Some(tex) = final_tex {
                 match warp {
-                    Some(hinv) => draw_warp_pass_to(&gl, warp_program, warp_vao, tex, &hinv, w_px, h_px, None),
+                    Some(hinv) => {
+                        draw_warp_pass_to(&gl, warp_program, warp_vao, tex, &hinv, w_px, h_px, None)
+                    }
                     None => draw_blit_pass_to(&gl, blit_program, blit_vao, tex, w_px, h_px, None),
                 }
             }
-            if alpha > 0 { draw_fade_quad(&gl, fade_program, fade_vao, alpha as f32 / 255.0); }
-            if operator_alpha > 0 { draw_fade_quad(&gl, fade_program, fade_vao, operator_alpha as f32 / 255.0); }
-            if let Err(e) = surface.swap_buffers(&ctx) { log::warn!("[render] swap: {e:?}"); }
-            else if !runtime.shared.network_capture_active.load(Ordering::Relaxed) {
-                runtime.shared.successful_physical_presents.fetch_add(1, Ordering::Relaxed);
+            if alpha > 0 {
+                draw_fade_quad(&gl, fade_program, fade_vao, alpha as f32 / 255.0);
+            }
+            if operator_alpha > 0 {
+                draw_fade_quad(&gl, fade_program, fade_vao, operator_alpha as f32 / 255.0);
+            }
+            if let Err(e) = surface.swap_buffers(&ctx) {
+                log::warn!("[render] swap: {e:?}");
+            } else if !runtime
+                .shared
+                .network_capture_active
+                .load(Ordering::Relaxed)
+            {
+                runtime
+                    .shared
+                    .successful_physical_presents
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -1909,12 +2711,23 @@ fn render_thread_main(
                     if let (Some(tex), Some(target)) = (final_tex, monitor_target.as_ref()) {
                         match warp {
                             Some(hinv) => draw_warp_pass_to(
-                                &gl, warp_program, warp_vao, tex, &hinv,
-                                preview_w, preview_h, Some(target.fbo),
+                                &gl,
+                                warp_program,
+                                warp_vao,
+                                tex,
+                                &hinv,
+                                preview_w,
+                                preview_h,
+                                Some(target.fbo),
                             ),
                             None => draw_blit_pass_to(
-                                &gl, blit_program, blit_vao, tex,
-                                preview_w, preview_h, Some(target.fbo),
+                                &gl,
+                                blit_program,
+                                blit_vao,
+                                tex,
+                                preview_w,
+                                preview_h,
+                                Some(target.fbo),
                             ),
                         }
                         unsafe {
@@ -1925,10 +2738,23 @@ fn render_thread_main(
                             draw_fade_quad(&gl, fade_program, fade_vao, alpha as f32 / 255.0);
                         }
                         if operator_alpha > 0 {
-                            draw_fade_quad(&gl, fade_program, fade_vao, operator_alpha as f32 / 255.0);
+                            draw_fade_quad(
+                                &gl,
+                                fade_program,
+                                fade_vao,
+                                operator_alpha as f32 / 255.0,
+                            );
                         }
-                        readback.queue_monitor(&gl, target.fbo, preview_w, preview_h, &runtime.monitor_frames);
-                        unsafe { gl.flush(); }
+                        readback.queue_monitor(
+                            &gl,
+                            target.fbo,
+                            preview_w,
+                            preview_h,
+                            &runtime.monitor_frames,
+                        );
+                        unsafe {
+                            gl.flush();
+                        }
                     }
                 }
             }
@@ -1936,17 +2762,23 @@ fn render_thread_main(
         if runtime.is_shutting_down() {
             break 'render;
         }
-        unsafe { (lib.mpv_render_context_report_swap)(render_ctx); }
+        unsafe {
+            (lib.mpv_render_context_report_swap)(render_ctx);
+        }
         for l in &layers {
             if runtime.is_shutting_down() {
                 break 'render;
             }
             if l.has_new_frame {
-                unsafe { (lib.mpv_render_context_report_swap)(l.render_ctx); }
+                unsafe {
+                    (lib.mpv_render_context_report_swap)(l.render_ctx);
+                }
             }
         }
         #[cfg(target_os = "linux")]
-        { last_present = std::time::Instant::now(); }
+        {
+            last_present = std::time::Instant::now();
+        }
     }
 
     Ok(())
@@ -1961,9 +2793,12 @@ fn slot_snapshot(registry: &slot::SlotRegistry) -> Vec<Arc<super::slot::VideoSlo
 // GL proc-address bridge for mpv
 // ---------------------------------------------------------------------------
 
-unsafe extern "C" fn gl_get_proc_address(user_ctx: *mut c_void, name: *const std::ffi::c_char) -> *mut c_void {
+unsafe extern "C" fn gl_get_proc_address(
+    user_ctx: *mut c_void,
+    name: *const std::ffi::c_char,
+) -> *mut c_void {
     let display = unsafe { &*(user_ctx as *const Display) };
-    let cname   = unsafe { CStr::from_ptr(name) };
+    let cname = unsafe { CStr::from_ptr(name) };
     display.get_proc_address(cname) as *mut c_void
 }
 
@@ -1972,7 +2807,9 @@ unsafe extern "C" fn gl_get_proc_address(user_ctx: *mut c_void, name: *const std
 // ---------------------------------------------------------------------------
 
 unsafe extern "C" fn on_mpv_update(ctx: *mut c_void) {
-    if ctx.is_null() { return; }
+    if ctx.is_null() {
+        return;
+    }
     let signal = unsafe { &*(ctx as *const (Mutex<bool>, Condvar)) };
     if let Ok(mut ready) = signal.0.lock() {
         *ready = true;
@@ -1998,8 +2835,7 @@ fn create_display(rdh: RawDisplayHandle, _rwh: RawWindowHandle) -> Result<Displa
 #[cfg(target_os = "macos")]
 fn create_display(rdh: RawDisplayHandle, _rwh: RawWindowHandle) -> Result<Display> {
     let display = unsafe {
-        Display::new(rdh, DisplayApiPreference::Cgl)
-            .map_err(|e| anyhow!("CGL display: {e}"))?
+        Display::new(rdh, DisplayApiPreference::Cgl).map_err(|e| anyhow!("CGL display: {e}"))?
     };
     Ok(display)
 }
@@ -2034,22 +2870,35 @@ out vec4 color;
 void main() { color = vec4(0.0, 0.0, 0.0, u_alpha); }
 "#;
     unsafe {
-        let vs = gl.create_shader(glow::VERTEX_SHADER).map_err(|e| anyhow!("{e}"))?;
+        let vs = gl
+            .create_shader(glow::VERTEX_SHADER)
+            .map_err(|e| anyhow!("{e}"))?;
         gl.shader_source(vs, VERT);
         gl.compile_shader(vs);
-        if !gl.get_shader_compile_status(vs) { return Err(anyhow!("vert: {}", gl.get_shader_info_log(vs))); }
+        if !gl.get_shader_compile_status(vs) {
+            return Err(anyhow!("vert: {}", gl.get_shader_info_log(vs)));
+        }
 
-        let fs = gl.create_shader(glow::FRAGMENT_SHADER).map_err(|e| anyhow!("{e}"))?;
+        let fs = gl
+            .create_shader(glow::FRAGMENT_SHADER)
+            .map_err(|e| anyhow!("{e}"))?;
         gl.shader_source(fs, FRAG);
         gl.compile_shader(fs);
-        if !gl.get_shader_compile_status(fs) { return Err(anyhow!("frag: {}", gl.get_shader_info_log(fs))); }
+        if !gl.get_shader_compile_status(fs) {
+            return Err(anyhow!("frag: {}", gl.get_shader_info_log(fs)));
+        }
 
         let prog = gl.create_program().map_err(|e| anyhow!("{e}"))?;
-        gl.attach_shader(prog, vs); gl.attach_shader(prog, fs);
+        gl.attach_shader(prog, vs);
+        gl.attach_shader(prog, fs);
         gl.link_program(prog);
-        if !gl.get_program_link_status(prog) { return Err(anyhow!("link: {}", gl.get_program_info_log(prog))); }
-        gl.detach_shader(prog, vs); gl.delete_shader(vs);
-        gl.detach_shader(prog, fs); gl.delete_shader(fs);
+        if !gl.get_program_link_status(prog) {
+            return Err(anyhow!("link: {}", gl.get_program_info_log(prog)));
+        }
+        gl.detach_shader(prog, vs);
+        gl.delete_shader(vs);
+        gl.detach_shader(prog, fs);
+        gl.delete_shader(fs);
 
         let vao = gl.create_vertex_array().map_err(|e| anyhow!("{e}"))?;
         log::info!("[render] fade shader compiled");
@@ -2082,8 +2931,8 @@ fn draw_fade_quad(gl: &glow::Context, program: glow::Program, vao: glow::VertexA
 struct WarpTarget {
     fbo: glow::Framebuffer,
     tex: glow::Texture,
-    w:   u32,
-    h:   u32,
+    w: u32,
+    h: u32,
 }
 
 fn monitor_dimensions(width: u32, height: u32) -> (u32, u32) {
@@ -2134,13 +2983,22 @@ fn freshest_monitor_candidate(
     session: u64,
     published_sequence: u64,
 ) -> Option<ReadyMonitorPbo> {
-    candidates.iter().flatten().copied()
-        .filter(|candidate| candidate.session == session
-            && capture_sequence_is_newer(candidate.sequence, published_sequence))
+    candidates
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|candidate| {
+            candidate.session == session
+                && capture_sequence_is_newer(candidate.sequence, published_sequence)
+        })
         .max_by(|left, right| {
-            if capture_sequence_is_newer(left.sequence, right.sequence) { std::cmp::Ordering::Greater }
-            else if capture_sequence_is_newer(right.sequence, left.sequence) { std::cmp::Ordering::Less }
-            else { std::cmp::Ordering::Equal }
+            if capture_sequence_is_newer(left.sequence, right.sequence) {
+                std::cmp::Ordering::Greater
+            } else if capture_sequence_is_newer(right.sequence, left.sequence) {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
         })
 }
 
@@ -2155,7 +3013,9 @@ impl NetworkReadback {
         unsafe {
             for _ in 0..3 {
                 slots.push(NetworkReadbackSlot {
-                    pbo: gl.create_buffer().map_err(|error| anyhow!("network readback PBO: {error}"))?,
+                    pbo: gl
+                        .create_buffer()
+                        .map_err(|error| anyhow!("network readback PBO: {error}"))?,
                     fence: None,
                     width: 0,
                     height: 0,
@@ -2178,27 +3038,44 @@ impl NetworkReadback {
             if state != glow::ALREADY_SIGNALED && state != glow::CONDITION_SATISFIED {
                 continue;
             }
-            let byte_len = match slot.width.checked_mul(slot.height).and_then(|pixels| pixels.checked_mul(4)) {
+            let byte_len = match slot
+                .width
+                .checked_mul(slot.height)
+                .and_then(|pixels| pixels.checked_mul(4))
+            {
                 Some(length) => length as usize,
                 None => {
-                    unsafe { gl.delete_sync(fence); }
+                    unsafe {
+                        gl.delete_sync(fence);
+                    }
                     slot.fence = None;
                     continue;
                 }
             };
             unsafe {
                 gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.pbo));
-                let mapped = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, byte_len as i32, glow::MAP_READ_BIT);
+                let mapped = gl.map_buffer_range(
+                    glow::PIXEL_PACK_BUFFER,
+                    0,
+                    byte_len as i32,
+                    glow::MAP_READ_BIT,
+                );
                 if !mapped.is_null() {
                     let source = std::slice::from_raw_parts(mapped, byte_len);
                     let row_len = slot.width as usize * 4;
                     let mut top_down = vec![0_u8; byte_len];
                     for row in 0..slot.height as usize {
                         let source_row = slot.height as usize - 1 - row;
-                        top_down[row * row_len..(row + 1) * row_len]
-                            .copy_from_slice(&source[source_row * row_len..(source_row + 1) * row_len]);
+                        top_down[row * row_len..(row + 1) * row_len].copy_from_slice(
+                            &source[source_row * row_len..(source_row + 1) * row_len],
+                        );
                     }
-                    publish(BgraFrame { width: slot.width, height: slot.height, stride: row_len as u32, data: top_down });
+                    publish(BgraFrame {
+                        width: slot.width,
+                        height: slot.height,
+                        stride: row_len as u32,
+                        data: top_down,
+                    });
                     gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
                 }
                 gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -2209,7 +3086,9 @@ impl NetworkReadback {
     }
 
     fn publish_completed(&mut self, gl: &glow::Context, sink: &NetworkFrameSink) {
-        self.drain_completed(gl, |frame| { sink.publish(frame); });
+        self.drain_completed(gl, |frame| {
+            sink.publish(frame);
+        });
     }
 
     fn publish_completed_to_monitor(&mut self, gl: &glow::Context, sink: &MonitorFrameMailbox) {
@@ -2219,7 +3098,9 @@ impl NetworkReadback {
         for (index, slot) in self.slots.iter_mut().enumerate() {
             let Some(fence) = slot.fence else { continue };
             let state = unsafe { gl.client_wait_sync(fence, 0, 0) };
-            if state != glow::ALREADY_SIGNALED && state != glow::CONDITION_SATISFIED { continue; }
+            if state != glow::ALREADY_SIGNALED && state != glow::CONDITION_SATISFIED {
+                continue;
+            }
             ready[index] = Some(ReadyMonitorPbo {
                 slot_index: index,
                 sequence: slot.capture_sequence,
@@ -2230,24 +3111,43 @@ impl NetworkReadback {
 
         let newest = freshest_monitor_candidate(&ready, current_session, published_sequence);
         for candidate in ready.iter().flatten() {
-            if newest.is_some_and(|selected| selected.slot_index == candidate.slot_index) { continue; }
+            if newest.is_some_and(|selected| selected.slot_index == candidate.slot_index) {
+                continue;
+            }
             let slot = &mut self.slots[candidate.slot_index];
-            if let Some(fence) = slot.fence.take() { unsafe { gl.delete_sync(fence); } }
+            if let Some(fence) = slot.fence.take() {
+                unsafe {
+                    gl.delete_sync(fence);
+                }
+            }
             sink.dropped_stale.fetch_add(1, Ordering::Relaxed);
         }
 
         let Some(candidate) = newest else { return };
         let slot = &mut self.slots[candidate.slot_index];
-        let Some(byte_len) = slot.width.checked_mul(slot.height).and_then(|pixels| pixels.checked_mul(4))
-            .map(|length| length as usize) else {
-                if let Some(fence) = slot.fence.take() { unsafe { gl.delete_sync(fence); } }
-                return;
-            };
+        let Some(byte_len) = slot
+            .width
+            .checked_mul(slot.height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .map(|length| length as usize)
+        else {
+            if let Some(fence) = slot.fence.take() {
+                unsafe {
+                    gl.delete_sync(fence);
+                }
+            }
+            return;
+        };
         let copy_started = std::time::Instant::now();
         let mut copied_frame = None;
         unsafe {
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.pbo));
-            let mapped = gl.map_buffer_range(glow::PIXEL_PACK_BUFFER, 0, byte_len as i32, glow::MAP_READ_BIT);
+            let mapped = gl.map_buffer_range(
+                glow::PIXEL_PACK_BUFFER,
+                0,
+                byte_len as i32,
+                glow::MAP_READ_BIT,
+            );
             if !mapped.is_null() {
                 let source = std::slice::from_raw_parts(mapped, byte_len);
                 let row_len = slot.width as usize * 4;
@@ -2257,18 +3157,30 @@ impl NetworkReadback {
                     top_down[row * row_len..(row + 1) * row_len]
                         .copy_from_slice(&source[source_row * row_len..(source_row + 1) * row_len]);
                 }
-                copied_frame = Some(BgraFrame { width: slot.width, height: slot.height, stride: row_len as u32, data: top_down });
+                copied_frame = Some(BgraFrame {
+                    width: slot.width,
+                    height: slot.height,
+                    stride: row_len as u32,
+                    data: top_down,
+                });
                 gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
             }
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-            if let Some(fence) = slot.fence.take() { gl.delete_sync(fence); }
+            if let Some(fence) = slot.fence.take() {
+                gl.delete_sync(fence);
+            }
         }
         let copy_us = copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
         sink.copy_total_us.fetch_add(copy_us, Ordering::Relaxed);
         sink.copy_max_us.fetch_max(copy_us, Ordering::Relaxed);
         sink.copy_samples.fetch_add(1, Ordering::Relaxed);
         if let Some(frame) = copied_frame {
-            sink.publish(candidate.sequence, candidate.session, candidate.captured_at_us, frame);
+            sink.publish(
+                candidate.sequence,
+                candidate.session,
+                candidate.captured_at_us,
+                frame,
+            );
         }
     }
 
@@ -2278,32 +3190,87 @@ impl NetworkReadback {
         self.queue_tagged(gl, source, width, height, 0, 0, 0, false);
     }
 
-    fn queue_monitor(&mut self, gl: &glow::Context, source: glow::Framebuffer, width: u32, height: u32, sink: &MonitorFrameMailbox) -> bool {
+    fn queue_monitor(
+        &mut self,
+        gl: &glow::Context,
+        source: glow::Framebuffer,
+        width: u32,
+        height: u32,
+        sink: &MonitorFrameMailbox,
+    ) -> bool {
         sink.attempts.fetch_add(1, Ordering::Relaxed);
-        let sequence = sink.next_sequence.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let sequence = sink
+            .next_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
         let session = sink.session.load(Ordering::Acquire);
-        let captured_at_us = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros().min(u64::MAX as u128) as u64).unwrap_or(0);
-        let _ = sink.started_at_us.compare_exchange(0, captured_at_us, Ordering::Relaxed, Ordering::Relaxed);
-        let queued = self.queue_tagged(gl, source, width, height, sequence, session, captured_at_us, true);
-        if queued { sink.captured.fetch_add(1, Ordering::Relaxed); }
-        else { sink.skipped_pbo.fetch_add(1, Ordering::Relaxed); }
+        let captured_at_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
+        let _ = sink.started_at_us.compare_exchange(
+            0,
+            captured_at_us,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        let queued = self.queue_tagged(
+            gl,
+            source,
+            width,
+            height,
+            sequence,
+            session,
+            captured_at_us,
+            true,
+        );
+        if queued {
+            sink.captured.fetch_add(1, Ordering::Relaxed);
+        } else {
+            sink.skipped_pbo.fetch_add(1, Ordering::Relaxed);
+        }
         queued
     }
 
-    fn queue_tagged(&mut self, gl: &glow::Context, source: glow::Framebuffer, width: u32, height: u32, sequence: u64, session: u64, captured_at_us: u64, require_fence: bool) -> bool {
+    fn queue_tagged(
+        &mut self,
+        gl: &glow::Context,
+        source: glow::Framebuffer,
+        width: u32,
+        height: u32,
+        sequence: u64,
+        session: u64,
+        captured_at_us: u64,
+        require_fence: bool,
+    ) -> bool {
         let Some(index) = (0..self.slots.len())
             .map(|offset| (self.next + offset) % self.slots.len())
-            .find(|&index| self.slots[index].fence.is_none() && !self.slots[index].poisoned) else { return false };
+            .find(|&index| self.slots[index].fence.is_none() && !self.slots[index].poisoned)
+        else {
+            return false;
+        };
         self.next = (index + 1) % self.slots.len();
         let slot = &mut self.slots[index];
-        let Some(bytes) = width.checked_mul(height).and_then(|pixels| pixels.checked_mul(4)) else { return false };
+        let Some(bytes) = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            return false;
+        };
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(source));
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.pbo));
             gl.buffer_data_size(glow::PIXEL_PACK_BUFFER, bytes as i32, glow::STREAM_READ);
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-            gl.read_pixels(0, 0, width as i32, height as i32, glow::BGRA, glow::UNSIGNED_BYTE, glow::PixelPackData::BufferOffset(0));
+            gl.read_pixels(
+                0,
+                0,
+                width as i32,
+                height as i32,
+                glow::BGRA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::BufferOffset(0),
+            );
             slot.fence = gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
             if require_fence && slot.fence.is_none() {
                 // No safe reuse point exists without a fence. Retire this PBO
@@ -2342,10 +3309,13 @@ fn upload_external_frame(
     target: &mut Option<ExternalFrameTarget>,
     frame: BgraFrame,
 ) -> Result<()> {
-    frame.validate().map_err(|error| anyhow!("external BGRA frame: {error}"))?;
-    let needs_resize = target.as_ref().map(|current| {
-        current.target.w != frame.width || current.target.h != frame.height
-    }).unwrap_or(true);
+    frame
+        .validate()
+        .map_err(|error| anyhow!("external BGRA frame: {error}"))?;
+    let needs_resize = target
+        .as_ref()
+        .map(|current| current.target.w != frame.width || current.target.h != frame.height)
+        .unwrap_or(true);
     if needs_resize {
         let mut texture_target = None;
         ensure_warp_target(gl, &mut texture_target, frame.width, frame.height)?;
@@ -2357,7 +3327,9 @@ fn upload_external_frame(
         }
         *target = texture_target.map(|target| ExternalFrameTarget { target });
     }
-    let Some(target) = target.as_ref() else { return Err(anyhow!("external texture allocation failed")); };
+    let Some(target) = target.as_ref() else {
+        return Err(anyhow!("external texture allocation failed"));
+    };
     let row_len = frame.width as usize * 4;
     let mut gl_rows = vec![0_u8; row_len * frame.height as usize];
     for destination_row in 0..frame.height as usize {
@@ -2370,8 +3342,15 @@ fn upload_external_frame(
         gl.bind_texture(glow::TEXTURE_2D, Some(target.target.tex));
         gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         gl.tex_sub_image_2d(
-            glow::TEXTURE_2D, 0, 0, 0, frame.width as i32, frame.height as i32,
-            glow::BGRA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(&gl_rows),
+            glow::TEXTURE_2D,
+            0,
+            0,
+            0,
+            frame.width as i32,
+            frame.height as i32,
+            glow::BGRA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(&gl_rows),
         );
         gl.bind_texture(glow::TEXTURE_2D, None);
     }
@@ -2398,20 +3377,48 @@ fn ensure_warp_target(
         let tex = gl.create_texture().map_err(|e| anyhow!("warp tex: {e}"))?;
         gl.bind_texture(glow::TEXTURE_2D, Some(tex));
         gl.tex_image_2d(
-            glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
-            w as i32, h as i32, 0,
-            glow::RGBA, glow::UNSIGNED_BYTE, None,
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            w as i32,
+            h as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            None,
         );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
         gl.bind_texture(glow::TEXTURE_2D, None);
 
-        let fbo = gl.create_framebuffer().map_err(|e| anyhow!("warp fbo: {e}"))?;
+        let fbo = gl
+            .create_framebuffer()
+            .map_err(|e| anyhow!("warp fbo: {e}"))?;
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
         gl.framebuffer_texture_2d(
-            glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0,
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(tex),
+            0,
         );
         let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
         gl.bind_framebuffer(glow::FRAMEBUFFER, None);
@@ -2457,22 +3464,35 @@ void main() {
 }
 "#;
     unsafe {
-        let vs = gl.create_shader(glow::VERTEX_SHADER).map_err(|e| anyhow!("{e}"))?;
+        let vs = gl
+            .create_shader(glow::VERTEX_SHADER)
+            .map_err(|e| anyhow!("{e}"))?;
         gl.shader_source(vs, VERT);
         gl.compile_shader(vs);
-        if !gl.get_shader_compile_status(vs) { return Err(anyhow!("warp vert: {}", gl.get_shader_info_log(vs))); }
+        if !gl.get_shader_compile_status(vs) {
+            return Err(anyhow!("warp vert: {}", gl.get_shader_info_log(vs)));
+        }
 
-        let fs = gl.create_shader(glow::FRAGMENT_SHADER).map_err(|e| anyhow!("{e}"))?;
+        let fs = gl
+            .create_shader(glow::FRAGMENT_SHADER)
+            .map_err(|e| anyhow!("{e}"))?;
         gl.shader_source(fs, FRAG);
         gl.compile_shader(fs);
-        if !gl.get_shader_compile_status(fs) { return Err(anyhow!("warp frag: {}", gl.get_shader_info_log(fs))); }
+        if !gl.get_shader_compile_status(fs) {
+            return Err(anyhow!("warp frag: {}", gl.get_shader_info_log(fs)));
+        }
 
         let prog = gl.create_program().map_err(|e| anyhow!("{e}"))?;
-        gl.attach_shader(prog, vs); gl.attach_shader(prog, fs);
+        gl.attach_shader(prog, vs);
+        gl.attach_shader(prog, fs);
         gl.link_program(prog);
-        if !gl.get_program_link_status(prog) { return Err(anyhow!("warp link: {}", gl.get_program_info_log(prog))); }
-        gl.detach_shader(prog, vs); gl.delete_shader(vs);
-        gl.detach_shader(prog, fs); gl.delete_shader(fs);
+        if !gl.get_program_link_status(prog) {
+            return Err(anyhow!("warp link: {}", gl.get_program_info_log(prog)));
+        }
+        gl.detach_shader(prog, vs);
+        gl.delete_shader(vs);
+        gl.detach_shader(prog, fs);
+        gl.delete_shader(fs);
 
         let vao = gl.create_vertex_array().map_err(|e| anyhow!("{e}"))?;
         log::info!("[render] warp shader compiled");
@@ -2488,6 +3508,176 @@ void main() {
 ///
 /// The per-channel math is [`super::blend::GLSL_BLEND_FN`], whose executable
 /// spec is the Rust `blend_channel` in `blend.rs` — keep them identical.
+#[derive(Clone, Copy)]
+struct CropMask {
+    geometry: VideoGeometry,
+    source_aspect: f32,
+    source_rotation: u32,
+    output_aspect: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PresentationFrame {
+    x: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+}
+
+impl PresentationFrame {
+    /// OpenGL normalized rectangle: left, bottom, width, height.
+    fn uv_rect(self, output_w: u32, output_h: u32) -> [f32; 4] {
+        let output_w = output_w.max(1) as f32;
+        let output_h = output_h.max(1) as f32;
+        [
+            self.x as f32 / output_w,
+            (output_h - (self.top + self.height) as f32) / output_h,
+            self.width as f32 / output_w,
+            self.height as f32 / output_h,
+        ]
+    }
+}
+
+/// Convert a top-left, slide-normalized frame into output pixels. The slide is
+/// fitted inside the output, preserving its aspect ratio; unused letterbox
+/// space remains available to lower compositor layers.
+fn presentation_frame(
+    layout: PresentationVideoLayout,
+    output_w: u32,
+    output_h: u32,
+) -> Option<PresentationFrame> {
+    if !layout.supports_exact_as_slide() || output_w == 0 || output_h == 0 {
+        return None;
+    }
+    let output_w_f = output_w as f64;
+    let output_h_f = output_h as f64;
+    let slide_aspect = layout.slide_width as f64 / layout.slide_height as f64;
+    let output_aspect = output_w_f / output_h_f;
+    if !slide_aspect.is_finite() || slide_aspect <= 0.0 || !output_aspect.is_finite() {
+        return None;
+    }
+    let (canvas_x, canvas_y, canvas_w, canvas_h) = if output_aspect > slide_aspect {
+        let canvas_w = output_h_f * slide_aspect;
+        ((output_w_f - canvas_w) * 0.5, 0.0, canvas_w, output_h_f)
+    } else {
+        let canvas_h = output_w_f / slide_aspect;
+        (0.0, (output_h_f - canvas_h) * 0.5, output_w_f, canvas_h)
+    };
+    let x0 = (canvas_x + layout.x * canvas_w)
+        .round()
+        .clamp(0.0, output_w_f) as u32;
+    let x1 = (canvas_x + (layout.x + layout.width) * canvas_w)
+        .round()
+        .clamp(0.0, output_w_f) as u32;
+    let y0 = (canvas_y + layout.y * canvas_h)
+        .round()
+        .clamp(0.0, output_h_f) as u32;
+    let y1 = (canvas_y + (layout.y + layout.height) * canvas_h)
+        .round()
+        .clamp(0.0, output_h_f) as u32;
+    let width = x1.saturating_sub(x0);
+    let height = y1.saturating_sub(y0);
+    (width > 0 && height > 0).then_some(PresentationFrame {
+        x: x0,
+        top: y0,
+        width,
+        height,
+    })
+}
+
+fn presentation_target_size(
+    requested: bool,
+    frame: Option<PresentationFrame>,
+    output_w: u32,
+    output_h: u32,
+) -> (u32, u32) {
+    if !requested {
+        (output_w.max(1), output_h.max(1))
+    } else {
+        frame
+            .map(|frame| (frame.width, frame.height))
+            .unwrap_or((1, 1))
+    }
+}
+
+fn crop_fraction(value: f64) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CropMaskLayout {
+    source_aspect: f32,
+    output_aspect: f32,
+    pan_physical: [f32; 2],
+    scale_xy: [f32; 2],
+    rotation: f32,
+}
+
+fn crop_mask_layout(
+    geometry: VideoGeometry,
+    source_aspect: f32,
+    output_aspect: f32,
+    source_rotation: u32,
+) -> Option<CropMaskLayout> {
+    if !source_aspect.is_finite()
+        || source_aspect <= 0.0
+        || !output_aspect.is_finite()
+        || output_aspect <= 0.0
+    {
+        return None;
+    }
+    let rotation = (geometry.rotation + source_rotation) % 360;
+    let theta = (rotation as f32).to_radians();
+    let (sin, cos) = theta.sin_cos();
+    let bound_width = cos.abs() * source_aspect + sin.abs();
+    let bound_height = sin.abs() * source_aspect + cos.abs();
+    let fit_scale = match geometry.fit_mode {
+        super::types::FitMode::Fit => (output_aspect / bound_width).min(1.0 / bound_height),
+        super::types::FitMode::Fill => (output_aspect / bound_width).max(1.0 / bound_height),
+        super::types::FitMode::Stretch => 1.0,
+    };
+    let stretch = geometry.fit_mode == super::types::FitMode::Stretch;
+    let (scale_xy, displayed_bound) = if stretch {
+        (
+            [output_aspect / bound_width, 1.0 / bound_height],
+            [output_aspect, 1.0],
+        )
+    } else {
+        let scale = fit_scale * geometry.scale.max(0.01) as f32;
+        ([scale, scale], [bound_width * scale, bound_height * scale])
+    };
+    let pan_physical = if stretch {
+        [0.0, 0.0]
+    } else {
+        [
+            geometry.pan_x as f32 * displayed_bound[0],
+            geometry.pan_y as f32 * displayed_bound[1],
+        ]
+    };
+    Some(CropMaskLayout {
+        source_aspect,
+        output_aspect,
+        pan_physical,
+        scale_xy,
+        rotation: theta,
+    })
+}
+
+fn crop_mask_source_uv(point: [f32; 2], layout: CropMaskLayout) -> [f32; 2] {
+    let d = [
+        (point[0] - 0.5) * layout.output_aspect - layout.pan_physical[0],
+        point[1] - 0.5 - layout.pan_physical[1],
+    ];
+    let (s, c) = layout.rotation.sin_cos();
+    let r = [d[0] / layout.scale_xy[0], d[1] / layout.scale_xy[1]];
+    let q = [c * r[0] + s * r[1] + 0.5, -s * r[0] + c * r[1] + 0.5];
+    [(q[0] - 0.5) / layout.source_aspect + 0.5, q[1]]
+}
+
 fn build_composite_shader(gl: &glow::Context) -> Result<(glow::Program, glow::VertexArray)> {
     const VERT: &str = r#"
 #version 150 core
@@ -2506,12 +3696,57 @@ uniform sampler2D u_layer;
 uniform int   u_blend_mode;
 uniform int   u_layer_premultiplied;
 uniform float u_opacity;
+uniform int   u_crop_enabled;
+uniform vec4  u_crop;
+uniform vec2  u_crop_pan;
+uniform vec2  u_crop_scale;
+uniform float u_crop_rotation;   // total clockwise rotation (radians)
+uniform vec2  u_crop_aspect;     // source display aspect, output aspect
+uniform int   u_crop_source_valid;
+uniform int   u_presentation_enabled;
+uniform vec4  u_presentation_rect; // left, bottom, width, height in output UVs
 in vec2 v_uv;
 out vec4 color;
 {}
+vec2 crop_source_uv(vec2 p) {{
+    vec2 d = vec2((p.x - 0.5) * u_crop_aspect.y, p.y - 0.5) - u_crop_pan;
+    vec2 scaled = d / max(u_crop_scale, vec2(0.01));
+    float c = cos(u_crop_rotation), s = sin(u_crop_rotation);
+    vec2 q = vec2(c * scaled.x + s * scaled.y, -s * scaled.x + c * scaled.y);
+    return vec2(q.x / u_crop_aspect.x + 0.5, q.y + 0.5);
+}}
 void main() {{
     vec4 b = texture(u_backdrop, v_uv);
-    vec4 s = texture(u_layer, v_uv);
+    vec2 layer_uv = v_uv;
+    vec4 s;
+    if (u_presentation_enabled != 0) {{
+        vec2 rect_min = u_presentation_rect.xy;
+        vec2 rect_max = rect_min + u_presentation_rect.zw;
+        if (any(lessThan(v_uv, rect_min)) || any(greaterThanEqual(v_uv, rect_max))) {{
+            s = vec4(0.0);
+        }} else {{
+            layer_uv = (v_uv - rect_min) / u_presentation_rect.zw;
+            s = texture(u_layer, layer_uv);
+        }}
+    }} else {{
+        s = texture(u_layer, layer_uv);
+    }}
+    if (u_crop_enabled != 0) {{
+        float left = clamp(u_crop.x, 0.0, 1.0);
+        float right = clamp(u_crop.y, 0.0, 1.0);
+        float top = clamp(u_crop.z, 0.0, 1.0);
+        float bottom = clamp(u_crop.w, 0.0, 1.0);
+        if (u_crop_source_valid == 0 || left + right >= 1.0 || top + bottom >= 1.0) {{
+            s = vec4(0.0);
+        }} else {{
+            vec2 uv = crop_source_uv(vec2(layer_uv.x, 1.0 - layer_uv.y));
+            // Preserve existing letterbox pixels. Only mask source pixels
+            // removed by the authored crop edges.
+            bool in_source = all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
+            bool inside_crop = uv.x >= left && uv.x <= 1.0 - right && uv.y >= top && uv.y <= 1.0 - bottom;
+            if (in_source && !inside_crop) s.a = 0.0;
+        }}
+    }}
     // libmpv's OpenGL render API returns premultiplied RGB for alpha media;
     // blend_channel and the source-over equations below use straight RGB.
     // External frame layers use their own upload contract and leave this off.
@@ -2540,15 +3775,74 @@ const vec2 P[3]=vec2[3](vec2(-1,-1),vec2(3,-1),vec2(-1,3));
 void main(){gl_Position=vec4(P[gl_VertexID],0,1);}"#;
     const FRAG: &str = r#"#version 150 core
 uniform sampler2D u_tex; uniform vec2 u_source_size,u_output_size,u_pan; uniform float u_scale,u_rotation; uniform int u_fit_mode; uniform vec4 u_crop; out vec4 color;
-void main(){vec2 p=vec2(gl_FragCoord.x/u_output_size.x,1.0-gl_FragCoord.y/u_output_size.y);vec2 d=p-vec2(.5)-u_pan;float c=cos(u_rotation),s=sin(u_rotation);vec2 q=vec2(c*d.x+s*d.y,-s*d.x+c*d.y)/max(u_scale,.01)+vec2(.5);float sa=u_source_size.x/max(u_source_size.y,1.),oa=u_output_size.x/max(u_output_size.y,1.);vec2 z=vec2(1.);if(u_fit_mode==0){if(sa>oa)z.y=oa/sa;else z.x=sa/oa;}else if(u_fit_mode==1){if(sa>oa)z.x=sa/oa;else z.y=oa/sa;}vec2 uv=(q-(vec2(1.)-z)*.5)/z;if(uv.x<0.||uv.x>1.||uv.y<0.||uv.y>1.){color=vec4(0.);return;}uv=vec2(mix(u_crop.x,1.-u_crop.y,uv.x),mix(u_crop.z,1.-u_crop.w,uv.y));color=texture(u_tex,vec2(uv.x,1.-uv.y));}"#;
+void main(){vec2 p=vec2(gl_FragCoord.x/u_output_size.x,1.0-gl_FragCoord.y/u_output_size.y);vec2 d=p-vec2(.5)-u_pan;float c=cos(u_rotation),s=sin(u_rotation);vec2 q=vec2(c*d.x+s*d.y,-s*d.x+c*d.y)/max(u_scale,.01)+vec2(.5);float sa=u_source_size.x/max(u_source_size.y,1.),oa=u_output_size.x/max(u_output_size.y,1.);vec2 z=vec2(1.);if(u_fit_mode==0){if(sa>oa)z.y=oa/sa;else z.x=sa/oa;}else if(u_fit_mode==1){if(sa>oa)z.x=sa/oa;else z.y=oa/sa;}vec2 uv=(q-(vec2(1.)-z)*.5)/z;if(uv.x<0.||uv.x>1.||uv.y<0.||uv.y>1.){color=vec4(0.);return;}float l=clamp(u_crop.x,0.,1.),r=clamp(u_crop.y,0.,1.),t=clamp(u_crop.z,0.,1.),b=clamp(u_crop.w,0.,1.);if(l+r>=1.||t+b>=1.||uv.x<l||uv.x>1.-r||uv.y<t||uv.y>1.-b){color=vec4(0.);return;}color=texture(u_tex,vec2(uv.x,1.-uv.y));}"#;
     build_program(gl, VERT, FRAG, "external geometry")
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_geometry_pass(gl: &glow::Context, program: glow::Program, vao: glow::VertexArray, texture: glow::Texture, geometry: VideoGeometry, source_w: u32, source_h: u32, output_w: u32, output_h: u32, destination: glow::Framebuffer) {
-    let fit = match geometry.fit_mode { super::types::FitMode::Fit => 0, super::types::FitMode::Fill => 1, super::types::FitMode::Stretch => 2 };
-    unsafe { gl.bind_framebuffer(glow::FRAMEBUFFER, Some(destination)); gl.viewport(0, 0, output_w as i32, output_h as i32); gl.disable(glow::BLEND); gl.use_program(Some(program)); gl.active_texture(glow::TEXTURE0); gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        if let Some(l)=gl.get_uniform_location(program,"u_tex"){gl.uniform_1_i32(Some(&l),0);} if let Some(l)=gl.get_uniform_location(program,"u_source_size"){gl.uniform_2_f32(Some(&l),source_w as f32,source_h as f32);} if let Some(l)=gl.get_uniform_location(program,"u_output_size"){gl.uniform_2_f32(Some(&l),output_w as f32,output_h as f32);} if let Some(l)=gl.get_uniform_location(program,"u_pan"){gl.uniform_2_f32(Some(&l),geometry.pan_x as f32,geometry.pan_y as f32);} if let Some(l)=gl.get_uniform_location(program,"u_scale"){gl.uniform_1_f32(Some(&l),geometry.scale.max(0.01) as f32);} if let Some(l)=gl.get_uniform_location(program,"u_rotation"){gl.uniform_1_f32(Some(&l),geometry.rotation as f32*std::f32::consts::PI/180.0);} if let Some(l)=gl.get_uniform_location(program,"u_fit_mode"){gl.uniform_1_i32(Some(&l),fit);} if let Some(l)=gl.get_uniform_location(program,"u_crop"){gl.uniform_4_f32(Some(&l),geometry.crop_left.clamp(0.0,0.45) as f32,geometry.crop_right.clamp(0.0,0.45) as f32,geometry.crop_top.clamp(0.0,0.45) as f32,geometry.crop_bottom.clamp(0.0,0.45) as f32);} gl.bind_vertex_array(Some(vao)); gl.draw_arrays(glow::TRIANGLES,0,3); gl.bind_vertex_array(None); gl.bind_texture(glow::TEXTURE_2D,None); gl.use_program(None); }
+fn draw_geometry_pass(
+    gl: &glow::Context,
+    program: glow::Program,
+    vao: glow::VertexArray,
+    texture: glow::Texture,
+    geometry: VideoGeometry,
+    source_w: u32,
+    source_h: u32,
+    output_w: u32,
+    output_h: u32,
+    destination: glow::Framebuffer,
+) {
+    let fit = match geometry.fit_mode {
+        super::types::FitMode::Fit => 0,
+        super::types::FitMode::Fill => 1,
+        super::types::FitMode::Stretch => 2,
+    };
+    unsafe {
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(destination));
+        gl.viewport(0, 0, output_w as i32, output_h as i32);
+        gl.disable(glow::BLEND);
+        gl.use_program(Some(program));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        if let Some(l) = gl.get_uniform_location(program, "u_tex") {
+            gl.uniform_1_i32(Some(&l), 0);
+        }
+        if let Some(l) = gl.get_uniform_location(program, "u_source_size") {
+            gl.uniform_2_f32(Some(&l), source_w as f32, source_h as f32);
+        }
+        if let Some(l) = gl.get_uniform_location(program, "u_output_size") {
+            gl.uniform_2_f32(Some(&l), output_w as f32, output_h as f32);
+        }
+        if let Some(l) = gl.get_uniform_location(program, "u_pan") {
+            gl.uniform_2_f32(Some(&l), geometry.pan_x as f32, geometry.pan_y as f32);
+        }
+        if let Some(l) = gl.get_uniform_location(program, "u_scale") {
+            gl.uniform_1_f32(Some(&l), geometry.scale.max(0.01) as f32);
+        }
+        if let Some(l) = gl.get_uniform_location(program, "u_rotation") {
+            gl.uniform_1_f32(
+                Some(&l),
+                (geometry.rotation % 360) as f32 * std::f32::consts::PI / 180.0,
+            );
+        }
+        if let Some(l) = gl.get_uniform_location(program, "u_fit_mode") {
+            gl.uniform_1_i32(Some(&l), fit);
+        }
+        if let Some(l) = gl.get_uniform_location(program, "u_crop") {
+            gl.uniform_4_f32(
+                Some(&l),
+                geometry.crop_left.clamp(0.0, 1.0) as f32,
+                geometry.crop_right.clamp(0.0, 1.0) as f32,
+                geometry.crop_top.clamp(0.0, 1.0) as f32,
+                geometry.crop_bottom.clamp(0.0, 1.0) as f32,
+            );
+        }
+        gl.bind_vertex_array(Some(vao));
+        gl.draw_arrays(glow::TRIANGLES, 0, 3);
+        gl.bind_vertex_array(None);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.use_program(None);
+    }
 }
 
 /// Plain textured fullscreen blit (composite → window when no warp).
@@ -2580,14 +3874,18 @@ fn build_program(
     name: &str,
 ) -> Result<(glow::Program, glow::VertexArray)> {
     unsafe {
-        let vs = gl.create_shader(glow::VERTEX_SHADER).map_err(|e| anyhow!("{e}"))?;
+        let vs = gl
+            .create_shader(glow::VERTEX_SHADER)
+            .map_err(|e| anyhow!("{e}"))?;
         gl.shader_source(vs, vert);
         gl.compile_shader(vs);
         if !gl.get_shader_compile_status(vs) {
             return Err(anyhow!("{name} vert: {}", gl.get_shader_info_log(vs)));
         }
 
-        let fs = gl.create_shader(glow::FRAGMENT_SHADER).map_err(|e| anyhow!("{e}"))?;
+        let fs = gl
+            .create_shader(glow::FRAGMENT_SHADER)
+            .map_err(|e| anyhow!("{e}"))?;
         gl.shader_source(fs, frag);
         gl.compile_shader(fs);
         if !gl.get_shader_compile_status(fs) {
@@ -2623,6 +3921,8 @@ fn draw_composite_pass(
     blend_mode: i32,
     opacity: f32,
     layer_premultiplied: bool,
+    crop_mask: Option<CropMask>,
+    presentation_rect: Option<[f32; 4]>,
     w: u32,
     h: u32,
     dst_fbo: glow::Framebuffer,
@@ -2650,6 +3950,60 @@ fn draw_composite_pass(
         }
         if let Some(loc) = gl.get_uniform_location(program, "u_opacity") {
             gl.uniform_1_f32(Some(&loc), opacity);
+        }
+        if let Some(loc) = gl.get_uniform_location(program, "u_crop_enabled") {
+            gl.uniform_1_i32(Some(&loc), i32::from(crop_mask.is_some()));
+        }
+        if let Some(loc) = gl.get_uniform_location(program, "u_presentation_enabled") {
+            gl.uniform_1_i32(Some(&loc), i32::from(presentation_rect.is_some()));
+        }
+        if let Some(loc) = gl.get_uniform_location(program, "u_presentation_rect") {
+            let rect = presentation_rect.unwrap_or([0.0, 0.0, 1.0, 1.0]);
+            gl.uniform_4_f32(Some(&loc), rect[0], rect[1], rect[2], rect[3]);
+        }
+        if let Some(mask) = crop_mask {
+            let geometry = mask.geometry;
+            let layout = crop_mask_layout(
+                geometry,
+                mask.source_aspect,
+                mask.output_aspect.unwrap_or(w as f32 / h.max(1) as f32),
+                mask.source_rotation,
+            );
+            if let Some(loc) = gl.get_uniform_location(program, "u_crop_source_valid") {
+                gl.uniform_1_i32(Some(&loc), i32::from(layout.is_some()));
+            }
+            if let Some(loc) = gl.get_uniform_location(program, "u_crop") {
+                gl.uniform_4_f32(
+                    Some(&loc),
+                    crop_fraction(geometry.crop_left),
+                    crop_fraction(geometry.crop_right),
+                    crop_fraction(geometry.crop_top),
+                    crop_fraction(geometry.crop_bottom),
+                );
+            }
+            let transform = layout.unwrap_or(CropMaskLayout {
+                source_aspect: 1.0,
+                output_aspect: w as f32 / h.max(1) as f32,
+                pan_physical: [0.0, 0.0],
+                scale_xy: [1.0, 1.0],
+                rotation: 0.0,
+            });
+            if let Some(loc) = gl.get_uniform_location(program, "u_crop_pan") {
+                gl.uniform_2_f32(
+                    Some(&loc),
+                    transform.pan_physical[0],
+                    transform.pan_physical[1],
+                );
+            }
+            if let Some(loc) = gl.get_uniform_location(program, "u_crop_scale") {
+                gl.uniform_2_f32(Some(&loc), transform.scale_xy[0], transform.scale_xy[1]);
+            }
+            if let Some(loc) = gl.get_uniform_location(program, "u_crop_rotation") {
+                gl.uniform_1_f32(Some(&loc), transform.rotation);
+            }
+            if let Some(loc) = gl.get_uniform_location(program, "u_crop_aspect") {
+                gl.uniform_2_f32(Some(&loc), transform.source_aspect, transform.output_aspect);
+            }
         }
         gl.bind_vertex_array(Some(vao));
         gl.draw_arrays(glow::TRIANGLES, 0, 3);
@@ -2736,23 +4090,228 @@ fn draw_warp_pass_to(
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_monitor_deadline, freshest_monitor_candidate, monitor_capture_interval,
-        monitor_dimensions, MonitorFrameMailbox, ReadyMonitorPbo, RenderRuntime,
-        wait_for_render_wake_or_shutdown,
+        advance_monitor_deadline, crop_mask_layout, crop_mask_source_uv,
+        freshest_monitor_candidate, monitor_capture_interval, monitor_dimensions,
+        presentation_frame, presentation_target_size, wait_for_render_wake_or_shutdown,
+        CropMaskLayout, MonitorFrameMailbox, PresentationFrame, ReadyMonitorPbo, RenderRuntime,
     };
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
-    use uuid::Uuid;
+    use crate::cue::types::PresentationVideoLayout;
     use crate::engine::network_io::{BgraFrame, BgraFrameMailbox};
     use crate::engine::output_engine::{LayerStyle, VideoGeometry};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    fn test_slide_layout() -> PresentationVideoLayout {
+        PresentationVideoLayout {
+            slide_width: 4,
+            slide_height: 3,
+            x: 0.1,
+            y: 0.2,
+            width: 0.4,
+            height: 0.5,
+            rotation: 0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        }
+    }
+
+    #[test]
+    fn presentation_rect_fits_slide_and_video_frame_to_each_output() {
+        let layout = test_slide_layout();
+        let widescreen = presentation_frame(layout, 1920, 1080).unwrap();
+        assert_eq!(
+            widescreen,
+            PresentationFrame {
+                x: 384,
+                top: 216,
+                width: 576,
+                height: 540
+            }
+        );
+        assert_eq!(widescreen.uv_rect(1920, 1080), [0.2, 0.3, 0.3, 0.5]);
+
+        let portrait = presentation_frame(layout, 600, 1000).unwrap();
+        // A 4:3 slide fits into a 600x450 canvas centered vertically.
+        assert_eq!(
+            portrait,
+            PresentationFrame {
+                x: 60,
+                top: 365,
+                width: 240,
+                height: 225
+            }
+        );
+        assert_eq!(
+            presentation_target_size(true, Some(portrait), 600, 1000),
+            (240, 225)
+        );
+
+        let four_three = presentation_frame(layout, 800, 600).unwrap();
+        assert_eq!(
+            four_three,
+            PresentationFrame {
+                x: 80,
+                top: 120,
+                width: 320,
+                height: 300
+            }
+        );
+    }
+
+    #[test]
+    fn presentation_rect_rejects_unsupported_and_subpixel_frames() {
+        let mut layout = test_slide_layout();
+        layout.rotation = 90;
+        assert!(presentation_frame(layout, 1920, 1080).is_none());
+        layout.rotation = 0;
+        layout.crop_left = 0.01;
+        assert!(presentation_frame(layout, 1920, 1080).is_none());
+        layout.crop_left = 0.0;
+        layout.width = 0.00001;
+        assert!(presentation_frame(layout, 1, 1).is_none());
+        assert_eq!(presentation_target_size(true, None, 1, 1), (1, 1));
+        assert_eq!(
+            presentation_target_size(false, None, 1920, 1080),
+            (1920, 1080)
+        );
+    }
+
+    fn project_source_uv(uv: [f32; 2], layout: CropMaskLayout) -> [f32; 2] {
+        let d = [(uv[0] - 0.5) * layout.source_aspect, uv[1] - 0.5];
+        let (s, c) = layout.rotation.sin_cos();
+        let rotated = [
+            (c * d[0] - s * d[1]) * layout.scale_xy[0] + layout.pan_physical[0],
+            (s * d[0] + c * d[1]) * layout.scale_xy[1] + layout.pan_physical[1],
+        ];
+        [0.5 + rotated[0] / layout.output_aspect, 0.5 + rotated[1]]
+    }
+
+    #[test]
+    fn crop_mask_inverse_mapping_preserves_landmarks_for_each_fit_and_transform() {
+        let source_points = [[0.08, 0.14], [0.37, 0.62], [0.91, 0.83]];
+        for fit_mode in [
+            super::super::types::FitMode::Fit,
+            super::super::types::FitMode::Fill,
+            super::super::types::FitMode::Stretch,
+        ] {
+            for (rotation, source_rotation) in [(0, 0), (90, 0), (0, 90), (37, 0)] {
+                let geometry = VideoGeometry {
+                    fit_mode,
+                    pan_x: 0.07,
+                    pan_y: -0.04,
+                    scale: 1.35,
+                    rotation,
+                    ..Default::default()
+                };
+                let layout =
+                    crop_mask_layout(geometry, 16.0 / 9.0, 4.0 / 3.0, source_rotation).unwrap();
+                for source_uv in source_points {
+                    let display = project_source_uv(source_uv, layout);
+                    let mapped_back = crop_mask_source_uv(display, layout);
+                    assert!((mapped_back[0] - source_uv[0]).abs() < 0.00001, "{fit_mode:?} rot {rotation}/{source_rotation}: {mapped_back:?} != {source_uv:?}");
+                    assert!((mapped_back[1] - source_uv[1]).abs() < 0.00001, "{fit_mode:?} rot {rotation}/{source_rotation}: {mapped_back:?} != {source_uv:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crop_mask_keeps_narrow_strips_and_hides_empty_opposing_edges() {
+        let narrow = VideoGeometry {
+            crop_left: 0.96,
+            crop_right: 0.01,
+            ..Default::default()
+        };
+        let bounds = narrow.source_crop_bounds().unwrap();
+        assert!(bounds.0 < bounds.2);
+        assert!((bounds.2 - bounds.0 - 0.03).abs() < f64::EPSILON * 4.0);
+        assert!(0.975 >= bounds.0 && 0.975 <= bounds.2);
+        assert!(!(0.5 >= bounds.0 && 0.5 <= bounds.2));
+
+        let empty = VideoGeometry {
+            crop_left: 0.7,
+            crop_right: 0.3,
+            ..Default::default()
+        };
+        let bounds = empty.source_crop_bounds().unwrap();
+        assert!(bounds.0 >= bounds.2);
+    }
+
+    #[test]
+    fn crop_mask_layout_waits_for_current_source_aspect() {
+        assert!(crop_mask_layout(VideoGeometry::default(), 0.0, 16.0 / 9.0, 0).is_none());
+        assert!(crop_mask_layout(VideoGeometry::default(), f32::NAN, 16.0 / 9.0, 0).is_none());
+    }
+
+    #[test]
+    fn crop_stretch_maps_source_edges_to_output_edges() {
+        let geometry = VideoGeometry {
+            fit_mode: super::super::types::FitMode::Stretch,
+            ..Default::default()
+        };
+        let layout = crop_mask_layout(geometry, 16.0 / 9.0, 4.0 / 3.0, 0).unwrap();
+        for (source, output) in [
+            ([0.0, 0.0], [0.0, 0.0]),
+            ([1.0, 0.0], [1.0, 0.0]),
+            ([0.0, 1.0], [0.0, 1.0]),
+            ([1.0, 1.0], [1.0, 1.0]),
+        ] {
+            let actual = project_source_uv(source, layout);
+            assert!(
+                (actual[0] - output[0]).abs() < 1e-5,
+                "{source:?} -> {actual:?}"
+            );
+            assert!(
+                (actual[1] - output[1]).abs() < 1e-5,
+                "{source:?} -> {actual:?}"
+            );
+            let inverse = crop_mask_source_uv(output, layout);
+            assert!(
+                (inverse[0] - source[0]).abs() < 1e-5,
+                "{output:?} -> {inverse:?}"
+            );
+            assert!(
+                (inverse[1] - source[1]).abs() < 1e-5,
+                "{output:?} -> {inverse:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crop_metadata_quarter_turn_maps_source_corners_to_rotated_output_corners() {
+        let geometry = VideoGeometry {
+            fit_mode: super::super::types::FitMode::Stretch,
+            ..Default::default()
+        };
+        let layout = crop_mask_layout(geometry, 16.0 / 9.0, 4.0 / 3.0, 90).unwrap();
+        for (source, output) in [
+            ([0.0, 0.0], [1.0, 0.0]),
+            ([1.0, 0.0], [1.0, 1.0]),
+            ([0.0, 1.0], [0.0, 0.0]),
+            ([1.0, 1.0], [0.0, 1.0]),
+        ] {
+            let actual = project_source_uv(source, layout);
+            assert!(
+                (actual[0] - output[0]).abs() < 1e-5,
+                "{source:?} -> {actual:?}"
+            );
+            assert!(
+                (actual[1] - output[1]).abs() < 1e-5,
+                "{source:?} -> {actual:?}"
+            );
+        }
+    }
 
     #[cfg(not(target_os = "macos"))]
     use super::{clamp_floating_geometry, dom_key, FloatingRect};
     #[cfg(not(target_os = "macos"))]
-    use winit::keyboard::{Key, NamedKey};
-    #[cfg(not(target_os = "macos"))]
     use crate::preferences::FloatingWindowGeometry;
+    #[cfg(not(target_os = "macos"))]
+    use winit::keyboard::{Key, NamedKey};
 
     #[cfg(not(target_os = "macos"))]
     #[test]
@@ -2763,7 +4322,15 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn dom_key_named_keys_match_dom_values() {
-        for (key, dom) in [(NamedKey::Escape, "Escape"), (NamedKey::ArrowUp, "ArrowUp"), (NamedKey::ArrowDown, "ArrowDown"), (NamedKey::Delete, "Delete"), (NamedKey::Backspace, "Backspace"), (NamedKey::F5, "F5"), (NamedKey::F9, "F9")] {
+        for (key, dom) in [
+            (NamedKey::Escape, "Escape"),
+            (NamedKey::ArrowUp, "ArrowUp"),
+            (NamedKey::ArrowDown, "ArrowDown"),
+            (NamedKey::Delete, "Delete"),
+            (NamedKey::Backspace, "Backspace"),
+            (NamedKey::F5, "F5"),
+            (NamedKey::F9, "F9"),
+        ] {
             assert_eq!(dom_key(&Key::Named(key)).as_deref(), Some(dom));
         }
     }
@@ -2779,48 +4346,100 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn dom_key_dead_keys_are_dropped() { assert_eq!(dom_key(&Key::Dead(None)), None); }
+    fn dom_key_dead_keys_are_dropped() {
+        assert_eq!(dom_key(&Key::Dead(None)), None);
+    }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn floating_rect_restores_on_the_monitor_with_the_largest_overlap() {
-        let saved = FloatingWindowGeometry { x: 2100, y: 100, width: 900, height: 600, maximized: false };
+        let saved = FloatingWindowGeometry {
+            x: 2100,
+            y: 100,
+            width: 900,
+            height: 600,
+            maximized: false,
+        };
         let monitors = [
-            FloatingRect { x: 0, y: 0, width: 1920, height: 1080 },
-            FloatingRect { x: 1920, y: 0, width: 1920, height: 1080 },
+            FloatingRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            FloatingRect {
+                x: 1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
         ];
-        assert_eq!(
-            clamp_floating_geometry(saved.clone(), &monitors),
-            saved,
-        );
+        assert_eq!(clamp_floating_geometry(saved.clone(), &monitors), saved,);
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn floating_rect_moves_onto_a_remaining_monitor_after_topology_change() {
-        let saved = FloatingWindowGeometry { x: 2600, y: 700, width: 1000, height: 700, maximized: true };
-        let monitors = [FloatingRect { x: 0, y: 0, width: 1920, height: 1080 }];
+        let saved = FloatingWindowGeometry {
+            x: 2600,
+            y: 700,
+            width: 1000,
+            height: 700,
+            maximized: true,
+        };
+        let monitors = [FloatingRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }];
         assert_eq!(
             clamp_floating_geometry(saved, &monitors),
-            FloatingWindowGeometry { x: 920, y: 380, width: 1000, height: 700, maximized: true },
+            FloatingWindowGeometry {
+                x: 920,
+                y: 380,
+                width: 1000,
+                height: 700,
+                maximized: true
+            },
         );
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn floating_rect_is_never_larger_than_the_available_display() {
-        let saved = FloatingWindowGeometry { x: -100, y: -100, width: 3000, height: 2000, maximized: false };
-        let monitors = [FloatingRect { x: 0, y: 0, width: 800, height: 600 }];
+        let saved = FloatingWindowGeometry {
+            x: -100,
+            y: -100,
+            width: 3000,
+            height: 2000,
+            maximized: false,
+        };
+        let monitors = [FloatingRect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        }];
         assert_eq!(
             clamp_floating_geometry(saved, &monitors),
-            FloatingWindowGeometry { x: 0, y: 0, width: 800, height: 600, maximized: false },
+            FloatingWindowGeometry {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+                maximized: false
+            },
         );
     }
 
     #[test]
     fn runtime_state_is_isolated() {
-        let a = RenderRuntime::new(); let b = RenderRuntime::new();
-        a.show(); a.set_size(640, 360); a.set_warp(Some([1.0; 9]));
+        let a = RenderRuntime::new();
+        let b = RenderRuntime::new();
+        a.show();
+        a.set_size(640, 360);
+        a.set_warp(Some([1.0; 9]));
         assert!(a.shared.visible.load(Ordering::Relaxed));
         assert!(!b.shared.visible.load(Ordering::Relaxed));
         assert_eq!(a.shared.width.load(Ordering::Relaxed), 640);
@@ -2867,7 +4486,10 @@ mod tests {
         let waiter = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
             done_tx
-                .send(wait_for_render_wake_or_shutdown(&shared, Duration::from_secs(5)))
+                .send(wait_for_render_wake_or_shutdown(
+                    &shared,
+                    Duration::from_secs(5),
+                ))
                 .unwrap();
         });
 
@@ -2880,31 +4502,83 @@ mod tests {
 
     #[test]
     fn external_source_keeps_geometry_style_and_layer_order() {
-        let runtime = RenderRuntime::new(); let a = Uuid::new_v4(); let b = Uuid::new_v4();
-        let geometry = VideoGeometry { pan_x: 0.2, ..Default::default() };
-        let style = LayerStyle { layer: Some(2), opacity: 0.4, blend_mode: crate::engine::output_engine::BlendMode::Screen, ..LayerStyle::default() };
-        runtime.add_external_source(a, Arc::new(BgraFrameMailbox::default()), geometry, style, crate::engine::output_engine::slot::resolve_layer_key(Some(2), 2), 0);
-        runtime.add_external_source(b, Arc::new(BgraFrameMailbox::default()), VideoGeometry::default(), LayerStyle::default(), crate::engine::output_engine::slot::resolve_layer_key(None, 3), 0);
+        let runtime = RenderRuntime::new();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let geometry = VideoGeometry {
+            pan_x: 0.2,
+            ..Default::default()
+        };
+        let style = LayerStyle {
+            layer: Some(2),
+            opacity: 0.4,
+            blend_mode: crate::engine::output_engine::BlendMode::Screen,
+            ..LayerStyle::default()
+        };
+        runtime.add_external_source(
+            a,
+            Arc::new(BgraFrameMailbox::default()),
+            geometry,
+            style,
+            crate::engine::output_engine::slot::resolve_layer_key(Some(2), 2),
+            0,
+        );
+        runtime.add_external_source(
+            b,
+            Arc::new(BgraFrameMailbox::default()),
+            VideoGeometry::default(),
+            LayerStyle::default(),
+            crate::engine::output_engine::slot::resolve_layer_key(None, 3),
+            0,
+        );
         let (draws, _, _) = runtime.tick_external_sources();
-        assert_eq!(draws.iter().map(|draw| draw.voice).collect::<Vec<_>>(), vec![a, b]);
-        assert_eq!(draws[0].geometry, geometry); assert_eq!(draws[0].opacity, 0.4);
-        assert_eq!(draws[0].blend_mode, crate::engine::output_engine::BlendMode::Screen.shader_id());
+        assert_eq!(
+            draws.iter().map(|draw| draw.voice).collect::<Vec<_>>(),
+            vec![a, b]
+        );
+        assert_eq!(draws[0].geometry, geometry);
+        assert_eq!(draws[0].opacity, 0.4);
+        assert_eq!(
+            draws[0].blend_mode,
+            crate::engine::output_engine::BlendMode::Screen.shader_id()
+        );
     }
 
     #[test]
     fn external_hard_stop_forces_cleanup_redraw() {
-        let runtime = RenderRuntime::new(); let voice = Uuid::new_v4();
-        runtime.add_external_source(voice, Arc::new(BgraFrameMailbox::default()), VideoGeometry::default(), LayerStyle::default(), 1, 0);
-        let _ = runtime.tick_external_sources(); assert!(runtime.stop_external_source(voice, 0));
-        let (draws, _, dirty) = runtime.tick_external_sources(); assert!(draws.is_empty()); assert!(dirty);
+        let runtime = RenderRuntime::new();
+        let voice = Uuid::new_v4();
+        runtime.add_external_source(
+            voice,
+            Arc::new(BgraFrameMailbox::default()),
+            VideoGeometry::default(),
+            LayerStyle::default(),
+            1,
+            0,
+        );
+        let _ = runtime.tick_external_sources();
+        assert!(runtime.stop_external_source(voice, 0));
+        let (draws, _, dirty) = runtime.tick_external_sources();
+        assert!(draws.is_empty());
+        assert!(dirty);
     }
 
     #[test]
     fn external_stop_retains_frame_for_fade() {
-        let runtime = RenderRuntime::new(); let voice = Uuid::new_v4();
-        runtime.add_external_source(voice, Arc::new(BgraFrameMailbox::default()), VideoGeometry::default(), LayerStyle::default(), 1, 0);
-        assert!(runtime.stop_external_source(voice, 250)); let (draws, animating, _) = runtime.tick_external_sources();
-        assert_eq!(draws.len(), 1); assert!(animating);
+        let runtime = RenderRuntime::new();
+        let voice = Uuid::new_v4();
+        runtime.add_external_source(
+            voice,
+            Arc::new(BgraFrameMailbox::default()),
+            VideoGeometry::default(),
+            LayerStyle::default(),
+            1,
+            0,
+        );
+        assert!(runtime.stop_external_source(voice, 250));
+        let (draws, animating, _) = runtime.tick_external_sources();
+        assert_eq!(draws.len(), 1);
+        assert!(animating);
     }
 
     #[test]
@@ -2919,19 +4593,30 @@ mod tests {
     fn monitor_mailbox_keeps_latest_frame_and_rejects_prior_sessions() {
         let runtime = RenderRuntime::new();
         assert!(runtime.set_monitor_capture(true, 10));
-        runtime.monitor_frames.publish(1, 10, 100, BgraFrame {
-            width: 1,
-            height: 1,
-            stride: 4,
-            data: vec![1, 2, 3, 255],
-        });
-        runtime.monitor_frames.publish(2, 10, 200, BgraFrame {
-            width: 1,
-            height: 1,
-            stride: 4,
-            data: vec![1, 2, 3, 255],
-        });
-        let (sequence, session, captured_at_us, frame) = runtime.monitor_frame_after(0, 10).unwrap();
+        runtime.monitor_frames.publish(
+            1,
+            10,
+            100,
+            BgraFrame {
+                width: 1,
+                height: 1,
+                stride: 4,
+                data: vec![1, 2, 3, 255],
+            },
+        );
+        runtime.monitor_frames.publish(
+            2,
+            10,
+            200,
+            BgraFrame {
+                width: 1,
+                height: 1,
+                stride: 4,
+                data: vec![1, 2, 3, 255],
+            },
+        );
+        let (sequence, session, captured_at_us, frame) =
+            runtime.monitor_frame_after(0, 10).unwrap();
         assert_eq!((sequence, session, captured_at_us), (2, 10, 200));
         assert_eq!(frame.unwrap().data[0], 1);
         assert!(runtime.monitor_frame_after(0, 9).is_none());
@@ -2945,7 +4630,12 @@ mod tests {
     fn monitor_mailbox_does_not_replace_newer_capture_with_late_old_frame() {
         let mailbox = MonitorFrameMailbox::default();
         mailbox.select_session(1);
-        let frame = |v| BgraFrame { width: 1, height: 1, stride: 4, data: vec![v, 0, 0, 255] };
+        let frame = |v| BgraFrame {
+            width: 1,
+            height: 1,
+            stride: 4,
+            data: vec![v, 0, 0, 255],
+        };
         mailbox.publish(8, 1, 800, frame(8));
         mailbox.publish(7, 1, 700, frame(7));
         let (sequence, _, _, pixels) = mailbox.read_after(0, 1).unwrap();
@@ -2956,9 +4646,24 @@ mod tests {
     #[test]
     fn monitor_pbo_selection_prefers_newest_eligible_session_and_wraps_sequence() {
         let candidates = [
-            Some(ReadyMonitorPbo { slot_index: 0, sequence: u64::MAX, session: 7, captured_at_us: 1 }),
-            Some(ReadyMonitorPbo { slot_index: 1, sequence: 0, session: 7, captured_at_us: 2 }),
-            Some(ReadyMonitorPbo { slot_index: 2, sequence: 1, session: 6, captured_at_us: 3 }),
+            Some(ReadyMonitorPbo {
+                slot_index: 0,
+                sequence: u64::MAX,
+                session: 7,
+                captured_at_us: 1,
+            }),
+            Some(ReadyMonitorPbo {
+                slot_index: 1,
+                sequence: 0,
+                session: 7,
+                captured_at_us: 2,
+            }),
+            Some(ReadyMonitorPbo {
+                slot_index: 2,
+                sequence: 1,
+                session: 6,
+                captured_at_us: 3,
+            }),
         ];
         let selected = freshest_monitor_candidate(&candidates, 7, u64::MAX - 1).unwrap();
         assert_eq!((selected.slot_index, selected.sequence), (1, 0));
@@ -2970,7 +4675,17 @@ mod tests {
         let mailbox = MonitorFrameMailbox::default();
         mailbox.select_session(1);
         let held = mailbox.latest.lock().unwrap();
-        mailbox.publish(1, 1, 1, BgraFrame { width: 1, height: 1, stride: 4, data: vec![0; 4] });
+        mailbox.publish(
+            1,
+            1,
+            1,
+            BgraFrame {
+                width: 1,
+                height: 1,
+                stride: 4,
+                data: vec![0; 4],
+            },
+        );
         assert_eq!(mailbox.mailbox_lock_drops.load(Ordering::Relaxed), 1);
         assert!(held.is_none());
     }
@@ -2979,7 +4694,10 @@ mod tests {
     fn monitor_capture_cadence_is_thirty_fps_target() {
         let interval = Duration::from_micros(33_333);
         assert_eq!(1_000_000 / interval.as_micros(), 30);
-        assert_eq!(interval.saturating_sub(Duration::from_millis(40)), Duration::ZERO);
+        assert_eq!(
+            interval.saturating_sub(Duration::from_millis(40)),
+            Duration::ZERO
+        );
     }
 
     #[test]

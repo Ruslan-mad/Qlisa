@@ -31,8 +31,8 @@ signed 1.5.5-to-1.5.6 updater E2E check passed. Runtime bootstrap, offline
 retry, workspace preservation, and audio checks are recorded in
 [local updater testing](UPDATER_TESTING_LOCAL.md). The Settings runtime
 reinstallation test passed on the installed 1.5.6 build. Runtime source and
-license evidence is tracked separately; fetching media files from upstream
-does not establish legal compliance. See
+license evidence is tracked separately; hosting pinned runtime packages does
+not establish legal compliance. See
 [Windows release preparation](RELEASING.md).
 
 The app has a React/TypeScript Tauri front end and a Rust backend. The backend
@@ -684,8 +684,10 @@ preferences migrate that regular default into the new selection once.
   Vulkan loader files. First launch verifies and seeds them to
   `%LOCALAPPDATA%\Qlisa\runtime\` before opening the main window. The compact
   updater contains no large media payload and removes only leftover full-package
-  installer files; it preserves the user runtime cache. Missing or damaged
-  cache files use the pinned upstream downloader in compact installs. NDI is
+  installer files; it preserves the user runtime cache. An empty cache uses the
+  pinned Qlisa runtime package on first launch. Compatible kits persist across
+  app updates; damaged kits wait for explicit repair and kit updates require an
+  operator action. NDI is
   installed by the full setup when no NDI 6.3.2-or-newer runtime is found; Qlisa
   still dynamically loads the installed NDI DLL and does not bundle it directly.
 - The SRT sender carries program audio and video on Windows. On macOS/Linux,
@@ -753,8 +755,9 @@ stored at the same scope; inspect the struct before deciding.
 - Rust stable toolchain, Node.js, pnpm, and Tauri 2 platform prerequisites.
 - `pnpm install` at repository root.
 - libmpv for visual playback. Windows full setup seeds the pinned DLL from its
-  verified installer payload. Compact installs can download the pinned DLL
-  from upstream and verify its SHA256 hash. Both use
+  verified installer payload. Compact installs acquire the versioned pinned
+  Qlisa runtime asset only during first install or an explicit update/repair.
+  Both use
   `%LOCALAPPDATA%\Qlisa\runtime\`; macOS/Linux use platform libmpv.
 - Windows Qlisa app builds always use `vendor/asiosdk/` via
   `src-tauri/.cargo/config.toml` and enable `asio-support`.
@@ -827,7 +830,7 @@ The 1.5.4 local updater E2E check passed. The 1.5.5 per-machine install and
 the signed 1.5.5-to-1.5.6 updater E2E check passed. The updater preserved the
 saved workspace, preferences, and runtime. Settings runtime reinstallation on
 the installed 1.5.6 build passed. Runtime source and license
-evidence has open items; downloading media assets from upstream does not
+evidence has open items; hosting media assets does not
 establish legal compliance. Source materials and notices remain separate from
 the Qlisa binary release. Release artifacts are not checked into Git; do not
 reuse Inkue updater metadata.
@@ -964,8 +967,9 @@ progress and cancellation, and applying an output to its cue with a restore
 path. Compatibility results are heuristics for the playback engine; they do
 not guarantee decode quality on every platform. Conversion and metadata probes
 run outside the audio callback and transport path. Windows first launch
-downloads `ffmpeg.exe` and `ffprobe.exe` from one pinned Gyan archive directly
-from upstream. Cue assignment and source restoration use UUID lookup, including
+downloads `ffmpeg.exe` and `ffprobe.exe` from the pinned Qlisa runtime package
+when the runtime cache is empty. Compatible kits remain installed across app
+updates. Cue assignment and source restoration use UUID lookup, including
 nested visual cues. See the [media conversion note](media-conversion.md) for
 restore guards, metadata refresh, and video preload behavior, and
 [Windows network runtime packaging](windows-network-runtime.md) for runtime details.
@@ -1096,7 +1100,7 @@ live audio or physical output.
 | Media cue appears stuck/loading or has no duration | Check path, codec/decode alert, file permissions, and Preflight/Relink. Inspect logs; metadata and decodes run off the UI path. |
 | NDI not available | Run the full installer to add the official NDI Runtime, then check Preferences → NDI/SRT Output status. A valid local runtime is required for NDI discovery/sender startup. Qlisa does not bundle the DLL directly. |
 | SRT reports unavailable | Check `%LOCALAPPDATA%\Qlisa\runtime\ffmpeg.exe` and confirm the pinned Windows build described in [FFmpeg source and build provenance](THIRD_PARTY_SOURCE_OFFER.md) supports SRT. |
-| Runtime preparation fails | Check network access to the pinned upstream URLs in `scripts/runtime-manifest.json`, then choose Retry on the preparation screen. |
+| Runtime preparation fails | Check network access to the pinned Qlisa runtime asset URLs in `scripts/runtime-manifest.json`, then choose Retry or explicit Repair on the preparation screen. |
 | A new Tauri window fails to use filesystem/window APIs | Check the window's label and `src-tauri/capabilities/*.json`; permissions are scoped by window. |
 | Build output does not match a fresh source edit | Close Qlisa/tauri dev if files are locked, rebuild, inspect the executable/resources timestamp, then launch the intended output path. |
 
@@ -1118,7 +1122,7 @@ including private media paths, OSC passwords, or SRT passphrases in bug reports.
 | OSC/MIDI/timecode | matching `engine/*`, `cue/*`, `commands/*` modules | cue trigger routing, UI editor, machine config and integration tests |
 | Lighting/DMX | `engine/dmx_*`, `engine/fixture.rs`, `cue/light_cue.rs`, `commands/light_cmds.rs` | fixture/patch UI, network interface selection, workspace persistence |
 | UI-only cue table/inspector | `src/components/CueList/`, `src/components/Inspector/` | `src/lib/types.ts`, commands wrapper, selection/keyboard tests, translations |
-| Tauri window, permission, installer | `src-tauri/tauri*.conf.json`, `src-tauri/capabilities/`, `build.rs` | window component, asset scopes, runtime manifest pins and provenance; media binaries download on first launch and are not vendor resources |
+| Tauri window, permission, installer | `src-tauri/tauri*.conf.json`, `src-tauri/capabilities/`, `build.rs` | window component, asset scopes, runtime manifest kit pins and provenance; compact installs acquire runtime assets on first install or explicit update/repair |
 
 ## First-pass workflow for a new coding session
 

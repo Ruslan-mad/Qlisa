@@ -209,8 +209,14 @@ export function TransportBar({ onRefresh, panelVisibility, onTogglePanel, output
         borderTop: "2px solid var(--wc-border)",
         height: 104,
         flexShrink: 0,
+        minWidth: 0,
+        flexWrap: "nowrap",
+        overflowX: "hidden",
+        overflowY: "hidden",
       }}
     >
+      <div className="stage-transport-left">
+      <div className="stage-transport-actions">
       {/* GO */}
       <button
         onClickCapture={(event) => animateButtonPress(event.currentTarget)}
@@ -296,9 +302,10 @@ export function TransportBar({ onRefresh, panelVisibility, onTogglePanel, output
         {hasPaused && !hasRunning ? <Play size={22} weight="fill" aria-hidden="true" /> : <Pause size={22} weight="fill" aria-hidden="true" />}
         <span>{pauseLabel}</span><small style={{ fontSize: 10, fontWeight: 500, letterSpacing: 0 }}>{t("transport.pauseShortcutSelected")}</small>
       </button>
+      </div>
 
       {/* Running cue info */}
-      <div className="stage-running-cues" style={{ flex: 1, minWidth: 90, overflow: "hidden" }}>
+      <div className="stage-running-cues" style={{ flex: 1, minWidth: 70, overflow: "hidden" }}>
         {goError && (
           <div
             role="alert"
@@ -347,10 +354,15 @@ export function TransportBar({ onRefresh, panelVisibility, onTogglePanel, output
           ))
         )}
       </div>
+      </div>
 
-      <div className="stage-transport-secondary" style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0, flex: "0 1 auto" }}>
-        <MediaConversionStatus />
+      <div className="stage-transport-ftb">
         <OutputFtbControls />
+      </div>
+
+      <div className="stage-transport-right">
+      <div className="stage-transport-secondary" style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0, flex: "0 0 auto" }}>
+        <MediaConversionStatus />
         <TcStatusIndicator />
 
         {/* OSC activity indicator — click to open/close monitor */}
@@ -430,6 +442,7 @@ export function TransportBar({ onRefresh, panelVisibility, onTogglePanel, output
           outputMonitorVisible={outputMonitorVisible}
           onToggleOutputMonitor={onToggleOutputMonitor}
         />
+      </div>
       </div>
     </div>
   );

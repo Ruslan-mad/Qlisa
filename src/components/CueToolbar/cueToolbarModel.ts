@@ -19,6 +19,8 @@ export const CUE_TOOLBAR_DESCRIPTORS: CueToolbarDescriptor[] = [
   { type: "number", labelKey: "cueTypes.number", primary: true },
   { type: "memo", labelKey: "cueTypes.memo", primary: true, hintKey: "toolbar.addMemo" },
   { type: "wait", labelKey: "cueTypes.wait" },
+  { type: "timer", labelKey: "cueTypes.timer" },
+  { type: "presentation", labelKey: "cueTypes.presentation", hintKey: "toolbar.importPresentation" },
   { type: "text", labelKey: "cueTypes.text" },
   { type: "midi", labelKey: "cueTypes.midi" },
   { type: "midi_file", labelKey: "cueTypes.midiFile", hintKey: "toolbar.addMidiFile" },

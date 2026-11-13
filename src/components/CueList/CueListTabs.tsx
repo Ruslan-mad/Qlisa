@@ -29,6 +29,7 @@ export function CueListTabs({
   const [renameValue, setRenameValue] = useState("");
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const [addBtnHovered, setAddBtnHovered] = useState(false);
+  const [modeError, setModeError] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -45,6 +46,7 @@ export function CueListTabs({
 
   const handleSwitchList = async (id: string) => {
     if (id === activeCueListId) return;
+    setModeError(null);
     await setActiveCueList(id).catch(console.error);
     onRefresh();
   };
@@ -63,13 +65,23 @@ export function CueListTabs({
     onRefresh();
   };
 
+  const handleSetMode = async (id: string, mode: "sequential" | "cart") => {
+    const list = cueLists.find((l) => l.id === id);
+    if (!list || list.mode === mode) return;
+    setModeError(null);
+    try {
+      await setCueListMode(id, mode);
+      await refreshCueLists();
+      setContextMenu(null);
+    } catch (error) {
+      setModeError(t("cueList.viewSaveFailed", { error: String(error) }));
+    }
+  };
+
   const handleToggleMode = async (id: string) => {
     const list = cueLists.find((l) => l.id === id);
     if (!list) return;
-    const next = list.mode === "cart" ? "sequential" : "cart";
-    await setCueListMode(id, next).catch(console.error);
-    await refreshCueLists();
-    setContextMenu(null);
+    await handleSetMode(id, list.mode === "cart" ? "sequential" : "cart");
   };
 
   const startRename = (id: string, currentName: string) => {
@@ -98,7 +110,8 @@ export function CueListTabs({
       display: "flex", flexDirection: "column", flexShrink: 0,
       background: "var(--wc-bg-app)", borderBottom: "1px solid var(--wc-border)",
     }}>
-      {(showTabs || showSearchBar) && <div
+      {(showTabs || showSearchBar) && <>
+      <div
       style={{
         display: "flex", alignItems: "center", height: 30,
         flexShrink: 0, minWidth: 0, gap: 8, paddingLeft: 4, paddingRight: 4,
@@ -189,6 +202,40 @@ export function CueListTabs({
       </button>
       </div>
 
+      {(() => {
+        const activeList = cueLists.find((list) => list.id === activeCueListId);
+        if (!activeList) return null;
+        const currentMode = activeList.mode === "cart" ? "cart" : "sequential";
+        return (
+          <div role="group" aria-label={t("cueList.view")} style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+            <span style={{ color: "var(--wc-text-muted)", fontSize: 11 }}>{t("cueList.view")}:</span>
+            <div style={{ display: "flex", border: "1px solid var(--wc-border-strong)", borderRadius: 5, overflow: "hidden" }}>
+              {(["sequential", "cart"] as const).map((mode) => {
+                const selected = currentMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    aria-pressed={selected}
+                    title={mode === "cart" ? t("cueList.cardsView") : t("cueList.listView")}
+                    onClick={() => void handleSetMode(activeList.id, mode)}
+                    style={{
+                      height: 22, padding: "0 7px", border: 0,
+                      borderRight: mode === "sequential" ? "1px solid var(--wc-border-strong)" : 0,
+                      background: selected ? "var(--wc-bg-surface)" : "transparent",
+                      color: selected ? "var(--wc-text)" : "var(--wc-text-muted)",
+                      fontSize: 11, fontWeight: selected ? 600 : 400, cursor: selected ? "default" : "pointer",
+                    }}
+                  >
+                    {mode === "cart" ? t("cueList.cardsView") : t("cueList.listView")}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Context menu */}
       {contextMenu && (
         <div
@@ -209,8 +256,8 @@ export function CueListTabs({
           />
           <ContextMenuItem
             label={cueLists.find((l) => l.id === contextMenu.id)?.mode === "cart"
-              ? t("sweepUi.switchSequential")
-              : t("sweepUi.switchCart")}
+              ? t("cueList.switchToList")
+              : t("cueList.switchToCards")}
             onClick={() => void handleToggleMode(contextMenu.id)}
           />
           <div style={{ height: 1, background: "var(--wc-border-strong)", margin: "4px 0" }} />
@@ -241,7 +288,9 @@ export function CueListTabs({
           />
         </div>
       )}
-      </div>}
+      </div>
+      {modeError && <div role="alert" style={{ padding: "3px 8px", color: "#f87171", fontSize: 11 }}>{modeError}</div>}
+      </>}
     </div>
   );
 }

@@ -1,4 +1,49 @@
-import type { CueSummary, MediaInfo } from "../../lib/types";
+import type { CueSummary, MediaConversionStatus, MediaInfo } from "../../lib/types";
+
+export type MediaConversionEnqueueFailure = { cue_id: string; cue_name: string; error: string };
+
+export function resolveMediaConversionEnqueueResults<T>(
+  cues: readonly { id: string; name: string }[],
+  results: readonly PromiseSettledResult<T>[],
+): { jobs: T[]; failures: MediaConversionEnqueueFailure[] } {
+  const jobs: T[] = [];
+  const failures: MediaConversionEnqueueFailure[] = [];
+  results.forEach((result, index) => {
+    const cue = cues[index];
+    if (!cue) return;
+    if (result.status === "fulfilled") {
+      jobs.push(result.value);
+      return;
+    }
+    const { reason } = result;
+    let error: string;
+    if (reason instanceof Error) error = reason.message;
+    else if (typeof reason === "string") error = reason;
+    else {
+      try { error = JSON.stringify(reason) ?? String(reason); }
+      catch { error = String(reason); }
+    }
+    failures.push({ cue_id: cue.id, cue_name: cue.name, error });
+  });
+  return { jobs, failures };
+}
+
+export function mediaConversionBatchState(
+  expectedCount: number,
+  jobs: readonly { status: MediaConversionStatus }[],
+  enqueueFailures: readonly MediaConversionEnqueueFailure[],
+): { busy: boolean; finished: boolean; completed: boolean } {
+  const busy = jobs.some((job) => job.status === "queued" || job.status === "running");
+  const accountedFor = jobs.length + enqueueFailures.length === expectedCount;
+  const finished = accountedFor && !busy;
+  const completed = finished && enqueueFailures.length === 0 && jobs.length === expectedCount
+    && jobs.every((job) => job.status === "completed");
+  return { busy, finished, completed };
+}
+
+export function findCompletedMediaOutputJob<T extends { status: MediaConversionStatus; output_path?: string | null }>(jobs: readonly T[]): T | undefined {
+  return jobs.find((job) => job.status === "completed" && !!job.output_path);
+}
 
 export function isConvertibleMediaCue(cue: CueSummary | null | undefined): boolean {
   return !!cue && (cue.cue_type === "audio" || cue.cue_type === "video" || cue.cue_type === "image") && !!cue.file_path;

@@ -54,9 +54,10 @@ export function MediaConversionStatus() {
 
   if (jobs.length === 0) return null;
 
-  return <div style={{ position: "relative", flexShrink: 0 }}>
-    <button type="button" onClick={() => setOpen((value) => !value)} style={statusButton} aria-expanded={open}>
-      {active.length > 0 ? `⇄ ${t("mediaConversion.active")}: ${active.length}` : `✓ ${t("mediaConversion.completed")}: ${finished.length}`}
+  return <div className="stage-transport-conversion-status" style={{ position: "relative", flexShrink: 0 }}>
+    <button type="button" onClick={() => setOpen((value) => !value)} style={statusButton} aria-expanded={open} title={active.length > 0 ? `${t("mediaConversion.active")}: ${active.length}` : `${t("mediaConversion.completed")}: ${finished.length}`}>
+      <span className="stage-transport-conversion-glyph" aria-hidden="true">{active.length > 0 ? "⇄" : "✓"}</span>
+      <span className="stage-transport-conversion-label">{active.length > 0 ? `${t("mediaConversion.active")}: ${active.length}` : `${t("mediaConversion.completed")}: ${finished.length}`}</span>
     </button>
     {open && <div style={popover}>
       <div style={popoverHeader}><span>{t("mediaConversion.jobs")}</span>{finished.length > 0 && <button type="button" onClick={clearFinished} style={clearButton}>{t("mediaConversion.clear")}</button>}</div>

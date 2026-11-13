@@ -41,7 +41,7 @@ export function getActiveCueDisplayRows(lists: WorkspaceCueCatalogList[]): Catal
     for (const cue of cues) {
       const active = cue.state === "running" || cue.state === "paused";
       if (active) result.push({ ...cue, listName });
-      if (cue.children?.length && !(active && (cue.cue_type === "group" || cue.cue_type === "number"))) {
+      if (cue.children?.length && !(active && (cue.cue_type === "group" || cue.cue_type === "number" || cue.cue_type === "presentation"))) {
         visit(cue.children, listName);
       }
     }

@@ -15,11 +15,11 @@ use crate::engine::mpv_sys::{
     MPV_EVENT_PLAYBACK_RESTART, MPV_EVENT_SEEK, MPV_EVENT_SHUTDOWN, MPV_EVENT_START_FILE,
     MPV_EVENT_VIDEO_RECONFIG, MPV_FORMAT_DOUBLE,
 };
-use crate::engine::AudioEngine;
 use crate::engine::network_io::redact_srt_diagnostic;
+use crate::engine::AudioEngine;
 
-use super::types::{MpvCtx, OutputStatus, VoiceId};
 use super::slot::SlotRegistry;
+use super::types::{MpvCtx, OutputStatus, VoiceId};
 use super::{cs, PipelineState};
 
 pub(super) fn mpv_event_loop(
@@ -43,7 +43,11 @@ pub(super) fn mpv_event_loop(
         if let Some(deadline) = reveal_deadline {
             if Instant::now() >= deadline {
                 reveal_deadline = None;
-                let pending = pipeline.pending_video_start.lock().ok().and_then(|mut p| p.take());
+                let pending = pipeline
+                    .pending_video_start
+                    .lock()
+                    .ok()
+                    .and_then(|mut p| p.take());
                 if let Some(start) = pending {
                     log::warn!(
                         "[output-mpv] PLAYBACK_RESTART watchdog fired — forcing \
@@ -72,17 +76,6 @@ pub(super) fn mpv_event_loop(
 
             MPV_EVENT_VIDEO_RECONFIG => {
                 log::info!("[output-mpv] MPV_EVENT_VIDEO_RECONFIG");
-                // A fractional per-cue crop parks here until the source
-                // dimensions (video-params/w|h) exist — which they do once the
-                // video output reconfigures.  One-shot: applying the pixel
-                // crop triggers another VIDEO_RECONFIG, by which time the
-                // pending slot is already empty.
-                let pending = pipeline.pending_crop.lock().ok().and_then(|g| *g);
-                if let Some(geometry) = pending {
-                    if super::try_apply_crop(&lib, ctx.0, &geometry) {
-                        if let Ok(mut p) = pipeline.pending_crop.lock() { *p = None; }
-                    }
-                }
             }
 
             MPV_EVENT_PLAYBACK_RESTART => {
@@ -99,12 +92,22 @@ pub(super) fn mpv_event_loop(
                 // once.  Frame 0 is decoded, the d3d11 decoder is warm and the
                 // frame queue is primed, so unpausing starts audio and video
                 // together from frame 0 — no offset, no decoder-warmup freeze.
-                let pending = pipeline.pending_video_start.lock().ok().and_then(|mut p| p.take());
+                let pending = pipeline
+                    .pending_video_start
+                    .lock()
+                    .ok()
+                    .and_then(|mut p| p.take());
 
                 match pending {
                     Some(start) => {
                         reveal_deadline = None;
-                        start_video_playback(&lib, &ctx, &audio_engine, start.fade_in_ms, &pipeline);
+                        start_video_playback(
+                            &lib,
+                            &ctx,
+                            &audio_engine,
+                            start.fade_in_ms,
+                            &pipeline,
+                        );
                         log::info!(
                             "[output-mpv] PLAYBACK_RESTART — first frame {}ms after GO \
                              (revealed, unpaused, audio voice resumed)",
@@ -144,7 +147,10 @@ pub(super) fn mpv_event_loop(
                         // none of them).  This is therefore where the
                         // software-decoding fallback for issue #5 is armed.
                         if super::slot::reports_hwdec_failure(trimmed) {
-                            super::slot::fall_back_to_software("output", Some(Arc::clone(&slot_registry)));
+                            super::slot::fall_back_to_software(
+                                "output",
+                                Some(Arc::clone(&slot_registry)),
+                            );
                         }
                     }
                 }
@@ -174,7 +180,11 @@ pub(super) fn mpv_event_loop(
                 // Arm the reveal watchdog for a paused video load: PLAYBACK_RESTART
                 // normally fires within milliseconds, but if it does not we still
                 // reveal + unpause rather than hang on black.
-                let has_pending = pipeline.pending_video_start.lock().map(|p| p.is_some()).unwrap_or(false);
+                let has_pending = pipeline
+                    .pending_video_start
+                    .lock()
+                    .map(|p| p.is_some())
+                    .unwrap_or(false);
                 if has_pending {
                     reveal_deadline = Some(Instant::now() + Duration::from_millis(2500));
                 }
@@ -269,13 +279,13 @@ fn start_video_playback(
         // Set FADE_STATE for fade-from-black; the render thread picks up
         // target_alpha=0 and animates automatically.
         if let Ok(mut s) = pipeline.fade.lock() {
-                s.start_alpha = 255;
-                s.current_alpha = 255;
-                s.target_alpha = 0;
-                s.duration_ms = fade_in_ms;
-                s.start_time = Instant::now();
-                s.timer_active = false;
-                s.pending = None;
+            s.start_alpha = 255;
+            s.current_alpha = 255;
+            s.target_alpha = 0;
+            s.duration_ms = fade_in_ms;
+            s.start_time = Instant::now();
+            s.timer_active = false;
+            s.pending = None;
         }
         // Wake the render loop so it animates the fade-from-black.
         // Runtime wake is handled by the owning output instance.
@@ -288,8 +298,8 @@ fn start_video_playback(
 /// clearing it so it is not stopped twice.
 fn stop_paired_audio(audio_engine: &Arc<AudioEngine>, pipeline: &PipelineState) {
     let aid = pipeline.current_audio_voice.lock().unwrap().take();
-        if let Some(aid) = aid {
-            use crate::engine::ring_command::FadeCurve;
-            let _ = audio_engine.stop_voice(aid, 0, FadeCurve::Linear);
-        }
+    if let Some(aid) = aid {
+        use crate::engine::ring_command::FadeCurve;
+        let _ = audio_engine.stop_voice(aid, 0, FadeCurve::Linear);
+    }
 }

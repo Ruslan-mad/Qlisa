@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import type { CueId, CueListSummary, CueSummary, CueValidation, DisplayPreferences, GeneralPreferences, HealthAlert, WorkspaceCueCatalogEntry, WorkspaceCueCatalogList, WorkspaceInfo } from "../lib/types";
 import { DEFAULT_DISPLAY_PREFS, DEFAULT_GENERAL_PREFS } from "../lib/types";
+import { normalizeClipEditorVisibility } from "../lib/clipEditorPrefs";
 import { normalizeCueSelection } from "../lib/cueSelection";
 import { commitIfCurrent, createCatalogRequestGuard } from "../lib/catalogRequestGuard";
 import { checkWorkspace, getHealthAlerts, getPreferences, getWorkspaceInfo, getWorkspaceSnapshot } from "../lib/commands";
@@ -176,7 +177,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, _get) => ({
   healthAlerts: [],
   generalPrefs: DEFAULT_GENERAL_PREFS,
   displayPrefsLoaded: false,
-  displayPrefs: { ...DEFAULT_DISPLAY_PREFS, output_screen: null, show_output_timer: false, timer_floating: false, timer_count_down: false, timer_font: "DSEG7 Classic", timer_font_size: 120, timer_position: "center" as const, timer_show_ms: false, timer_margin: 50, show_live_panel: true, show_slice_panel: true, clip_editor_active_tab: "Live" as const },
+  displayPrefs: { ...DEFAULT_DISPLAY_PREFS, output_screen: null, show_output_timer: false, timer_floating: false, timer_count_down: false, timer_font: "DSEG7 Classic", timer_font_size: 120, timer_position: "center" as const, timer_show_ms: false, timer_margin: 50, show_live_panel: true, show_slice_panel: false, clip_editor_active_tab: "Live" as const, clip_editor_active_tab_v2: "Preview" as const },
 
   refreshCues: async () => _get().refreshWorkspaceSnapshot(),
 
@@ -394,7 +395,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, _get) => ({
     try {
       const prefs = await getPreferences();
       const display = prefs.display;
-      set({ displayPrefsLoaded: true, displayPrefs: { ...DEFAULT_DISPLAY_PREFS, show_live_panel: display.show_live_panel ?? true, show_slice_panel: display.show_slice_panel ?? true, clip_editor_active_tab: display.clip_editor_active_tab ?? "Live", ...display } });
+      const clipEditor = normalizeClipEditorVisibility(display);
+      set({ displayPrefsLoaded: true, displayPrefs: { ...DEFAULT_DISPLAY_PREFS, ...display, ...clipEditor } });
     } catch (e) {
       console.error("Failed to load display preferences:", e);
     }

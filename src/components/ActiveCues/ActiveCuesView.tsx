@@ -92,7 +92,7 @@ function ActiveCueRow({ cue }: { cue: CatalogActiveCue }) {
 }
 
 function canPauseCue(cue: WorkspaceCueCatalogEntry): boolean {
-  return ["audio", "video", "image", "fade", "wait", "text", "group", "number", "mic", "midi_file"].includes(cue.cue_type);
+  return ["audio", "video", "image", "fade", "wait", "text", "group", "presentation", "number", "mic", "midi_file"].includes(cue.cue_type);
 }
 
 const iconButtonStyle: React.CSSProperties = {

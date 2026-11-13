@@ -63,13 +63,15 @@ frames. Neither is remote receiver confirmation.
 
 ## Packaging and tests
 
-The Windows installer and updater package do not contain FFmpeg, ffprobe, or
-libmpv binaries. On first launch Qlisa obtains the pinned archives directly
-from upstream, verifies their SHA-256 values, and installs required files in
-`%LOCALAPPDATA%\Qlisa\runtime\`. The pins and provenance are in
-`scripts/runtime-manifest.json`. This download flow does not determine or
+The compact Windows updater does not contain FFmpeg, ffprobe, or libmpv
+binaries. The full installer embeds the recommended kit. On first launch of a
+compact install, Qlisa obtains the pinned versioned runtime packages from Qlisa
+Releases, verifies package and file hashes, and installs required files in
+`%LOCALAPPDATA%\Qlisa\runtime\`. Compatible kits remain across app updates;
+explicit operator actions update or repair them. Pins and provenance are in
+`scripts/runtime-manifest.json`. Hosting these packages does not determine or
 remove legal obligations for upstream binaries. The NDI Runtime is installed
-separately by the user and is never copied into Qlisa or its installer. See
+separately by the full installer and is never copied into Qlisa or its installer. See
 `windows-network-runtime.md` for details.
 
 Pure validation, queue behavior, frame/audio handling, and worker state tests

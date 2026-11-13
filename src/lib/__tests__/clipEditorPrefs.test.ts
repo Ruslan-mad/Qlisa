@@ -1,41 +1,42 @@
 import { describe, expect, it } from "vitest";
-import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, createManualLiveMediaSelection, normalizeClipEditorVisibility, previewPlayheadForCue, resolveClipEditorCueId, resolveClipEditorTargetCueId, resolveLiveMediaSelection, shouldFollowLatestLiveMedia, toggleClipEditorDock, toggleClipEditorPanel } from "../clipEditorPrefs";
+import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, createManualLiveMediaSelection, normalizeClipEditorVisibility, previewPlayheadForCue, resolveClipEditorCueId, resolveClipEditorTargetCueId, resolveLiveMediaSelection, resolvePresentationPreviewCueId, shouldFollowLatestLiveMedia, toggleClipEditorDock, toggleClipEditorPanel } from "../clipEditorPrefs";
+import type { CueSummary } from "../types";
 
 describe("Clip Editor workspace visibility", () => {
-  it("migrates old projects to both panels visible with Preview active", () => {
+  it("migrates old panel flags to one visible Preview", () => {
     expect(normalizeClipEditorVisibility({})).toEqual({
       show_live_panel: true,
-      show_slice_panel: true,
+      show_slice_panel: false,
       clip_editor_active_tab: "Live",
       clip_editor_active_tab_v2: "Preview",
     });
   });
 
-  it("repairs the active tab for each visibility combination", () => {
+  it("toggles unified Preview visibility and repairs the selected tab", () => {
     const both = normalizeClipEditorVisibility({});
-    expect(toggleClipEditorPanel(both, "Preview")).toMatchObject({ show_live_panel: false, show_slice_panel: true, clip_editor_active_tab_v2: "Live" });
-    expect(toggleClipEditorPanel(both, "Slice")).toMatchObject({ show_live_panel: true, show_slice_panel: false, clip_editor_active_tab_v2: "Preview" });
-    const onlyLive = { ...both, show_slice_panel: false, clip_editor_active_tab_v2: "Live" as const };
-    expect(toggleClipEditorPanel(onlyLive, "Preview")).toMatchObject({ show_live_panel: false, show_slice_panel: false, clip_editor_active_tab_v2: "Live" });
-    const onlyPreview = { ...both, show_live_panel: false, clip_editor_active_tab_v2: "Live" as const };
-    expect(toggleClipEditorPanel(onlyPreview, "Slice")).toMatchObject({ show_live_panel: false, show_slice_panel: false, clip_editor_active_tab_v2: "Live" });
+    expect(toggleClipEditorPanel(both, "Preview")).toMatchObject({ show_live_panel: false, show_slice_panel: false, clip_editor_active_tab_v2: "Live" });
+    expect(toggleClipEditorPanel(both, "Slice")).toMatchObject({ show_live_panel: false, show_slice_panel: false, clip_editor_active_tab_v2: "Live" });
+    const live = { ...both, clip_editor_active_tab_v2: "Live" as const };
+    expect(toggleClipEditorPanel(live, "Preview")).toMatchObject({ show_live_panel: false, show_slice_panel: false, clip_editor_active_tab_v2: "Live" });
   });
 
-  it("migrates the legacy Live timeline tab to Preview and preserves Slice", () => {
+  it("migrates legacy Slice-only layouts to Preview and preserves version 2 Live", () => {
     expect(normalizeClipEditorVisibility({ clip_editor_active_tab: "Live" }).clip_editor_active_tab_v2).toBe("Preview");
     expect(normalizeClipEditorVisibility({ show_live_panel: false, show_slice_panel: true, clip_editor_active_tab: "Slice" })).toEqual({
-      show_live_panel: false,
-      show_slice_panel: true,
-      clip_editor_active_tab: "Slice",
-      clip_editor_active_tab_v2: "Slice",
+      show_live_panel: true,
+      show_slice_panel: false,
+      clip_editor_active_tab: "Live",
+      clip_editor_active_tab_v2: "Preview",
     });
+    expect(normalizeClipEditorVisibility({ show_live_panel: false, clip_editor_active_tab: "Slice" }).show_live_panel).toBe(true);
+    expect(normalizeClipEditorVisibility({ show_live_panel: false, show_slice_panel: false, clip_editor_active_tab_v2: "Slice" })).toMatchObject({ show_live_panel: true, clip_editor_active_tab_v2: "Preview" });
     expect(normalizeClipEditorVisibility({ clip_editor_active_tab: "Live", clip_editor_active_tab_v2: "Live" }).clip_editor_active_tab_v2).toBe("Live");
   });
 
-  it("closes the dock explicitly and restores the retained Live tab on reopen", () => {
-    expect(CLIP_EDITOR_TAB_LABELS).toEqual({ preview: "Preview", live: "Live", slice: "Slice" });
+  it("closes the dock explicitly and retains only Preview and Live tabs", () => {
+    expect(CLIP_EDITOR_TAB_LABELS).toEqual({ preview: "Preview", live: "Live" });
     expect(clipEditorDockVisible(true, false)).toBe(true);
-    expect(clipEditorDockVisible(false, true)).toBe(true);
+    expect(clipEditorDockVisible(false, true)).toBe(false);
     expect(clipEditorDockVisible(false, false)).toBe(false);
     const livePrefs = normalizeClipEditorVisibility({ clip_editor_active_tab_v2: "Live" });
     expect(livePrefs.clip_editor_active_tab_v2).toBe("Live");
@@ -61,16 +62,17 @@ describe("Clip Editor workspace visibility", () => {
     expect(restored.visibility).toEqual(state);
   });
 
-  it("restores a usable Preview panel when both tabs were disabled in the View menu", () => {
+  it("restores unified Preview when legacy visibility flags hid both panels", () => {
     const noPanels = normalizeClipEditorVisibility({
       show_live_panel: false,
       show_slice_panel: false,
-      clip_editor_active_tab_v2: "Slice",
+      clip_editor_active_tab_v2: "Live",
     });
     const opened = toggleClipEditorDock(false, noPanels);
     expect(opened.showDock).toBe(true);
     expect(opened.visibility.show_live_panel).toBe(true);
     expect(opened.visibility.show_slice_panel).toBe(false);
+    expect(opened.visibility.clip_editor_active_tab_v2).toBe("Preview");
     expect(clipEditorDockVisible(opened.visibility.show_live_panel, opened.visibility.show_slice_panel)).toBe(true);
   });
 
@@ -78,6 +80,64 @@ describe("Clip Editor workspace visibility", () => {
     expect(resolveClipEditorTargetCueId("number-1", "editor-1", "number", "number-1")).toBe("number-1");
     expect(resolveClipEditorTargetCueId("child-1", "number-1", "audio", "number-1")).toBe("child-1");
     expect(resolveClipEditorTargetCueId("child-1", "number-1", "video", "number-1")).toBe("child-1");
+  });
+
+  it("resolves a Presentation to running, retained paused, next, or first media", () => {
+    const presentation = {
+      cue_type: "presentation",
+      state: "running",
+      active_child_id: "page-2",
+      children: [
+        { id: "page-1", cue_type: "image", state: "running", file_path: "page-1.png" },
+        { id: "page-2", cue_type: "image", state: "standby", file_path: "page-2.png" },
+      ],
+    } as unknown as CueSummary;
+    expect(resolvePresentationPreviewCueId(presentation)).toBe("page-1");
+
+    const pausedChildWhileParentRuns = {
+      ...presentation,
+      active_child_id: "page-2",
+      children: [
+        { id: "page-1", cue_type: "image", state: "paused", file_path: "page-1.png" },
+        { id: "page-2", cue_type: "image", state: "standby", file_path: "page-2.png" },
+      ],
+    } as unknown as CueSummary;
+    expect(resolvePresentationPreviewCueId(pausedChildWhileParentRuns)).toBe("page-1");
+
+    const retainedPageAndVideo = {
+      ...presentation,
+      state: "paused",
+      active_child_id: "next-page",
+      children: [
+        { id: "page-1", cue_type: "image", state: "paused", file_path: "page-1.png" },
+        { id: "video-current", cue_type: "video", state: "running", file_path: "clip.mp4" },
+        { id: "next-page", cue_type: "image", state: "standby", file_path: "next.png" },
+      ],
+    } as unknown as CueSummary;
+    expect(resolvePresentationPreviewCueId(retainedPageAndVideo)).toBe("video-current");
+
+    const pausedAsSlide = {
+      ...retainedPageAndVideo,
+      state: "running",
+      children: retainedPageAndVideo.children?.map((child) => ({
+        ...child,
+        state: child.id === "next-page" ? "standby" : "paused",
+      })),
+    } as unknown as CueSummary;
+    expect(resolvePresentationPreviewCueId(pausedAsSlide)).toBe("video-current");
+
+    expect(resolvePresentationPreviewCueId({
+      ...presentation,
+      state: "standby",
+      active_child_id: undefined,
+      children: presentation.children?.map((child) => ({ ...child, state: child.id === "page-2" ? "standby" : "completed" })),
+    })).toBe("page-2");
+    expect(resolvePresentationPreviewCueId({
+      ...presentation,
+      state: "standby",
+      active_child_id: undefined,
+      children: presentation.children?.map((child) => ({ ...child, state: "completed" })),
+    })).toBe("page-1");
   });
 
   it("only exposes an active preview playhead for the displayed cue", () => {
@@ -226,7 +286,6 @@ describe("Clip Editor workspace visibility", () => {
 
   it("never sends Preview or Slice clicks to the program seek command", () => {
     expect(canSeekProgramFromClipEditor("Preview", "running", "audio")).toBe(false);
-    expect(canSeekProgramFromClipEditor("Slice", "paused", "video")).toBe(false);
     expect(canSeekProgramFromClipEditor("Live", "running", "audio")).toBe(true);
     expect(canSeekProgramFromClipEditor("Live", "paused", "image")).toBe(false);
     expect(canSeekProgramFromClipEditor("Live", "standby", "video")).toBe(false);

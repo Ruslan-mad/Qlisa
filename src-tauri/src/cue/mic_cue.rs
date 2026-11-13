@@ -366,6 +366,7 @@ impl Cue for MicCue {
             muted: false,
             pan: self.pan,
             level_matrix: None,
+            gain_envelope: None,
         })
     }
 

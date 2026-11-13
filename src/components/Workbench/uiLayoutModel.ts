@@ -10,7 +10,7 @@ export interface UiLayout {
   inspectorWidth: number;
   showLivePanel: boolean;
   showSlicePanel: boolean;
-  activeClipTab: "Preview" | "Live" | "Slice";
+  activeClipTab: "Preview" | "Live";
   clipEditorTabVersion: 2;
 }
 
@@ -26,7 +26,7 @@ export const DEFAULT_UI_LAYOUT: UiLayout = {
   showSearchBar: true,
   inspectorWidth: INSPECTOR_DEFAULT_WIDTH,
   showLivePanel: true,
-  showSlicePanel: true,
+  showSlicePanel: false,
   activeClipTab: "Preview",
   clipEditorTabVersion: 2,
 };
@@ -36,6 +36,10 @@ export const clampInspectorWidth = (width: number) =>
 
 export function normalizeUiLayout(value: unknown): UiLayout {
   const parsed = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const legacySliceVisible = typeof parsed.showSlicePanel === "boolean" ? parsed.showSlicePanel : true;
+  const legacySliceTab = parsed.activeClipTab === "Slice";
+  const showLivePanel = (typeof parsed.showLivePanel === "boolean" ? parsed.showLivePanel : true)
+    || legacySliceVisible || legacySliceTab;
   const legacyRightPanel = migrateRightPanelMode(parsed.rightPanel, parsed.inspectorOpen as boolean | undefined);
   const inspectorOpen = typeof parsed.inspectorOpen === "boolean"
     ? parsed.inspectorOpen
@@ -51,12 +55,12 @@ export function normalizeUiLayout(value: unknown): UiLayout {
     showClipEditorDock: typeof parsed.showClipEditorDock === "boolean" ? parsed.showClipEditorDock : true,
     showSearchBar: typeof parsed.showSearchBar === "boolean" ? parsed.showSearchBar : true,
     inspectorWidth: clampInspectorWidth(typeof parsed.inspectorWidth === "number" ? parsed.inspectorWidth : INSPECTOR_DEFAULT_WIDTH),
-    showLivePanel: typeof parsed.showLivePanel === "boolean" ? parsed.showLivePanel : true,
-    showSlicePanel: typeof parsed.showSlicePanel === "boolean" ? parsed.showSlicePanel : true,
-    activeClipTab: parsed.clipEditorTabVersion === 2
-      && (parsed.activeClipTab === "Preview" || parsed.activeClipTab === "Live" || parsed.activeClipTab === "Slice")
-      ? parsed.activeClipTab
-      : parsed.activeClipTab === "Slice" ? "Slice" : "Preview",
+    showLivePanel,
+    // Kept in the serialized layout only so old layouts can be migrated.
+    showSlicePanel: false,
+    activeClipTab: parsed.clipEditorTabVersion === 2 && parsed.activeClipTab === "Live"
+      ? "Live"
+      : "Preview",
     clipEditorTabVersion: 2,
   };
 }
@@ -77,6 +81,6 @@ export function resolveTransportPanelVisibility(layout: Pick<UiLayout,
     activeCues: !layout.showMode && layout.activeCuesOpen,
     inspector: !layout.showMode && layout.rightPanel === "inspector",
     clipEditorDock: !layout.showMode && layout.showClipEditorDock
-      && (layout.showLivePanel || layout.showSlicePanel),
+      && layout.showLivePanel,
   };
 }

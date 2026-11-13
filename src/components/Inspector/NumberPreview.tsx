@@ -4,6 +4,7 @@ import type { NumberCueData, VideoGeometry } from "../../lib/types";
 import { DEFAULT_GEOMETRY } from "../../lib/types";
 import { getMediaThumbnail, prepareVideoPreview } from "../../lib/commands";
 import { useNumberPreviewStore } from "../../stores/numberPreviewStore";
+import { fittedFootprint, geometryCropClipPath, geometryPanToOutputOffset } from "./geometryOutputModel";
 import { numberMasterDuration, numberPreviewItem, numberPreviewSourcePosition, numberPreviewSourceWindow, shouldRetainNumberPreviewAsset, type NumberVisualAction } from "../Editor/numberTimelineModel";
 import { toMediaAssetUrl } from "./mediaPreviewModel";
 import { useLocale } from "../../i18n";
@@ -88,7 +89,9 @@ export function NumberPreview({ cue, compact = false }: NumberPreviewProps) {
   const [assetUrl, setAssetUrl] = useState<string | null>(null);
   const [assetItem, setAssetItem] = useState<NumberVisualAction | null>(null);
   const [failed, setFailed] = useState(false);
+  const [outputAspect, setOutputAspect] = useState(16 / 9);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   const loadGenerationRef = useRef(0);
   const item = useMemo(() => numberPreviewItem(cue, positionMs), [cue, positionMs]);
   const itemKey = item ? `${item.id}\u0000${item.cue_type}\u0000${item.file_path ?? ""}\u0000${item.media_source_revision ?? ""}` : null;
@@ -100,6 +103,19 @@ export function NumberPreview({ cue, compact = false }: NumberPreviewProps) {
   const renderItem = retainPreviousAsset || (itemKey && assetItemKey !== itemKey) ? assetItem : item;
   const renderAssetUrl = item ? assetUrl : null;
   const sourcePositionMs = renderItem ? numberPreviewSourcePosition(renderItem, positionMs) : 0;
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || typeof ResizeObserver === "undefined") return;
+    const updateAspect = () => {
+      const { width, height } = viewport.getBoundingClientRect();
+      if (width > 0 && height > 0) setOutputAspect(width / height);
+    };
+    updateAspect();
+    const observer = new ResizeObserver(updateAspect);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     useNumberPreviewStore.getState().select(cue.id, durationMs);
@@ -197,20 +213,25 @@ export function NumberPreview({ cue, compact = false }: NumberPreviewProps) {
   };
 
   const geometry = ((renderItem as unknown as { geometry?: VideoGeometry } | null)?.geometry ?? DEFAULT_GEOMETRY);
-  const cropLeft = Math.max(0, Math.min(0.45, geometry.crop_left ?? 0));
-  const cropRight = Math.max(0, Math.min(0.45, geometry.crop_right ?? 0));
-  const cropTop = Math.max(0, Math.min(0.45, geometry.crop_top ?? 0));
-  const cropBottom = Math.max(0, Math.min(0.45, geometry.crop_bottom ?? 0));
-  const visibleWidth = Math.max(0.1, 1 - cropLeft - cropRight);
-  const visibleHeight = Math.max(0.1, 1 - cropTop - cropBottom);
+  const cropClipPath = geometryCropClipPath(geometry);
+  const sourceAspect = renderItem?.media_width && renderItem?.media_height
+    ? renderItem.media_width / renderItem.media_height
+    : outputAspect;
+  const footprint = fittedFootprint(geometry, sourceAspect, outputAspect);
+  const pan = geometryPanToOutputOffset(geometry, "mpv", sourceAspect, outputAspect);
+  const rotatedQuarterTurn = geometry.rotation % 180 === 90;
+  const mediaWidth = rotatedQuarterTurn ? footprint.height / outputAspect : footprint.width;
+  const mediaHeight = rotatedQuarterTurn ? footprint.width * outputAspect : footprint.height;
+  const previewScale = geometry.fit_mode === "stretch" ? 1 : Math.max(0.01, geometry.scale ?? 1);
   const mediaStyle: React.CSSProperties = {
     position: "absolute",
-    width: `${100 / visibleWidth}%`,
-    height: `${100 / visibleHeight}%`,
-    left: `${(-cropLeft / visibleWidth) * 100}%`,
-    top: `${(-cropTop / visibleHeight) * 100}%`,
-    objectFit: geometry.fit_mode === "stretch" ? "fill" : geometry.fit_mode === "fill" ? "cover" : "contain",
-    transform: `translate(${(geometry.pan_x ?? 0) * 100}%, ${(geometry.pan_y ?? 0) * 100}%) scale(${Math.max(0.01, geometry.scale ?? 1)}) rotate(${geometry.rotation ?? 0}deg)`,
+    width: `${mediaWidth * 100}%`,
+    height: `${mediaHeight * 100}%`,
+    left: `${(0.5 + pan.x) * 100}%`,
+    top: `${(0.5 + pan.y) * 100}%`,
+    clipPath: cropClipPath,
+    objectFit: "fill",
+    transform: `translate(-50%, -50%) scale(${previewScale}) rotate(${geometry.rotation ?? 0}deg)`,
     transformOrigin: "center",
   };
 
@@ -220,7 +241,7 @@ export function NumberPreview({ cue, compact = false }: NumberPreviewProps) {
         <span style={previewTitle}>Preview</span>
         <span style={previewTime}>{(positionMs / 1000).toFixed(2)} / {(durationMs / 1000).toFixed(2)}s</span>
       </div>
-      <div style={{ ...previewViewport, ...(compact ? { aspectRatio: "auto", height: 140, minHeight: 90 } : {}) }}>
+      <div ref={viewportRef} style={{ ...previewViewport, ...(compact ? { aspectRatio: "auto", height: 140, minHeight: 90 } : {}) }}>
         {!item ? (
           <span style={previewHint}>{t("numberUi.previewAudioOnly")}</span>
         ) : !renderAssetUrl ? (

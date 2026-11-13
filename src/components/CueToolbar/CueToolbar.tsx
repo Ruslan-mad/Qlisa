@@ -10,6 +10,7 @@ type Props = {
   activeCueCount: number;
   rightPanel: string;
   activeCuesOpen?: boolean;
+  presentationDisabled?: boolean;
   onToggleRightPanel: (panel: "active-cues" | "inspector") => void;
   onPanic: (hard: boolean) => void;
   onSettings: () => void;
@@ -22,7 +23,7 @@ const buttonStyle: React.CSSProperties = {
   borderRadius: 4, color: "var(--wc-text)", cursor: "pointer", fontSize: 12,
 };
 
-export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggleRightPanel, onPanic, onAdd, onDragStart }: Props) {
+export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, presentationDisabled = false, onToggleRightPanel, onPanic, onAdd, onDragStart }: Props) {
   const { t, locale } = useLocale();
   const leftRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLDivElement>(null);
@@ -86,9 +87,11 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
         borderColor: hoveredMain === type ? CUE_TYPE_COLORS[type] : "var(--wc-border-strong)",
         background: hoveredMain === type ? "var(--wc-bg-hover)" : "var(--wc-bg-surface)",
         transition: "color 0.12s, border-color 0.12s, background 0.12s",
+        ...(type === "presentation" && presentationDisabled ? { opacity: 0.5, cursor: "not-allowed" } : {}),
       }}
+      disabled={!measuring && type === "presentation" && presentationDisabled}
       onClick={measuring ? undefined : () => onAdd(type)}
-      onMouseDown={measuring ? undefined : (event) => onDragStart(type, event)}
+      onMouseDown={measuring || type === "presentation" ? undefined : (event) => onDragStart(type, event)}
       onMouseEnter={measuring ? undefined : () => setHoveredMain(type)}
       onMouseLeave={measuring ? undefined : () => setHoveredMain(null)}
       title={hint(type)}
@@ -102,10 +105,10 @@ export function CueToolbar({ activeCueCount, rightPanel, activeCuesOpen, onToggl
   const menuItems = layout.overflow.map((type) => {
     const item = descriptors.find((descriptor) => descriptor.type === type)!;
     return (
-      <button key={type} role="menuitem" onMouseEnter={() => setHoveredItem(type)} onMouseLeave={() => setHoveredItem(null)}
+      <button key={type} role="menuitem" disabled={type === "presentation" && presentationDisabled} onMouseEnter={() => setHoveredItem(type)} onMouseLeave={() => setHoveredItem(null)}
         onClick={(event) => { event.stopPropagation(); setOpen(false); onAdd(type); }}
-        onMouseDown={(event) => { if (event.button === 0) onDragStart(type, event); }}
-        style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", height: 26, padding: "0 10px", borderRadius: 4, border: "none", textAlign: "left", background: hoveredItem === type ? "var(--wc-bg-hover)" : "transparent", cursor: "pointer", whiteSpace: "nowrap" }}>
+        onMouseDown={(event) => { if (event.button === 0 && type !== "presentation") onDragStart(type, event); }}
+        style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", height: 26, padding: "0 10px", borderRadius: 4, border: "none", textAlign: "left", background: hoveredItem === type ? "var(--wc-bg-hover)" : "transparent", cursor: type === "presentation" && presentationDisabled ? "not-allowed" : "pointer", opacity: type === "presentation" && presentationDisabled ? 0.5 : 1, whiteSpace: "nowrap" }}>
         <CueTypeIcon type={type} size={16} tone="type" />
         <span style={{ color: CUE_TYPE_COLORS[type], fontSize: 12, fontWeight: 600, width: 82, flexShrink: 0 }}>{t(item.labelKey)}</span>
         <span style={{ color: "var(--wc-text-muted)", fontSize: 11 }}>{hint(type)}</span>

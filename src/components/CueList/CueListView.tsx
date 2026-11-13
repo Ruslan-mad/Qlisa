@@ -15,7 +15,7 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { CueRow } from "./CueRow";
 import { buildTreeLineInfo } from "./treeLines";
 import { prepareBackgroundSelection } from "./backgroundSelection";
-import { fileDropPathAllowedForTarget, fileDropTargetForCue } from "./fileDragModel";
+import { fileDropPathAllowedForTarget, fileDropTargetForCue, presentationSiblingLocationForChild } from "./fileDragModel";
 import {
   DEFAULT_COLUMNS,
   buildGridCols,
@@ -85,6 +85,7 @@ const CUE_TYPES: { type: CueType; label: string }[] = [
     { type: "mic",      label: "Mic" },
     { type: "timecode", label: "Timecode" },
     { type: "text",     label: "Text" },
+    { type: "timer",    label: "Timer" },
     { type: "memo",     label: "Memo" },
     { type: "camera",   label: "Camera" },
     { type: "browser",  label: "Browser" },
@@ -129,6 +130,8 @@ function isMidiPath(p: string) {
 function isMediaPath(p: string) {
   return isAudioPath(p) || isVideoPath(p) || isImagePath(p) || isMidiPath(p);
 }
+const DOCUMENT_EXTS = new Set(["pdf", "ppt", "pptx"]);
+function isDocumentPath(p: string) { return DOCUMENT_EXTS.has(extensionOf(p)); }
 function cueTypeForPath(p: string): MediaCueType {
   if (isVideoPath(p)) return "video";
   if (isImagePath(p)) return "image";
@@ -156,7 +159,7 @@ async function setFileForCue(cueType: MediaCueType, cueId: string, path: string)
 function computeInnerPlayheadIds(cues: CueSummary[], outerPlayheadId: string | null): Set<string> {
   const result = new Set<string>();
   for (const cue of cues) {
-    if (cue.cue_type === "group" || cue.cue_type === "number") {
+    if (cue.cue_type === "group" || cue.cue_type === "number" || cue.cue_type === "presentation") {
       const isAtPlayhead = cue.id === outerPlayheadId;
       const isRunning = cue.state === "running";
 
@@ -380,9 +383,10 @@ interface Props {
   onCueDoubleClick: (cue: CueSummary) => void;
   onOpenInspector: () => void;
   onRefresh: () => void;
+  onImportDocuments: (paths: string[], position?: number, parentId?: string | null) => Promise<void>;
 }
 
-export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Props) {
+export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh, onImportDocuments }: Props) {
   const { t, locale } = useLocale();
   const {
     cues, selectedCueId, selectedCueIds, playheadCueId,
@@ -722,13 +726,14 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
           flatItemsRef.current.find((item) => item.cue.id === id)?.cue.cue_type,
         );
         const sourceIncludesNumber = draggedTypes.some((type) => type === "number");
-        const targetIsContainer = targetCue?.cue_type === "group" || targetCue?.cue_type === "number";
-        const targetAcceptsDrag = !targetIsContainer || (
+        const sourceIncludesPresentation = draggedTypes.some((type) => type === "presentation");
+        const targetIsContainer = targetCue?.cue_type === "group" || targetCue?.cue_type === "number" || targetCue?.cue_type === "presentation";
+        const targetAcceptsDrag = !(targetCue?.cue_type === "presentation" && sourceIncludesPresentation) && (!targetIsContainer || (
           !sourceIncludesNumber && (
             targetCue?.cue_type !== "number" ||
             draggedTypes.every((type) => type === "audio" || type === "video" || type === "image" || type === "group")
           )
-        );
+        ));
         const resolvedGroupId = drag.ids.includes(groupId ?? "") || !targetAcceptsDrag ? null : groupId;
         drag.dropIdx = insertIdx;
         drag.dropGroupId = resolvedGroupId;
@@ -1064,6 +1069,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
           const { insertIdx, assignId, groupId } = pos
             ? resolveFileDragMode(pos.x, pos.y)
             : { insertIdx: null, assignId: null, groupId: null };
+          const documentPaths = paths.filter(isDocumentPath);
           const candidatePaths = paths.filter(isMediaPath);
           const targetCueType = groupId
             ? flatItemsRef.current.find((item) => item.cue.id === groupId)?.cue.cue_type
@@ -1071,6 +1077,48 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
           const mediaPaths = candidatePaths.filter((path) =>
             fileDropPathAllowedForTarget(targetCueType, cueTypeForPath(path)),
           );
+
+          if (documentPaths.length > 0) {
+            const findCue = (nodes: CueSummary[], id: string): CueSummary | undefined => {
+              for (const cue of nodes) {
+                if (cue.id === id) return cue;
+                const nested = cue.children && findCue(cue.children, id);
+                if (nested) return nested;
+              }
+              return undefined;
+            };
+            const siblingsFor = (parentId: string | null) => parentId ? findCue(cuesRef.current, parentId)?.children ?? [] : cuesRef.current;
+            const presentationSiblingLocation = (presentationId: string) => {
+              const presentationItem = flatItemsRef.current.find((item) => item.cue.id === presentationId);
+              const parentId = presentationItem?.parentGroupId ?? null;
+              const siblings = siblingsFor(parentId);
+              return { parentId, position: siblings.findIndex((cue) => cue.id === presentationId) + 1 };
+            };
+            const locationForDrop = () => {
+              if (groupId) {
+                const target = findCue(cuesRef.current, groupId);
+                if (target?.cue_type === "presentation") {
+                  return presentationSiblingLocation(groupId);
+                }
+                if (target?.cue_type === "number") return { parentId: null, position: flatItemsRef.current.findIndex((item) => item.cue.id === groupId) + 1 };
+                return { parentId: groupId, position: -1 };
+              }
+              const targetId = assignId ?? (insertIdx !== null ? flatItemsRef.current[insertIdx]?.cue.id : null);
+              const targetItem = targetId ? flatItemsRef.current.find((item) => item.cue.id === targetId) : null;
+              if (targetItem?.parentGroupId) {
+                const promoted = targetId ? presentationSiblingLocationForChild(cuesRef.current, targetId) : null;
+                if (promoted) return promoted;
+                const siblings = siblingsFor(targetItem.parentGroupId);
+                const offset = assignId ? 1 : 0;
+                return { parentId: targetItem.parentGroupId, position: Math.max(0, siblings.findIndex((cue) => cue.id === targetId) + offset) };
+              }
+              const rootId = targetId;
+              const position = rootId ? cuesRef.current.findIndex((cue) => cue.id === rootId) + (assignId ? 1 : 0) : insertIdx ?? -1;
+              return { parentId: null, position };
+            };
+            const location = locationForDrop();
+            await onImportDocuments(documentPaths, location.position, location.parentId);
+          }
           if (mediaPaths.length === 0) return;
 
           if (groupId) {
@@ -1271,7 +1319,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
         if (!row || !rowsScrollRef.current?.contains(row)) return;
         const cueId = row.dataset.cueId;
         const cue = cueId && flatItemsRef.current.find((item) => item.cue.id === cueId)?.cue;
-        if (cue && (cue.cue_type === "group" || cue.cue_type === "number")) {
+        if (cue && (cue.cue_type === "group" || cue.cue_type === "number" || cue.cue_type === "presentation")) {
           event.preventDefault();
           const expanded = expandedGroupIds.has(cue.id);
           if (event.key === "ArrowRight" ? !expanded : expanded) {
@@ -1596,14 +1644,14 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
               rowHeight={rowHeight}
               cueColorStyle={displayPrefs.cue_color_style}
               depth={depth}
-              isGroup={cue.cue_type === "group" || cue.cue_type === "number"}
+              isGroup={cue.cue_type === "group" || cue.cue_type === "number" || cue.cue_type === "presentation"}
               isGroupExpanded={expandedGroupIds.has(cue.id)}
               onToggleExpand={handleRowToggleExpand}
               isSelected={selectedCueSet.has(cue.id)}
               isAtPlayhead={playheadCueId === cue.id || innerPlayheadIds.has(cue.id)}
               isDragOver={dragOverCueId === cue.id}
               isGroupDropTarget={
-              (cue.cue_type === "group" || cue.cue_type === "number") &&
+              (cue.cue_type === "group" || cue.cue_type === "number" || cue.cue_type === "presentation") &&
                 (dropTargetGroupId === cue.id || dragOverGroupId === cue.id)
               }
               parentGroupId={parentGroupId}
@@ -1625,7 +1673,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh }: Pr
               hasNextTreeSibling={treeLineInfo.get(cue.id)?.hasNextSibling}
               treeParentColor={treeLineInfo.get(cue.id)?.parentColor}
               hasVisibleTreeChildren={
-                (cue.cue_type === "group" || cue.cue_type === "number") &&
+                (cue.cue_type === "group" || cue.cue_type === "number" || cue.cue_type === "presentation") &&
                 expandedGroupIds.has(cue.id) && !!cue.children?.length
               }
             />

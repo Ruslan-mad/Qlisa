@@ -28,6 +28,8 @@ pub mod registry;
 pub mod script_cue;
 pub mod stop_cue;
 pub mod text_cue;
+pub mod timer_cue;
+pub mod gain_envelope;
 pub mod traits;
 pub mod types;
 pub mod validation;

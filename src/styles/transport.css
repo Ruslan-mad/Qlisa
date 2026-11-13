@@ -9,6 +9,113 @@
   min-width: 220px;
 }
 
+.stage-transport-left {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.stage-transport-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.stage-transport-ftb {
+  display: flex;
+  flex: 1 1 0;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.stage-transport-right {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.stage-transport-right .transport-master-controls {
+  flex: 0 1 clamp(334px, 26vw, 460px);
+  min-width: 334px;
+}
+
+.stage-output-controls {
+  display: grid !important;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  grid-template-rows: repeat(1, min-content);
+  justify-content: safe center;
+  align-content: center;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.stage-output-controls[data-two-rows="true"] {
+  grid-template-rows: repeat(2, min-content);
+}
+
+.stage-transport-right .stage-master-area {
+  min-width: 248px;
+}
+
+.stage-transport-secondary > .stage-transport-conversion-status {
+  flex-shrink: 1 !important;
+  min-width: 0;
+}
+
+.stage-transport-conversion-status > button {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stage-transport-timecode-status {
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+.stage-transport-timecode-status > span:nth-child(2),
+.stage-transport-timecode-status > span:nth-child(3) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage-transport-timecode-compact,
+.stage-transport-conversion-glyph {
+  display: none;
+}
+
+@media (max-width: 1000px) {
+  .stage-transport { gap: 4px !important; padding: 4px !important; }
+  .stage-transport-button { width: 96px !important; min-width: 96px !important; }
+  .stage-transport-left { gap: 2px; }
+  .stage-transport-actions { gap: 4px; }
+  .stage-running-cues { min-width: 0 !important; }
+  .stage-transport-right { gap: 4px; }
+  .stage-transport-secondary { gap: 2px !important; }
+  .stage-transport-conversion-status { max-width: 32px; }
+  .stage-transport-conversion-status > button { padding: 3px 5px; }
+  .stage-transport-conversion-label { display: none; }
+  .stage-transport-conversion-glyph { display: inline; }
+  .stage-transport-timecode-status { max-width: 40px; overflow: hidden; gap: 3px !important; padding: 2px 4px !important; }
+  .stage-transport-timecode-full,
+  .stage-transport-timecode-rate { display: none !important; }
+  .stage-transport-timecode-compact { display: inline; font-size: 10px; color: var(--wc-text-muted); }
+  .stage-transport-right .transport-master-controls { flex-basis: 334px; min-width: 334px; }
+}
+
 .transport-master-controls {
   display: flex;
   flex: 0 1 clamp(360px, 26vw, 460px);
@@ -393,10 +500,4 @@
   .transport-master-controls { flex-basis: 360px; min-width: 280px; }
   .stage-master-area { min-width: 200px; }
   .transport-panel-map { flex-basis: 76px; width: 76px; height: 76px; grid-template: 18px 28px 18px / 18px 28px 18px; }
-}
-
-@media (max-width: 900px) {
-  .transport-master-controls { flex: 1 1 100%; min-width: 280px; }
-  .stage-master-area { min-width: 0; }
-  .transport-panel-map { margin-left: auto; }
 }

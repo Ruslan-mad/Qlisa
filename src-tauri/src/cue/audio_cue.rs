@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
+use crate::cue::gain_envelope::GainEnvelope;
 
 use crate::engine::{
     ring_command::{FadeCurve as EngineFadeCurve, VoiceId},
@@ -116,6 +117,8 @@ pub struct AudioCue {
     pub file_path: Option<PathBuf>,
     /// Volume in dB (-60 to +12).
     pub volume_db: f64,
+    /// Optional source-file gain automation. Missing means unity everywhere.
+    pub gain_envelope: Option<GainEnvelope>,
     pub muted: bool,
     /// Stereo pan (-1.0 to +1.0).
     pub pan: f32,
@@ -149,6 +152,7 @@ pub struct AudioCue {
     pub level_matrix: Option<Vec<Vec<f64>>>,
 
     is_disabled: bool,
+    background_screensaver: bool,
 
     // --- Runtime ---
     /// Pre-decoded samples, loaded by `load()`.
@@ -253,6 +257,7 @@ impl AudioCue {
             continue_mode: ContinueMode::DoNotContinue,
             file_path: None,
             volume_db: 0.0,
+            gain_envelope: None,
             muted: false,
             pan: 0.0,
             fade_in: None,
@@ -265,6 +270,7 @@ impl AudioCue {
             slices: crate::cue::types::SliceList::default(),
             level_matrix: None,
             is_disabled: false,
+            background_screensaver: false,
             decoded_samples: None,
             stream_path: None,
             stream_source: None,
@@ -428,6 +434,12 @@ impl AudioCue {
                 }
             }
         };
+        if let Some(envelope) = &self.gain_envelope {
+            // SAFETY: this voice has not been submitted to the audio engine.
+            unsafe {
+                voice.set_initial_gain_envelope(envelope.to_rt().map_err(|error| anyhow!(error))?);
+            }
+        }
         if voice.stream.is_none() {
             if let Some(source) = self.stream_source.take() { source.cancel(); }
         }
@@ -678,6 +690,8 @@ impl Cue for AudioCue {
     fn set_color(&mut self, color: CueColor) { self.color = color; }
     fn is_disabled(&self) -> bool { self.is_disabled }
     fn set_disabled(&mut self, d: bool) { self.is_disabled = d; }
+    fn background_screensaver(&self) -> bool { self.background_screensaver }
+    fn set_background_screensaver(&mut self, enabled: bool) { self.background_screensaver = enabled; }
     fn state(&self) -> CueState { self.state }
 
     fn load(&mut self, _context: &CueContext) -> Result<()> {
@@ -1250,6 +1264,7 @@ impl Cue for AudioCue {
             muted: self.muted,
             pan: self.pan,
             level_matrix: self.level_matrix.clone(),
+            gain_envelope: self.gain_envelope.clone(),
         })
     }
 
@@ -1263,6 +1278,9 @@ impl Cue for AudioCue {
         }
         if let Some(level_matrix) = patch.level_matrix {
             self.level_matrix = level_matrix;
+        }
+        if let Some(gain_envelope) = patch.gain_envelope {
+            self.gain_envelope = gain_envelope;
         }
     }
 
@@ -1281,6 +1299,7 @@ impl Cue for AudioCue {
             "file_path": self.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             "cached_duration_ms": self.cached_duration.map(|d| d.as_millis() as u64),
             "volume_db": self.volume_db,
+            "gain_envelope": self.gain_envelope,
             "muted": self.muted,
             "pan": self.pan,
             "fade_in_ms": self.fade_in.as_ref().map(|f| f.duration_ms),
@@ -1295,6 +1314,7 @@ impl Cue for AudioCue {
             "slices": self.slices,
             "level_matrix": self.level_matrix,
             "is_disabled": self.is_disabled,
+            "background_screensaver": self.background_screensaver,
         })
     }
 }
@@ -1351,6 +1371,14 @@ impl CueFactory for AudioCueFactory {
         if let Some(db) = value.get("volume_db").and_then(|v| v.as_f64()) {
             cue.volume_db = db;
         }
+        if let Some(raw) = value.get("gain_envelope") {
+            if !raw.is_null() {
+                let envelope = serde_json::from_value::<GainEnvelope>(raw.clone())
+                    .map_err(|error| anyhow!("Invalid gain_envelope: {error}"))?;
+                envelope.validate().map_err(|error| anyhow!("Invalid gain_envelope: {error}"))?;
+                cue.gain_envelope = (!envelope.points.is_empty()).then_some(envelope);
+            }
+        }
         cue.muted = value.get("muted").and_then(|v| v.as_bool()).unwrap_or(false);
         if let Some(pan) = value.get("pan").and_then(|v| v.as_f64()) {
             cue.pan = pan as f32;
@@ -1398,6 +1426,7 @@ impl CueFactory for AudioCueFactory {
         if let Some(b) = value.get("is_disabled").and_then(|v| v.as_bool()) {
             cue.is_disabled = b;
         }
+        cue.background_screensaver = value.get("background_screensaver").and_then(Value::as_bool).unwrap_or(false);
 
         Ok(Box::new(cue))
     }
@@ -1737,6 +1766,43 @@ mod tests {
         assert_eq!(restored.name(), "Test Audio");
         assert_eq!(restored.number(), Some("1"));
         assert_eq!(restored.continue_mode(), ContinueMode::AutoContinue);
+    }
+
+    #[test]
+    fn gain_envelope_roundtrips_as_points_and_old_cues_default_to_unity() {
+        let cue = AudioCueFactory.from_json(serde_json::json!({
+            "type": "audio",
+            "gain_envelope": [
+                { "time_ms": 0, "gain": 1.0 },
+                { "time_ms": 1500, "gain": 2.0 }
+            ]
+        })).unwrap();
+        assert_eq!(cue.serialize()["gain_envelope"], serde_json::json!([
+            { "time_ms": 0, "gain": 1.0 },
+            { "time_ms": 1500, "gain": 2.0 }
+        ]));
+        let legacy = AudioCueFactory.from_json(serde_json::json!({ "type": "audio" })).unwrap();
+        assert!(legacy.serialize()["gain_envelope"].is_null());
+        assert_eq!(crate::cue::gain_envelope::GainEnvelopeRt::default().gain_at_ms(500.0), 1.0);
+    }
+
+    #[test]
+    fn rejects_invalid_nonempty_gain_envelopes() {
+        for invalid in [
+            serde_json::json!({"gain": 0.5}),
+            serde_json::json!([
+                { "time_ms": 100, "gain": 0.5 },
+                { "time_ms": 100, "gain": 0.25 }
+            ]),
+            serde_json::Value::Array((0..129).map(|i| serde_json::json!({ "time_ms": i, "gain": 0.5 })).collect()),
+            serde_json::json!([{ "time_ms": 0, "gain": 2.5 }]),
+        ] {
+            let error = AudioCueFactory.from_json(serde_json::json!({
+                "type": "audio",
+                "gain_envelope": invalid
+            })).err().expect("invalid envelope must be rejected");
+            assert!(error.to_string().contains("gain_envelope"), "{error}");
+        }
     }
 
     #[test]

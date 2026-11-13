@@ -78,7 +78,7 @@ export function flattenVisibleCueTree<T extends VisibleCueNode<T>>(
   const visit = (nodes: readonly T[], depth: number, parentGroupId: CueId | null) => {
     for (const cue of nodes) {
       result.push({ cue, depth, parentGroupId });
-      if ((cue.cue_type === "group" || cue.cue_type === "number") && expandedGroupIds.has(cue.id) && cue.children?.length) {
+      if ((cue.cue_type === "group" || cue.cue_type === "number" || cue.cue_type === "presentation") && expandedGroupIds.has(cue.id) && cue.children?.length) {
         visit(cue.children, depth + 1, cue.id);
       }
     }

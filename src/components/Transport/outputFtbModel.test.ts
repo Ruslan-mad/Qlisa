@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { cueOutputAssignments, orderOutputDestinations, orderOutputStatuses, outputFtbLedColor, outputFtbVisualState } from "./outputFtbModel";
+import { cueOutputAssignments, orderOutputDestinations, orderOutputStatuses, outputControlsNeedTwoRows, outputFtbLedColor, outputFtbVisualState } from "./outputFtbModel";
 
 describe("per-output FTB indicator state", () => {
+  it("uses one row while outputs fit and two rows when they do not", () => {
+    expect(outputControlsNeedTwoRows([100, 120, 80], 310, 5)).toBe(false);
+    expect(outputControlsNeedTwoRows([100, 120, 80], 300, 5)).toBe(true);
+  });
+
   it("shows green only for an available healthy output", () => {
     expect(outputFtbVisualState({ available: true, healthy: true, ftb: false })).toBe("ok");
     expect(outputFtbLedColor({ available: true, healthy: true, ftb: false })).toBe("#4ade80");

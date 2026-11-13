@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::{
     cue::{
         audio_cue::AudioCueFactory, browser_cue::BrowserCueFactory, fade_cue::FadeCueFactory,
-        group_cue::GroupCueFactory, image_cue::ImageCueFactory, light_cue::LightCueFactory,
+        group_cue::{GroupCueFactory, PresentationCueFactory}, image_cue::ImageCueFactory, light_cue::LightCueFactory,
         memo_cue::MemoCueFactory, midi_cue::MidiCueFactory, osc_cue::OscCueFactory,
         registry::CueRegistry, stop_cue::StopCueFactory, types::CueType,
         video_cue::VideoCueFactory, wait_cue::WaitCueFactory,
@@ -149,55 +149,7 @@ impl AppState {
     ) -> Self {
         let workspace = Workspace::new_with_preferences("Untitled", global_preferences.clone());
 
-        let mut registry = CueRegistry::new();
-        registry.register(CueType::Audio, Box::new(AudioCueFactory));
-        registry.register(CueType::Fade, Box::new(FadeCueFactory));
-        registry.register(CueType::Midi, Box::new(MidiCueFactory));
-        registry.register(
-            CueType::MidiFile,
-            Box::new(crate::cue::midi_file_cue::MidiFileCueFactory),
-        );
-        registry.register(CueType::Group, Box::new(GroupCueFactory));
-        registry.register(
-            CueType::Number,
-            Box::new(crate::cue::group_cue::NumberCueFactory),
-        );
-        registry.register(CueType::Light, Box::new(LightCueFactory));
-        registry.register(CueType::Memo, Box::new(MemoCueFactory));
-        registry.register(CueType::Osc, Box::new(OscCueFactory));
-        registry.register(CueType::Stop, Box::new(StopCueFactory));
-        registry.register(
-            CueType::Devamp,
-            Box::new(crate::cue::devamp_cue::DevampCueFactory),
-        );
-        registry.register(CueType::Video, Box::new(VideoCueFactory));
-        registry.register(CueType::Image, Box::new(ImageCueFactory));
-        registry.register(CueType::Mic, Box::new(crate::cue::mic_cue::MicCueFactory));
-        registry.register(
-            CueType::Timecode,
-            Box::new(crate::cue::timecode_cue::TimecodeCueFactory),
-        );
-        registry.register(
-            CueType::Text,
-            Box::new(crate::cue::text_cue::TextCueFactory),
-        );
-        registry.register(
-            CueType::Camera,
-            Box::new(crate::cue::camera_cue::CameraCueFactory),
-        );
-        registry.register(CueType::Browser, Box::new(BrowserCueFactory));
-        registry.register(CueType::Wait, Box::new(WaitCueFactory));
-        registry.register(
-            CueType::Script,
-            Box::new(crate::cue::script_cue::ScriptCueFactory),
-        );
-        // Command cues: eight distinct types over one shared implementation.
-        for action in crate::cue::control_cue::ALL_CONTROL_ACTIONS {
-            registry.register(
-                action.cue_type(),
-                Box::new(crate::cue::control_cue::ControlCueFactory(action)),
-            );
-        }
+        let registry = production_cue_registry();
 
         Self {
             workspace: Arc::new(Mutex::new(workspace)),
@@ -290,5 +242,47 @@ impl AppState {
         self.global_preferences_migration_allowed
             .store(true, Ordering::Release);
         Ok(next)
+    }
+}
+
+fn production_cue_registry() -> CueRegistry {
+    let mut registry = CueRegistry::new();
+    registry.register(CueType::Audio, Box::new(AudioCueFactory));
+    registry.register(CueType::Fade, Box::new(FadeCueFactory));
+    registry.register(CueType::Midi, Box::new(MidiCueFactory));
+    registry.register(CueType::MidiFile, Box::new(crate::cue::midi_file_cue::MidiFileCueFactory));
+    registry.register(CueType::Group, Box::new(GroupCueFactory));
+    registry.register(CueType::Number, Box::new(crate::cue::group_cue::NumberCueFactory));
+    registry.register(CueType::Presentation, Box::new(PresentationCueFactory));
+    registry.register(CueType::Light, Box::new(LightCueFactory));
+    registry.register(CueType::Memo, Box::new(MemoCueFactory));
+    registry.register(CueType::Osc, Box::new(OscCueFactory));
+    registry.register(CueType::Stop, Box::new(StopCueFactory));
+    registry.register(CueType::Devamp, Box::new(crate::cue::devamp_cue::DevampCueFactory));
+    registry.register(CueType::Video, Box::new(VideoCueFactory));
+    registry.register(CueType::Image, Box::new(ImageCueFactory));
+    registry.register(CueType::Mic, Box::new(crate::cue::mic_cue::MicCueFactory));
+    registry.register(CueType::Timecode, Box::new(crate::cue::timecode_cue::TimecodeCueFactory));
+    registry.register(CueType::Text, Box::new(crate::cue::text_cue::TextCueFactory));
+    registry.register(CueType::Timer, Box::new(crate::cue::timer_cue::TimerCueFactory));
+    registry.register(CueType::Camera, Box::new(crate::cue::camera_cue::CameraCueFactory));
+    registry.register(CueType::Browser, Box::new(BrowserCueFactory));
+    registry.register(CueType::Wait, Box::new(WaitCueFactory));
+    registry.register(CueType::Script, Box::new(crate::cue::script_cue::ScriptCueFactory));
+    for action in crate::cue::control_cue::ALL_CONTROL_ACTIONS {
+        registry.register(action.cue_type(), Box::new(crate::cue::control_cue::ControlCueFactory(action)));
+    }
+    registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn production_add_timer_uses_registered_factory() {
+        let registry = production_cue_registry();
+        let cue = registry.create(&CueType::Timer).expect("Timer Cue is registered in production");
+        assert_eq!(cue.cue_type(), CueType::Timer);
+        assert_eq!(cue.duration().unwrap(), std::time::Duration::from_secs(60));
     }
 }

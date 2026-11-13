@@ -1,8 +1,9 @@
 # Third-party runtime provenance
 
 The Windows full installer embeds hash-pinned FFmpeg, ffprobe, and libmpv
-files. The compact updater does not. The application can download pinned
-archives directly from upstream for repair and verifies SHA-256 values. This
+files. The compact updater does not. The application downloads versioned,
+hash-pinned Qlisa runtime assets. The upstream archives and build records below
+document provenance; they are not the application's acquisition URLs. This
 delivery method does not remove any obligations that apply to the upstream
 binaries. The records below
 identify the selected artifacts and known source gaps; they are not a

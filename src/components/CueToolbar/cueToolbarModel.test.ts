@@ -16,6 +16,7 @@ describe("cue toolbar layout", () => {
     const narrow = resolveCueToolbarLayout(480, widths, 70);
     expect(narrow.visible).toEqual(["audio", "video", "image", "start"]);
     expect(narrow.overflow.slice(0, 5)).toEqual(["stop", "fade", "group", "number", "memo"]);
+    expect(narrow.overflow.indexOf("presentation")).toBeGreaterThan(narrow.overflow.indexOf("timer"));
     const wide = resolveCueToolbarLayout(2000, widths, 70);
     expect(wide.visible).toContain("memo");
     expect(wide.visible).toContain("number");

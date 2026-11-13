@@ -1,4 +1,5 @@
 import type { BulkEditMetadata, CueColor, CueSummary, CueType, FadeCurve, VideoGeometry } from "../../lib/types";
+import { buildGeometryFitPatch } from "./geometryOutputModel";
 
 export type MultiCueRecord = CueSummary & Record<string, unknown> & {
   _bulk_edit?: BulkEditMetadata;
@@ -175,15 +176,12 @@ export function buildMultiCueFitUpdates(
     if (!routes.includes(outputId)) return [];
     const overrides = (cue.geometry_by_output && typeof cue.geometry_by_output === "object"
       ? cue.geometry_by_output as Record<string, Record<string, unknown>> : {});
-    const existing = {
+    const geometry = {
       ...fallback,
       ...((cue.geometry as Record<string, unknown> | undefined) ?? {}),
-      ...(overrides[outputId] ?? {}),
-    };
-    return [{ cueId: cue.id, properties: { geometry_by_output: {
-      ...overrides,
-      [outputId]: { ...existing, fit_mode: fitMode },
-    } } }];
+    } as VideoGeometry;
+    const patch = buildGeometryFitPatch(geometry, overrides as unknown as Record<string, VideoGeometry>, outputId, fitMode);
+    return [{ cueId: cue.id, properties: patch }];
   });
 }
 

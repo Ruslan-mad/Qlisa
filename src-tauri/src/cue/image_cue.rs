@@ -6,7 +6,7 @@
 //! auto-complete via duration.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -70,6 +70,7 @@ pub struct ImageCue {
     pub output_ids: Vec<String>,
 
     is_disabled: bool,
+    background_screensaver: bool,
 
     // --- Runtime ---
     /// Active output voice ID.
@@ -116,6 +117,7 @@ impl ImageCue {
             output_id: None,
             output_ids: Vec::new(),
             is_disabled: false,
+            background_screensaver: false,
             active_voice_id: None,
             in_pre_wait: false,
             play_generation: 0,
@@ -175,6 +177,7 @@ impl ImageCue {
             display_duration_ms: self.display_duration_ms,
             hold_last_frame: false,
             geometry: self.geometry,
+            presentation_video_layout: None,
             live_source: false,
             layer_style: self.layer_style,
             slices: Vec::new(),
@@ -190,6 +193,20 @@ impl ImageCue {
         context.emit(CueEvent::ActionStarted { cue_id: self.id });
         Ok(())
     }
+}
+
+fn timed_gif_duration_elapsed(
+    file_path: Option<&Path>,
+    action_elapsed: Duration,
+    display_duration_ms: Option<u64>,
+) -> bool {
+    let is_gif = file_path
+        .and_then(Path::extension)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"));
+    is_gif
+        && display_duration_ms
+            .map(Duration::from_millis)
+            .is_some_and(|duration| action_elapsed >= duration)
 }
 
 impl Default for ImageCue {
@@ -238,6 +255,12 @@ impl Cue for ImageCue {
     }
     fn set_disabled(&mut self, d: bool) {
         self.is_disabled = d;
+    }
+    fn background_screensaver(&self) -> bool {
+        self.background_screensaver
+    }
+    fn set_background_screensaver(&mut self, enabled: bool) {
+        self.background_screensaver = enabled;
     }
     fn state(&self) -> CueState {
         self.state
@@ -453,6 +476,22 @@ impl Cue for ImageCue {
                 }
             }
         }
+
+        // Animated GIFs loop at the slot level because mpv's
+        // image-display-duration only applies to single-frame images. End a
+        // timed GIF through the ImageCue action clock so pause/resume and the
+        // normal cue completion path keep their existing semantics.
+        if !self.in_pre_wait
+            && timed_gif_duration_elapsed(
+                self.file_path.as_deref(),
+                self.action_elapsed(),
+                self.display_duration_ms,
+            )
+        {
+            if let Some(voice_id) = self.active_voice_id.take() {
+                context.output_engine.stop_content(voice_id, 0, 0);
+            }
+        }
         Ok(())
     }
 
@@ -623,6 +662,7 @@ impl Cue for ImageCue {
             "output_ids": self.output_ids,
             "layer_style": self.layer_style,
             "is_disabled": self.is_disabled,
+            "background_screensaver": self.background_screensaver,
         })
     }
 }
@@ -723,6 +763,7 @@ impl CueFactory for ImageCueFactory {
         if let Some(b) = value.get("is_disabled").and_then(|v| v.as_bool()) {
             cue.is_disabled = b;
         }
+        cue.background_screensaver = value.get("background_screensaver").and_then(Value::as_bool).unwrap_or(false);
 
         Ok(Box::new(cue))
     }
@@ -735,6 +776,125 @@ impl CueFactory for ImageCueFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        cue::context::CueContext,
+        engine::{
+            dmx_engine::DmxEngine,
+            engine_traits::OutputEngineApi,
+            output_engine::ContentRequest,
+            ring_command::VoiceId,
+            AudioEngine,
+        },
+        preferences::MachineAudioConfig,
+    };
+    use crossbeam_channel::unbounded;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct RecordingOutput {
+        stopped: Mutex<Vec<VoiceId>>,
+    }
+
+    impl OutputEngineApi for RecordingOutput {
+        fn show_content(&self, _req: ContentRequest<'_>) -> Result<VoiceId> {
+            anyhow::bail!("unused in ImageCue timing tests")
+        }
+        fn stop_content(&self, voice_id: VoiceId, _visual_fade_ms: u32, _audio_fade_ms: u32) {
+            self.stopped.lock().unwrap().push(voice_id);
+        }
+        fn hard_stop_current(&self) {}
+        fn panic_stop(&self) {}
+        fn video_audio_voice(&self, _voice_id: VoiceId) -> Option<VoiceId> { None }
+        fn resync_audio_to_video(&self, _voice_id: VoiceId) {}
+        fn get_voice_opacity(&self, _voice_id: VoiceId) -> f32 { 1.0 }
+        fn set_voice_opacity(&self, _voice_id: VoiceId, _opacity: f32) {}
+        fn stop_voice(&self, _voice_id: VoiceId, _fade_ms: u32) -> Result<()> { Ok(()) }
+        fn pause_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
+        fn resume_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
+        fn seek_voice_ms(&self, _voice_id: VoiceId, _position_ms: u64) {}
+        fn show_text_overlay(&self, _ass_text: &str, _screen_index: Option<u32>) {}
+        fn clear_text_overlay(&self) {}
+        fn begin_eof_fade_out(&self, _voice_id: VoiceId, _fade_ms: u32) -> bool { false }
+        fn devamp_voice(&self, _voice_id: VoiceId, _stop_at_end: bool) {}
+        fn start_preloaded(&self, _voice_id: VoiceId) -> bool { false }
+    }
+
+    fn test_context() -> (CueContext, Arc<RecordingOutput>) {
+        let (events, _receiver) = unbounded();
+        let output = Arc::new(RecordingOutput::default());
+        let context = CueContext::new(
+            AudioEngine::new_silent(&MachineAudioConfig::default()),
+            output.clone(),
+            events,
+            0,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Arc::new(DmxEngine::new()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            256,
+        );
+        (context, output)
+    }
+
+    #[test]
+    fn timed_gif_is_stopped_by_image_cue_clock_but_other_images_are_unchanged() {
+        let (context, output) = test_context();
+        let voice = Uuid::new_v4();
+        let mut cue = ImageCue::new();
+        cue.file_path = Some(PathBuf::from("show.GIF"));
+        cue.display_duration_ms = Some(5_000);
+        cue.active_voice_id = Some(voice);
+        cue.state = CueState::Running;
+        let started = Instant::now() - Duration::from_secs(1);
+        cue.started_at = Some(started);
+        cue.action_started_at = Some(started);
+
+        cue.tick(&context).unwrap();
+        assert!(output.stopped.lock().unwrap().is_empty());
+        assert_eq!(cue.active_voice_id, Some(voice));
+
+        let expired = Instant::now() - Duration::from_secs(6);
+        cue.started_at = Some(expired);
+        cue.action_started_at = Some(expired);
+        cue.tick(&context).unwrap();
+
+        assert_eq!(*output.stopped.lock().unwrap(), vec![voice]);
+        assert_eq!(cue.active_voice_id, None);
+        assert!(cue.action_elapsed() >= Duration::from_secs(5));
+
+        let mut png = ImageCue::new();
+        png.file_path = Some(PathBuf::from("still.PNG"));
+        png.display_duration_ms = Some(5_000);
+        png.active_voice_id = Some(Uuid::new_v4());
+        png.state = CueState::Running;
+        png.started_at = Some(expired);
+        png.action_started_at = Some(expired);
+        png.tick(&context).unwrap();
+        assert_eq!(*output.stopped.lock().unwrap(), vec![voice]);
+        assert!(png.active_voice_id.is_some());
+    }
+
+    #[test]
+    fn gif_without_display_duration_keeps_running_until_manual_stop() {
+        let (context, output) = test_context();
+        let voice = Uuid::new_v4();
+        let mut cue = ImageCue::new();
+        cue.file_path = Some(PathBuf::from("loop.gif"));
+        cue.active_voice_id = Some(voice);
+        cue.state = CueState::Running;
+        let started = Instant::now() - Duration::from_secs(30);
+        cue.started_at = Some(started);
+        cue.action_started_at = Some(started);
+
+        cue.tick(&context).unwrap();
+
+        assert!(output.stopped.lock().unwrap().is_empty());
+        assert_eq!(cue.active_voice_id, Some(voice));
+    }
 
     #[test]
     fn new_image_cue_has_no_implicit_color() {

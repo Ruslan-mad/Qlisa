@@ -6,7 +6,7 @@ import { CUE_TYPE_COLORS } from "../../lib/types";
 import { CUE_TYPE_ICON_SPECS, CueTypeIcon } from "./CueTypeIcon";
 
 const ALL_CUE_TYPES = [
-  "audio", "memo", "wait", "group", "number", "fade", "stop", "devamp", "video",
+  "audio", "memo", "wait", "timer", "group", "presentation", "number", "fade", "stop", "devamp", "video",
   "image", "osc", "midi", "midi_file", "light", "mic", "timecode", "text",
   "camera", "browser", "script", "start", "pause", "resume", "load", "reset", "goto",
   "arm", "disarm",
@@ -15,7 +15,7 @@ const ALL_CUE_TYPES = [
 describe("CueTypeIcon", () => {
   it("has an explicit Phosphor icon for every CueType", () => {
     expect(Object.keys(CUE_TYPE_ICON_SPECS).sort()).toEqual([...ALL_CUE_TYPES].sort());
-    expect(ALL_CUE_TYPES).toHaveLength(28);
+    expect(ALL_CUE_TYPES).toHaveLength(30);
 
     for (const type of ALL_CUE_TYPES) {
       expect(CUE_TYPE_ICON_SPECS[type], `${type} should have an icon`).toBeTruthy();

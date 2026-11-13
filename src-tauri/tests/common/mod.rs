@@ -692,6 +692,20 @@ pub fn recording_context_with_video_audio() -> (CueContext, Receiver<CueEvent>, 
     )
 }
 
+/// [`recording_context`] whose output double returns the supplied paired
+/// audio voice so transport tests can verify that panic preserves it.
+pub fn recording_context_with_video_audio_voice(
+    video_audio: VoiceId,
+) -> (CueContext, Receiver<CueEvent>, CallLog) {
+    build_recording_context(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Some(video_audio),
+        false,
+    )
+}
+
 /// [`recording_context`] running on a headless output engine — the state the
 /// app falls back to when libmpv is missing.
 pub fn recording_context_headless() -> (CueContext, Receiver<CueEvent>, CallLog) {

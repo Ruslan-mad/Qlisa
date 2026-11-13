@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { useLocale } from "../i18n";
-import { getMediaRuntimeStatus, isBackendReady, prepareMediaRuntime } from "../lib/commands";
-import type { MediaRuntimeProgress } from "../lib/types";
+import { getMediaRuntimeStatus, isBackendReady, prepareMediaRuntime, scheduleMediaRuntimeReinstall } from "../lib/commands";
+import { resolveMediaRuntimeFailure, resolveMediaRuntimeStartup } from "../lib/mediaRuntimeBootstrapModel";
+import type { MediaRuntimeFailureActions } from "../lib/mediaRuntimeBootstrapModel";
+import type { MediaRuntimeProgress, MediaRuntimeStatus } from "../lib/types";
 
-type ViewState = "checking" | "preparing" | "error" | "ready";
+type ViewState = "checking" | "preparing" | "repair" | "error" | "fallback" | "ready";
 
 export function MediaRuntimeBootstrap({ children }: { children: React.ReactNode }) {
   const { t } = useLocale();
@@ -14,10 +16,27 @@ export function MediaRuntimeBootstrap({ children }: { children: React.ReactNode 
   const [view, setView] = useState<ViewState>("checking");
   const [progress, setProgress] = useState<MediaRuntimeProgress>({ phase: "checking", percent: 0 });
   const [error, setError] = useState("");
+  const [runtimeStatus, setRuntimeStatus] = useState<MediaRuntimeStatus | null>(null);
+  const [failureActions, setFailureActions] = useState<MediaRuntimeFailureActions | null>(null);
+
+  const reportFailure = async (cause: unknown) => {
+    setError(String(cause));
+    try {
+      const current = await getMediaRuntimeStatus();
+      setRuntimeStatus(current);
+      const failure = resolveMediaRuntimeFailure(current);
+      setFailureActions(failure);
+      setView(failure.view);
+    } catch {
+      setFailureActions({ view: "error", primary: "retry-missing" });
+      setView("error");
+    }
+  };
 
   const prepare = async (force = false) => {
     setView("preparing");
     setError("");
+    setFailureActions(null);
     try {
       // Tauri creates the main WebView before its setup callback has finished.
       // Do not mount App until AppState and startup services are available.
@@ -32,10 +51,20 @@ export function MediaRuntimeBootstrap({ children }: { children: React.ReactNode 
       }
       if (!force && !relaunchRequired.current) {
         const current = await getMediaRuntimeStatus();
-        if (current.ready) {
+        setRuntimeStatus(current);
+        const action = resolveMediaRuntimeStartup(current);
+        if (action === "run") {
           setView("ready");
           return;
+        } else if (action === "repair") {
+          setError(current.repair_reason || t("mediaRuntimeUi.repairRequired"));
+          setFailureActions(resolveMediaRuntimeFailure(current));
+          setView("repair");
+          return;
+        } else if (action === "invalid") {
+          throw new Error(t("mediaRuntimeUi.incomplete"));
         }
+        // `prepare` means first-run install or an explicitly queued operation.
       }
       const status = await prepareMediaRuntime(force);
       if (!status.ready) throw new Error(t("mediaRuntimeUi.incomplete"));
@@ -44,9 +73,37 @@ export function MediaRuntimeBootstrap({ children }: { children: React.ReactNode 
       relaunchRequired.current = true;
       await relaunch();
     } catch (cause) {
-      setError(String(cause));
-      setView("error");
+      await reportFailure(cause);
     }
+  };
+
+  const queueRepair = async () => {
+    setView("preparing");
+    setError("");
+    setFailureActions(null);
+    try {
+      await scheduleMediaRuntimeReinstall("repair");
+      await relaunch();
+    } catch (cause) {
+      await reportFailure(cause);
+    }
+  };
+
+  const queueUpdate = async () => {
+    setView("preparing");
+    setError("");
+    setFailureActions(null);
+    try {
+      await scheduleMediaRuntimeReinstall("update");
+      await relaunch();
+    } catch (cause) {
+      await reportFailure(cause);
+    }
+  };
+
+  const runWithInstalled = async () => {
+    try { await relaunch(); }
+    catch (cause) { setError(String(cause)); }
   };
 
   useEffect(() => {
@@ -97,10 +154,15 @@ export function MediaRuntimeBootstrap({ children }: { children: React.ReactNode 
   return <main style={styles.page}>
     <section style={styles.card}>
       <div style={{ ...styles.mark, background: "#7f1d1d" }}>!</div>
-      <h1 style={styles.title}>{t("mediaRuntimeUi.failed")}</h1>
+      <h1 style={styles.title}>{view === "repair" ? t("mediaRuntimeUi.repairRequiredTitle") : t("mediaRuntimeUi.failed")}</h1>
       <p style={styles.message}>{error || t("mediaRuntimeUi.unknownError")}</p>
       <div style={styles.actions}>
-        <button style={styles.primary} onClick={() => void prepare(false)}>{t("common.retry")}</button>
+        {failureActions?.primary === "schedule-repair"
+          ? <button style={styles.primary} onClick={() => void queueRepair()}>{t("mediaRuntimeUi.repair")}</button>
+          : failureActions?.primary === "schedule-update"
+            ? <button style={styles.primary} onClick={() => void queueUpdate()}>{t("mediaRuntimeUi.update")}</button>
+            : <button style={styles.primary} onClick={() => void prepare(false)}>{t("common.retry")}</button>}
+        {failureActions?.secondary === "run-installed" && runtimeStatus?.ready && !runtimeStatus.operation_pending && <button style={styles.secondary} onClick={() => void runWithInstalled()}>{t("mediaRuntimeUi.runWithInstalled")}</button>}
         <button style={styles.secondary} onClick={() => void exit(0)}>{t("common.close")}</button>
       </div>
     </section>

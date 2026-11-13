@@ -23,9 +23,13 @@ describe("normalizeUiLayout", () => {
       .toMatchObject({ rightPanel: "inspector", activeCuesOpen: true });
   });
 
-  it("migrates the old Timeline value once and preserves the version 2 Live tab", () => {
+  it("migrates old Slice to unified Preview and preserves version 2 Live", () => {
     expect(normalizeUiLayout({ activeClipTab: "Live" }).activeClipTab).toBe("Preview");
     expect(normalizeUiLayout({ activeClipTab: "Live", clipEditorTabVersion: 2 }).activeClipTab).toBe("Live");
+    expect(normalizeUiLayout({ showLivePanel: false, showSlicePanel: true, activeClipTab: "Slice", clipEditorTabVersion: 2 }))
+      .toMatchObject({ showLivePanel: true, showSlicePanel: false, activeClipTab: "Preview" });
+    expect(normalizeUiLayout({ showLivePanel: false, showSlicePanel: false, activeClipTab: "Live", clipEditorTabVersion: 2 }))
+      .toMatchObject({ showLivePanel: false, showSlicePanel: false, activeClipTab: "Live" });
   });
   it("persists transport toolbar and clip dock visibility with backward-compatible defaults", () => {
     expect(normalizeUiLayout(null)).toMatchObject({ showCueToolbar: true, showClipEditorDock: true });

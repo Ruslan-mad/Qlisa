@@ -24,7 +24,7 @@ import { createProjectOpenStartupGate } from "./lib/projectOpenStartup";
 import { reconcileWorkspaceAfterReplacement } from "./lib/reconcileWorkspaceReplacement";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useWorkspaceStore } from "./stores/workspaceStore";
-import { addCue, collectAndSave, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, getWorkspaceInfo, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences, stopAll, hardStopAll } from "./lib/commands";
+import { addCue, collectAndSave, importDocument, importQlabWorkspace, saveWorkspace, loadWorkspace, newWorkspace, drainPendingProjectOpens, getWorkspaceInfo, setPlayhead, toggleOutputWindow, getOutputWindowVisible, openPreferencesWindow, openDiagnosticsWindow, openOutputMonitorWindow, getCue, checkRecovery, restoreRecovery, discardRecovery, updateDisplayPreferences, stopAll, hardStopAll } from "./lib/commands";
 import { AboutDialog } from "./components/About/AboutDialog";
 import { UpdateDialog } from "./components/Update/UpdateDialog";
 import { useUpdateStore } from "./stores/updateStore";
@@ -36,7 +36,8 @@ import type { CollectReport, ImportReport, RecoveryInfo, CueType, NumberCueData 
 import { QlabImportDialog } from "./components/Import/QlabImportDialog";
 import type { CueSummary } from "./lib/types";
 import { useLocale } from "./i18n";
-import { clipEditorDockVisible, normalizeClipEditorVisibility, resolveClipEditorTargetCueId, toggleClipEditorDock, toggleClipEditorPanel } from "./lib/clipEditorPrefs";
+import { clipEditorDockVisible, normalizeClipEditorVisibility, resolveClipEditorTargetCueId, resolvePresentationPreviewCueId, toggleClipEditorDock, toggleClipEditorPanel } from "./lib/clipEditorPrefs";
+import { findPresentationOwner, presentationChildren } from "./components/Presentation/presentationNavigation";
 import { resolveTransportPanelVisibility } from "./components/Workbench/uiLayoutModel";
 import type { TransportPanelName } from "./components/Transport/TransportPanelControls";
 import { CLIP_EDITOR_DOCK_HEIGHT } from "./components/Editor/clipEditorLayout";
@@ -49,6 +50,8 @@ import { inspectWorkspaceGuard, isProjectFilePath, resolveWorkspaceGuard, withDe
 import { Gear, Minus, Square, X } from "@phosphor-icons/react";
 import { DEFAULT_UI_LAYOUT, normalizeUiLayout, type UiLayout, clampInspectorWidth } from "./components/Workbench/uiLayoutModel";
 import { StageClock } from "./components/Workbench/StageClock";
+import { DocumentImportReview, type DocumentImportReviewResult } from "./components/Import/DocumentImportReview";
+import { dialogActionButtonStyle, dialogActionFooterStyle } from "./components/common/dialogActionStyles";
 
 // ---------------------------------------------------------------------------
 // Recent files
@@ -141,13 +144,13 @@ function CloseConfirmDialog({
       style={{
         position: "fixed", inset: 0, zIndex: 99999,
         background: "rgba(0,0,0,0.6)",
-        display: "flex", alignItems: "center", justifyContent: "center",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
       }}
     >
       <div
         style={{
           background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)",
-          borderRadius: 10, padding: "28px 32px", width: 360,
+          borderRadius: 10, padding: "20px 22px", width: 360, maxWidth: "calc(100vw - 32px)", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxSizing: "border-box",
           boxShadow: "0 16px 48px rgba(0,0,0,0.8)",
         }}
       >
@@ -157,7 +160,7 @@ function CloseConfirmDialog({
         <div style={{ fontSize: 13, color: "var(--wc-text-secondary)", marginBottom: 24 }}>
           {t(messageKey)}
         </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <div style={dialogActionFooterStyle}>
           <DialogBtn label={t("common.cancel")} onClick={onCancel} />
           <DialogBtn label={t("common.discard")} onClick={onDiscard} danger />
           <DialogBtn label={t("common.save")} onClick={onSave} primary />
@@ -183,7 +186,7 @@ function ActivePlaybackCloseDialog({
       style={{
         position: "fixed", inset: 0, zIndex: 100000,
         background: "rgba(0,0,0,0.6)",
-        display: "flex", alignItems: "center", justifyContent: "center",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
       }}
     >
       <div
@@ -191,7 +194,7 @@ function ActivePlaybackCloseDialog({
         aria-modal="true"
         style={{
           background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)",
-          borderRadius: 10, padding: "28px 32px", width: 420,
+          borderRadius: 10, padding: "20px 22px", width: 420, maxWidth: "calc(100vw - 32px)", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxSizing: "border-box",
           boxShadow: "0 16px 48px rgba(0,0,0,0.8)",
         }}
       >
@@ -201,7 +204,7 @@ function ActivePlaybackCloseDialog({
         <div style={{ fontSize: 13, color: "var(--wc-text-secondary)", marginBottom: 24 }}>
           {t("dialogs.activePlaybackMessage")}
         </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <div style={dialogActionFooterStyle}>
           <DialogBtn label={t("common.cancel")} onClick={onCancel} />
           <DialogBtn label={t("common.close")} onClick={onContinue} danger />
         </div>
@@ -228,7 +231,7 @@ function DialogBtn({
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
       style={{
-        padding: "6px 16px", border: "1px solid var(--wc-border-strong)", borderRadius: 6,
+        ...dialogActionButtonStyle, border: "1px solid var(--wc-border-strong)", borderRadius: 6,
         background: bg, color, fontSize: 13, cursor: "pointer",
       }}
     >
@@ -261,13 +264,13 @@ function RecoveryDialog({
       style={{
         position: "fixed", inset: 0, zIndex: 99999,
         background: "rgba(0,0,0,0.6)",
-        display: "flex", alignItems: "center", justifyContent: "center",
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
       }}
     >
       <div
         style={{
           background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)",
-          borderRadius: 10, padding: "28px 32px", width: 380,
+          borderRadius: 10, padding: "20px 22px", width: 380, maxWidth: "calc(100vw - 32px)", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxSizing: "border-box",
           boxShadow: "0 16px 48px rgba(0,0,0,0.8)",
         }}
       >
@@ -280,7 +283,7 @@ function RecoveryDialog({
         <div style={{ fontSize: 13, color: "var(--wc-text)", marginBottom: 24 }}>
           {t("dialogs.recoveryPrompt", { name: label, time: when })}
         </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <div style={dialogActionFooterStyle}>
           <DialogBtn label={t("common.discard")} onClick={onDiscard} danger />
           <DialogBtn label={t("common.confirm")} onClick={onRecover} primary />
         </div>
@@ -465,6 +468,8 @@ function FileMenu({
   onOpen,
   onNew,
   onImportQlab,
+  onImportDocument,
+  documentImportPending,
   onCollect,
   onCheck,
   onLogs,
@@ -479,6 +484,8 @@ function FileMenu({
   onOpen: () => void;
   onNew: () => void;
   onImportQlab: () => void;
+  onImportDocument: () => void;
+  documentImportPending: boolean;
   onCollect: () => void;
   onCheck: () => void;
   onLogs: () => void;
@@ -502,7 +509,7 @@ function FileMenu({
   };
 
   const menuItems: Array<
-    | { type: "item"; label: string; shortcut?: string; action: () => void; muted?: boolean }
+    | { type: "item"; label: string; shortcut?: string; action: () => void; muted?: boolean; disabled?: boolean }
     | { type: "separator" }
   > = [
     { type: "item", label: t("actions.newWorkspace"), shortcut: "Ctrl+N", action: act(onNew) },
@@ -524,6 +531,7 @@ function FileMenu({
     { type: "item", label: t("actions.collectAndSave"), action: act(onCollect) },
     { type: "separator" },
     { type: "item", label: t("actions.importQlab"), action: act(onImportQlab) },
+    { type: "item", label: t("actions.importDocument"), action: act(onImportDocument), disabled: documentImportPending },
     { type: "separator" },
     { type: "item", label: t("actions.checkWorkspace"), action: act(onCheck) },
     { type: "item", label: t("actions.logs"), action: act(onLogs) },
@@ -566,6 +574,7 @@ function FileMenu({
             ) : (
               <button
                 key={item.label}
+                disabled={item.disabled}
                 onMouseEnter={() => setHovered(item.label)}
                 onMouseLeave={() => setHovered(null)}
                 onClick={(e) => { e.stopPropagation(); item.action(); }}
@@ -574,8 +583,8 @@ function FileMenu({
                   width: "100%", padding: "6px 14px",
                   background: hovered === item.label ? "var(--wc-bg-hover)" : "transparent",
                   border: "none",
-                  color: item.muted ? "var(--wc-text-secondary)" : "var(--wc-text)",
-                  fontSize: 13, cursor: "pointer", textAlign: "left", gap: 24,
+                  color: item.disabled ? "var(--wc-text-muted)" : item.muted ? "var(--wc-text-secondary)" : "var(--wc-text)",
+                  fontSize: 13, cursor: item.disabled ? "not-allowed" : "pointer", textAlign: "left", gap: 24,
                 }}
               >
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>
@@ -809,10 +818,9 @@ export default function App() {
   const [showCueListTabs, setShowCueListTabs]     = useState(() => loadUiLayout().showCueListTabs);
   const [showSearchBar, setShowSearchBar]         = useState(() => loadUiLayout().showSearchBar);
   const [showLivePanel, setShowLivePanel]         = useState(() => loadUiLayout().showLivePanel);
-  const [showSlicePanel, setShowSlicePanel]       = useState(() => loadUiLayout().showSlicePanel);
   const [showCueToolbar, setShowCueToolbar]       = useState(() => loadUiLayout().showCueToolbar);
   const [showClipEditorDock, setShowClipEditorDock] = useState(() => loadUiLayout().showClipEditorDock);
-  const [activeClipTab, setActiveClipTab]         = useState<"Preview" | "Live" | "Slice">(() => loadUiLayout().activeClipTab);
+  const [activeClipTab, setActiveClipTab]         = useState<"Preview" | "Live">(() => loadUiLayout().activeClipTab);
   const [inspectorWidth, setInspectorWidth]       = useState(() => loadUiLayout().inspectorWidth);
   const [editorCueId, setEditorCueId]             = useState<string | null>(null);
   const [numberTimelineCueId, setNumberTimelineCueId] = useState<string | null>(null);
@@ -830,6 +838,10 @@ export default function App() {
   const [workspaceError, setWorkspaceError]         = useState<string | null>(null);
   const [collectReport, setCollectReport]         = useState<CollectReport | null>(null);
   const [importReport, setImportReport]           = useState<ImportReport | null>(null);
+  const [documentImportPending, setDocumentImportPending] = useState(false);
+  const [documentImportResult, setDocumentImportResult] = useState<DocumentImportReviewResult | null>(null);
+  const [documentImportError, setDocumentImportError] = useState<string | null>(null);
+  const [documentImportNotice, setDocumentImportNotice] = useState<string | null>(null);
   const [recentFiles, setRecentFiles]             = useState<string[]>(loadRecentFiles);
   const [showAbout, setShowAbout]                 = useState(false);
   const [preflightOpen, setPreflightOpen]         = useState(false);
@@ -844,11 +856,12 @@ export default function App() {
   const pendingProjectOpensRef = useRef<string[]>([]);
   const processingProjectOpensRef = useRef(false);
   const workspaceActionBusyRef = useRef(false);
+  const documentImportBusyRef = useRef<object | null>(null);
 
   // Persist panel visibility + inspector width across launches.
   useEffect(() => {
-    saveUiLayout({ showCueListTabs, rightPanel, activeCuesOpen, showCueToolbar, showClipEditorDock, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab, clipEditorTabVersion: 2 });
-  }, [showCueListTabs, rightPanel, activeCuesOpen, showCueToolbar, showClipEditorDock, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel, activeClipTab]);
+    saveUiLayout({ showCueListTabs, rightPanel, activeCuesOpen, showCueToolbar, showClipEditorDock, showSearchBar, inspectorWidth, showLivePanel, showSlicePanel: false, activeClipTab, clipEditorTabVersion: 2 });
+  }, [showCueListTabs, rightPanel, activeCuesOpen, showCueToolbar, showClipEditorDock, showSearchBar, inspectorWidth, showLivePanel, activeClipTab]);
 
   useEffect(() => {
     useUpdateStore.getState().setInstallGuard(() => {
@@ -867,13 +880,16 @@ export default function App() {
   useEffect(() => {
     const migrated = normalizeClipEditorVisibility(displayPrefs);
     setShowLivePanel(migrated.show_live_panel);
-    setShowSlicePanel(migrated.show_slice_panel);
     setActiveClipTab(migrated.clip_editor_active_tab_v2);
   }, [displayPrefs.show_live_panel, displayPrefs.show_slice_panel, displayPrefs.clip_editor_active_tab, displayPrefs.clip_editor_active_tab_v2]);
 
   const persistClipEditorPrefs = useCallback((patch: Partial<Pick<import("./lib/types").DisplayPreferences, "show_live_panel" | "show_slice_panel" | "clip_editor_active_tab" | "clip_editor_active_tab_v2">>) => {
     const store = useWorkspaceStore.getState();
-    const next = { ...store.displayPrefs, ...patch };
+    const next = {
+      ...store.displayPrefs,
+      ...patch,
+      ...normalizeClipEditorVisibility({ ...store.displayPrefs, ...patch }),
+    };
     store.setDisplayPrefs(next);
     void updateDisplayPreferences(next).catch((error) => console.error("Failed to save Clip Editor preferences", error));
   }, []);
@@ -1173,6 +1189,103 @@ export default function App() {
     });
   }, [runWorkspaceAction]);
 
+  const runDocumentImports = useCallback(async (paths: string[], position = -1, parentId?: string | null) => {
+    if (documentImportBusyRef.current) {
+      setDocumentImportNotice(t("presentationUi.waitForImport"));
+      return;
+    }
+    const importToken = {};
+    documentImportBusyRef.current = importToken;
+    const workspaceRevision = useWorkspaceStore.getState().workspaceReplacementRevision;
+    const isSameWorkspace = () => useWorkspaceStore.getState().workspaceReplacementRevision === workspaceRevision;
+    setDocumentImportPending(true);
+    setDocumentImportError(null);
+    setDocumentImportNotice(null);
+    setDocumentImportResult(null);
+    let result: DocumentImportReviewResult | null = null;
+    let currentImportPath: string | null = null;
+    try {
+      for (let index = 0; index < paths.length; index++) {
+        if (!isSameWorkspace()) return;
+        currentImportPath = paths[index];
+        const imported = await importDocument(paths[index], position < 0 ? position : position + index, parentId);
+        if (!isSameWorkspace()) return;
+        const documentTitle = imported.title || imported.source || paths[index].split(/[\\/]/).pop() || paths[index];
+        const importedForReview: DocumentImportReviewResult = {
+          ...imported,
+          warnings: imported.warnings.map((warning) => `${documentTitle}: ${warning}`),
+          report: imported.report.map((line) => `${documentTitle}: ${line}`),
+          media_scan_error: imported.media_scan_error ? `${documentTitle}: ${imported.media_scan_error}` : null,
+          slides: imported.slides.map((slide) => ({ ...slide, document_title: imported.title || documentTitle, document_source: imported.source || paths[index] })),
+        };
+        currentImportPath = null;
+        result = result ? {
+          ...importedForReview,
+          page_count: result.page_count + imported.page_count,
+          video_count: result.video_count + imported.video_count,
+          warnings: [...result.warnings, ...importedForReview.warnings],
+          report: [...result.report, ...importedForReview.report],
+          slides: [...result.slides, ...importedForReview.slides],
+          media_scan_error: [result.media_scan_error, importedForReview.media_scan_error].filter(Boolean).join("\n") || null,
+        } : importedForReview;
+        setDocumentImportResult(result);
+      }
+      if (!result) return;
+      await refreshCues();
+      if (!isSameWorkspace()) return;
+      useWorkspaceStore.getState().setSelectedCueId(result.cue_id);
+      setDocumentImportResult(result);
+    } catch (error) {
+      if (!isSameWorkspace()) return;
+      if (result) setDocumentImportResult(result);
+      const source = currentImportPath?.split(/[\\/]/).pop();
+      setDocumentImportError(source
+        ? t("presentationUi.importSourceError", { source, error: String(error) })
+        : String(error));
+    } finally {
+      if (documentImportBusyRef.current === importToken) {
+        documentImportBusyRef.current = null;
+        setDocumentImportPending(false);
+        if (!isSameWorkspace()) {
+          setDocumentImportResult(null);
+          setDocumentImportError(null);
+          setDocumentImportNotice(null);
+        }
+      }
+    }
+  }, [refreshCues, t]);
+
+  const handlePickDocument = useCallback(async () => {
+    if (documentImportBusyRef.current) {
+      setDocumentImportNotice(t("presentationUi.waitForImport"));
+      return;
+    }
+    const path = await openDialog({ multiple: false, filters: [{ name: t("actions.importDocument"), extensions: ["pdf", "ppt", "pptx"] }] });
+    if (typeof path !== "string") return;
+    const current = useWorkspaceStore.getState();
+    const locate = (nodes: CueSummary[], id: string, parent: CueSummary | null = null): { cue: CueSummary; parent: CueSummary | null } | null => {
+      for (const cue of nodes) {
+        if (cue.id === id) return { cue, parent };
+        const nested = locate(cue.children ?? [], id, cue);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    const located = current.selectedCueId ? locate(current.cues, current.selectedCueId) : null;
+    let targetId = located?.cue.id ?? null;
+    let parentId = located?.parent?.id ?? null;
+    if (located?.parent?.cue_type === "presentation") {
+      targetId = located.parent.id;
+      const presentationParent = locate(current.cues, located.parent.id)?.parent ?? null;
+      parentId = presentationParent?.id ?? null;
+    }
+    const siblings = parentId
+      ? (locate(current.cues, parentId)?.cue.children ?? [])
+      : current.cues;
+    const index = targetId ? siblings.findIndex((cue) => cue.id === targetId) : -1;
+    await runDocumentImports([path], index >= 0 ? index + 1 : -1, parentId);
+  }, [runDocumentImports, t]);
+
   const handleCollectAndSave = useCallback(async () => {
     const dir = await openDialog({ directory: true });
     if (typeof dir !== "string") return;
@@ -1324,6 +1437,12 @@ export default function App() {
     await refreshCues();
   }, [refreshCues]);
 
+  const handleEditRefresh = useCallback(async () => {
+    await handleRefresh();
+    setInspectorReload((n) => n + 1);
+    setEditorReload((n) => n + 1);
+  }, [handleRefresh]);
+
   const handlePanic = useCallback(async (hard: boolean) => {
     await (hard ? hardStopAll() : stopAll()).catch(console.error);
     await handleRefresh();
@@ -1341,9 +1460,36 @@ export default function App() {
     () => handleToggleSearch(),
     () => void handleNew(),
     () => void handleSaveAs(),
+    handleEditRefresh,
   );
 
   const selectedCue = findCueRecursive(cues, selectedCueId) ?? null;
+  const workspaceReplacementRevision = useWorkspaceStore((state) => state.workspaceReplacementRevision);
+  const presentationPreviewOwner = selectedCue
+    ? selectedCue.cue_type === "presentation" ? selectedCue : findPresentationOwner(cues, selectedCue.id)
+    : null;
+  const presentationPreviewContext = presentationPreviewOwner && selectedCue
+    ? `${workspaceReplacementRevision}:${presentationPreviewOwner.id}:${selectedCue.id}`
+    : null;
+  const [manualPresentationPreview, setManualPresentationPreview] = useState<{ context: string; childId: string } | null>(null);
+  useEffect(() => {
+    setManualPresentationPreview(null);
+  }, [presentationPreviewContext]);
+  const defaultPresentationPreviewCueId = presentationPreviewOwner
+    ? (selectedCue && selectedCue.id !== presentationPreviewOwner.id
+      && presentationChildren(presentationPreviewOwner, true).some((child) => child.id === selectedCue.id)
+      ? selectedCue.id
+      : resolvePresentationPreviewCueId(presentationPreviewOwner))
+    : null;
+  const presentationPreviewCueId = presentationPreviewOwner && presentationPreviewContext
+    ? manualPresentationPreview?.context === presentationPreviewContext
+      ? manualPresentationPreview.childId
+      : defaultPresentationPreviewCueId
+    : null;
+  const presentationPreviewCue = presentationPreviewCueId
+    ? findCueRecursive(cues, presentationPreviewCueId) ?? null
+    : null;
+  const monitorSelectedCue = presentationPreviewOwner ? presentationPreviewCue : selectedCue;
   const activeCueCount = flattenCatalogActiveCues(cueCatalog).length;
   const selectedNumberOwner = selectedCue?.cue_type === "number" ? selectedCue.id : findNumberOwner(cues, selectedCueId);
   const numberPreviewPositionMs = useNumberPreviewStore((state) =>
@@ -1374,7 +1520,7 @@ export default function App() {
     else setNumberTimelineCueId(null);
   }, [selectedNumberOwner]);
 
-  const monitorPreviewPayload = resolveMonitorPreviewSelection(selectedCue, selectedNumberData, numberPreviewPositionMs);
+  const monitorPreviewPayload = resolveMonitorPreviewSelection(monitorSelectedCue, selectedNumberData, numberPreviewPositionMs);
   const monitorPreviewPayloadKey = monitorPreviewPayload === undefined
     ? "preserve"
     : monitorPreviewPayload?.cueId ?? "clear";
@@ -1388,7 +1534,7 @@ export default function App() {
 
   useEffect(() => {
     void sendMonitorPreviewSelection(monitorPreviewPayload).catch(() => undefined);
-  }, [selectedCue?.id, selectedCue?.cue_type, selectedCue?.file_path, selectedCue?.name, monitorPreviewPayloadKey, sendMonitorPreviewSelection]);
+  }, [monitorSelectedCue?.id, monitorSelectedCue?.cue_type, monitorSelectedCue?.file_path, monitorSelectedCue?.name, monitorPreviewPayloadKey, sendMonitorPreviewSelection]);
 
   const handleToggleOutputMonitor = async () => {
     if (outputMonitorVisible) {
@@ -1416,21 +1562,20 @@ export default function App() {
     }
   };
 
-  const handleClipTabChange = (tab: "Preview" | "Live" | "Slice") => {
+  const handleClipTabChange = (tab: "Preview" | "Live") => {
     setActiveClipTab(tab);
-    persistClipEditorPrefs({ clip_editor_active_tab: tab === "Slice" ? "Slice" : "Live", clip_editor_active_tab_v2: tab });
+    persistClipEditorPrefs({ show_slice_panel: false, clip_editor_active_tab: "Live", clip_editor_active_tab_v2: tab });
   };
 
-  const toggleClipPanel = (panel: "Preview" | "Slice") => {
-    const isEnablingPanel = panel === "Preview" ? !showLivePanel : !showSlicePanel;
+  const toggleClipPanel = () => {
+    const isEnablingPanel = !showLivePanel;
     const next = toggleClipEditorPanel({
       show_live_panel: showLivePanel,
-      show_slice_panel: showSlicePanel,
-      clip_editor_active_tab: activeClipTab === "Slice" ? "Slice" : "Live",
+      show_slice_panel: false,
+      clip_editor_active_tab: "Live",
       clip_editor_active_tab_v2: activeClipTab,
-    }, panel);
+    }, "Preview");
     setShowLivePanel(next.show_live_panel);
-    setShowSlicePanel(next.show_slice_panel);
     if (isEnablingPanel) setShowClipEditorDock(true);
     setActiveClipTab(next.clip_editor_active_tab_v2);
     persistClipEditorPrefs(next);
@@ -1529,11 +1674,11 @@ export default function App() {
       ? t("stageUi.savedStatus")
       : t("stageUi.savedAt", { time: new Date(confirmedSavedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) });
 
-  const clipEditorVisible = clipEditorDockVisible(showLivePanel, showSlicePanel);
+  const clipEditorVisible = clipEditorDockVisible(showLivePanel, false);
   const clipEditorDockShown = showClipEditorDock && clipEditorVisible;
   const transportPanelVisibility = resolveTransportPanelVisibility({
     showCueToolbar, activeCuesOpen, rightPanel, showClipEditorDock,
-    showLivePanel, showSlicePanel, showMode,
+    showLivePanel, showSlicePanel: false, showMode,
   });
 
   const handleTransportPanelToggle = (panel: TransportPanelName) => {
@@ -1551,14 +1696,13 @@ export default function App() {
       case "clipEditorDock": {
         const currentVisibility = {
           show_live_panel: showLivePanel,
-          show_slice_panel: showSlicePanel,
-          clip_editor_active_tab: activeClipTab === "Slice" ? "Slice" as const : "Live" as const,
+          show_slice_panel: false as const,
+          clip_editor_active_tab: "Live" as const,
           clip_editor_active_tab_v2: activeClipTab,
         };
         const next = toggleClipEditorDock(showMode ? false : clipEditorDockShown, currentVisibility);
         setShowClipEditorDock(next.showDock);
         setShowLivePanel(next.visibility.show_live_panel);
-        setShowSlicePanel(next.visibility.show_slice_panel);
         setActiveClipTab(next.visibility.clip_editor_active_tab_v2);
         if (next.visibility !== currentVisibility) persistClipEditorPrefs(next.visibility);
         break;
@@ -1743,6 +1887,8 @@ export default function App() {
             onOpen={() => void handleOpen()}
             onNew={() => void handleNew()}
             onImportQlab={() => void handleImportQlab()}
+            onImportDocument={() => void handlePickDocument()}
+            documentImportPending={documentImportPending}
             onCollect={() => void handleCollectAndSave()}
             onCheck={() => setPreflightOpen(true)}
             onLogs={() => setLogsOpen(true)}
@@ -1752,7 +1898,7 @@ export default function App() {
             recentFiles={recentFiles}
             onOpenRecent={(p) => void openWorkspacePath(p)}
           />
-          <EditMenu onRefresh={handleRefresh} />
+          <EditMenu onRefresh={handleEditRefresh} />
           <HelpMenu onCheck={() => void useUpdateStore.getState().checkForUpdates()} onAbout={() => setShowAbout(true)} />
           <ViewMenu
             items={[
@@ -1760,8 +1906,7 @@ export default function App() {
               { label: t("transport.panelToolbar"), checked: transportPanelVisibility.toolbar, onClick: () => handleTransportPanelToggle("toolbar") },
               { label: t("menus.cueListTabs"), checked: showCueListTabs, onClick: () => setShowCueListTabs((v) => !v) },
               { label: t("transport.panelClipEditor"), checked: clipEditorDockShown, onClick: () => handleTransportPanelToggle("clipEditorDock") },
-              { label: t("menus.livePanel"), checked: showLivePanel, onClick: () => toggleClipPanel("Preview") },
-              { label: t("menus.slicePanel"), checked: showSlicePanel, onClick: () => toggleClipPanel("Slice") },
+              { label: t("menus.livePanel"), checked: showLivePanel, onClick: toggleClipPanel },
               { label: t("menus.searchBar"), checked: showSearchBar, onClick: handleToggleSearch, shortcut: "Ctrl+F" },
               { label: t("menus.activeCues"), checked: activeCuesOpen, onClick: () => setActiveCuesOpen((value) => !value) },
               { label: t("menus.inspector"), checked: rightPanel === "inspector", onClick: () => setRightPanel((value) => value === "inspector" ? "closed" : "inspector") },
@@ -1778,12 +1923,14 @@ export default function App() {
           activeCueCount={activeCueCount}
           rightPanel={rightPanel}
           activeCuesOpen={activeCuesOpen}
+          presentationDisabled={documentImportPending}
           onPanic={(hard) => void handlePanic(hard)}
           onToggleRightPanel={(panel) => panel === "active-cues"
             ? setActiveCuesOpen((value) => !value)
             : setRightPanel((value) => value === "inspector" ? "closed" : "inspector")}
           onSettings={() => void openPreferencesWindow()}
           onAdd={(type) => {
+            if (type === "presentation") { void handlePickDocument(); return; }
             const direct: Partial<Record<CueType, () => void>> = {
               audio: handleAddAudio, video: handleAddVideo, image: handleAddImage,
               stop: handleAddStop, wait: handleAddWait, group: handleAddGroup,
@@ -1846,7 +1993,14 @@ export default function App() {
                 (() => {
                   const activeList = cueLists.find((l) => l.id === activeCueListId);
                   if (activeList?.mode === "cart") {
-                    return <CartView onRefresh={handleRefresh} />;
+                    return <CartView
+                      onRefresh={handleRefresh}
+                      inspectedCueId={rightPanel === "inspector" && selectedCueIds.length === 1 ? selectedCueId : null}
+                      onOpenInspector={(cue: CueSummary) => {
+                        useWorkspaceStore.getState().setSelectedCueId(cue.id);
+                        setRightPanel("inspector");
+                      }}
+                    />;
                   }
                   return (
                     <CueListView
@@ -1856,6 +2010,7 @@ export default function App() {
                       }}
                       onOpenInspector={() => setRightPanel("inspector")}
                       onRefresh={handleRefresh}
+                      onImportDocuments={runDocumentImports}
                     />
                   );
                 })()
@@ -1881,9 +2036,18 @@ export default function App() {
             </div>
             {clipEditorDockShown && <div style={{ gridColumn: rightPanel === "closed" ? "1 / -1" : "1", gridRow: "2", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
               <ClipEditorDock
-                cueId={resolveClipEditorTargetCueId(selectedCueId, editorCueId, selectedCue?.cue_type, numberTimelineCueId)}
+                cueId={presentationPreviewCueId ?? resolveClipEditorTargetCueId(selectedCueId, editorCueId, selectedCue?.cue_type, numberTimelineCueId)}
+                presentationPreview={!!presentationPreviewOwner && !!presentationPreviewCueId}
+                presentationOwner={presentationPreviewOwner}
+                presentationPreviewChildId={presentationPreviewCueId}
+                onPresentationPreviewStep={(direction) => {
+                  if (!presentationPreviewOwner || !presentationPreviewContext || !presentationPreviewCueId) return;
+                  const children = presentationChildren(presentationPreviewOwner, true);
+                  const index = children.findIndex((child) => child.id === presentationPreviewCueId);
+                  const next = children[index + (direction === "next" ? 1 : -1)];
+                  if (next) setManualPresentationPreview({ context: presentationPreviewContext, childId: next.id });
+                }}
                 showLivePanel={showLivePanel}
-                showSlicePanel={showSlicePanel}
                 activeTab={activeClipTab}
                 onActiveTabChange={handleClipTabChange}
                 onClose={() => setEditorCueId(null)}
@@ -1907,9 +2071,9 @@ export default function App() {
                     onOpenEditor={(id) => {
                       setEditorCueId(id);
                       setShowClipEditorDock(true);
-                      setShowSlicePanel(true);
-                      setActiveClipTab("Slice");
-                      persistClipEditorPrefs({ show_slice_panel: true, clip_editor_active_tab: "Slice", clip_editor_active_tab_v2: "Slice" });
+                      setShowLivePanel(true);
+                      setActiveClipTab("Preview");
+                      persistClipEditorPrefs({ show_live_panel: true, show_slice_panel: false, clip_editor_active_tab: "Live", clip_editor_active_tab_v2: "Preview" });
                     }}
                     onOpenCurveEditor={(id) => setCurveCueId(id)}
                     reloadToken={inspectorReload}
@@ -1947,6 +2111,13 @@ export default function App() {
         onToggleOutputMonitor={() => void handleToggleOutputMonitor().catch(console.error)}
       />
       <StatusBar />
+      <DocumentImportReview
+        pending={documentImportPending}
+        result={documentImportResult}
+        error={documentImportError}
+        notice={documentImportNotice}
+        onClose={() => { setDocumentImportResult(null); setDocumentImportError(null); setDocumentImportNotice(null); }}
+      />
     </div>
   );
 }

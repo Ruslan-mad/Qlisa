@@ -7,13 +7,19 @@ const readJson = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url
 test("full installer payload pins runtime hashes and official redistributables", () => {
   const full = readJson("./full-installer-manifest.json");
   const runtime = readJson("./runtime-manifest.json");
-  const ffmpeg = runtime.components.find((component) => component.id === "ffmpeg-gyan-full-9.0.2");
-  const mpv = runtime.components.find((component) => component.id === "libmpv");
+  const recommendedKit = runtime.approvedKits.find((kit) => kit.id === runtime.recommendedKitId);
+  const ffmpeg = recommendedKit.components.find((component) => component.id === "ffmpeg");
+  const mpv = recommendedKit.components.find((component) => component.id === "libmpv");
   const fullHashes = Object.fromEntries(full.runtimeFiles.map(({ fileName, sha256 }) => [fileName, sha256]));
   assert.equal(full.schemaVersion, 1);
+  assert.equal(full.kitId, runtime.recommendedKitId);
+  assert.match(ffmpeg.asset.url, /^https:\/\/github\.com\/Ruslan-mad\/Qlisa\/releases\/download\//);
+  assert.match(ffmpeg.asset.sha256, /^[a-f\d]{64}$/i);
+  assert.match(mpv.asset.url, /^https:\/\/github\.com\/Ruslan-mad\/Qlisa\/releases\/download\//);
+  assert.match(mpv.asset.sha256, /^[a-f\d]{64}$/i);
   assert.equal(fullHashes["ffmpeg.exe"], ffmpeg.runtimeFiles.find((file) => file.fileName === "ffmpeg.exe").sha256);
   assert.equal(fullHashes["ffprobe.exe"], ffmpeg.runtimeFiles.find((file) => file.fileName === "ffprobe.exe").sha256);
-  assert.equal(fullHashes["libmpv-2.dll"], mpv.sha256);
+  assert.equal(fullHashes["libmpv-2.dll"], mpv.runtimeFiles.find((file) => file.fileName === "libmpv-2.dll").sha256);
   assert.match(fullHashes["vulkan-1.dll"], /^[a-f\d]{64}$/);
   assert.equal(full.ndiRuntime.version, "6.3.2.0");
   assert.equal(full.ndiRuntime.sha256, "7ee73eedb56402bca5100868353dbab4e944b6c37d2d9881580698a3b61346cd");

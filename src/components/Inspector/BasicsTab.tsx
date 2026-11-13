@@ -50,6 +50,13 @@ export function BasicsTab({
       </Section>
 
       <Section title={t("inspector.flow")}>
+        {(["number", "audio", "video", "image"] as string[]).includes(cue.cue_type) && (
+          <ToggleRow
+            label={t("inspector.backgroundScreensaver")}
+            checked={cue.background_screensaver ?? false}
+            onToggle={(enabled) => onSave({ background_screensaver: enabled })}
+          />
+        )}
         <ToggleRow
           label={t("sweepUi.disableCue")}
           checked={cue.is_disabled ?? false}

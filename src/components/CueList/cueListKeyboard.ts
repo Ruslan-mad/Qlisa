@@ -104,7 +104,7 @@ export function topLevelSelectedStopIds(
   const coveredDescendants = new Set<CueId>();
   const collect = (nodes: readonly KeyboardCueNode[]) => {
     for (const cue of nodes) {
-      if (selected.has(cue.id) && (cue.cue_type === "group" || cue.cue_type === "number")) {
+      if (selected.has(cue.id) && (cue.cue_type === "group" || cue.cue_type === "number" || cue.cue_type === "presentation")) {
         const addDescendants = (children: readonly KeyboardCueNode[]) => {
           for (const child of children) {
             coveredDescendants.add(child.id);

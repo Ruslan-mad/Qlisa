@@ -6,6 +6,7 @@
 //! without allocating.
 
 use uuid::Uuid;
+use crate::cue::gain_envelope::GainEnvelopeRt;
 
 /// A unique identifier for an audio voice (a single playing stream).
 pub type VoiceId = Uuid;
@@ -121,6 +122,13 @@ pub enum AudioCommand {
     Resume { voice_id: VoiceId },
     /// Set the linear gain for a voice (0.0 = silence, 1.0 = unity).
     SetGain { voice_id: VoiceId, gain: f32 },
+    /// Replace source-file gain automation on a voice. The callback crossfades
+    /// from its current gain multiplier over `transition_samples` output frames.
+    SetGainEnvelope {
+        voice_id: VoiceId,
+        envelope: GainEnvelopeRt,
+        transition_samples: u32,
+    },
     /// Mute a voice at the final gain stage without changing its authored gain.
     SetMuted { voice_id: VoiceId, muted: bool },
     /// Set the stereo pan for a voice (-1.0 = left, 0.0 = center, 1.0 = right).

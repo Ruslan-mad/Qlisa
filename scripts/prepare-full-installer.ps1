@@ -52,15 +52,19 @@ New-Item -ItemType Directory -Path $runtimePayload -Force | Out-Null
 New-Item -ItemType Directory -Path $ndiPayload -Force | Out-Null
 
 $runtimeManifest = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'runtime-manifest.json') | ConvertFrom-Json
-$ffmpeg = @($runtimeManifest.components | Where-Object { $_.id -eq 'ffmpeg-gyan-full-9.0.2' })
-$mpv = @($runtimeManifest.components | Where-Object { $_.id -eq 'libmpv' })
-if ($ffmpeg.Count -ne 1 -or $mpv.Count -ne 1) { throw 'Expected one pinned FFmpeg and one pinned libmpv entry.' }
-
-$ffmpegDirectory = Join-Path $root 'src-tauri/vendor/ffmpeg'
-if (-not (Test-Path -LiteralPath (Join-Path $ffmpegDirectory 'ffmpeg.exe') -PathType Leaf) -or
-    -not (Test-Path -LiteralPath (Join-Path $ffmpegDirectory 'ffprobe.exe') -PathType Leaf)) {
-    Write-Host 'Staging the pinned FFmpeg build before preparing the full installer.'
-    & (Join-Path $PSScriptRoot 'prepare-runtime.ps1')
+$runtimeKit = @($runtimeManifest.approvedKits | Where-Object { $_.id -eq $runtimeManifest.recommendedKitId }) | Select-Object -First 1
+if ($null -eq $runtimeKit) { throw 'Runtime manifest has no recommended approved kit.' }
+$ffmpeg = @($runtimeKit.components | Where-Object { $_.id -eq 'ffmpeg' }) | Select-Object -First 1
+$mpv = @($runtimeKit.components | Where-Object { $_.id -eq 'libmpv' }) | Select-Object -First 1
+if ($null -eq $ffmpeg -or $null -eq $mpv) { throw 'Expected a recommended kit with one FFmpeg and one libmpv entry.' }
+if ($manifest.kitId -ne $runtimeKit.id) { throw "Full installer kitId '$($manifest.kitId)' does not match recommended runtime kit '$($runtimeKit.id)'." }
+foreach ($component in @($ffmpeg, $mpv)) {
+    foreach ($runtimeFile in @($component.runtimeFiles)) {
+        $fullFile = @($manifest.runtimeFiles | Where-Object { $_.fileName -eq $runtimeFile.fileName }) | Select-Object -First 1
+        if ($null -eq $fullFile -or $fullFile.sha256.ToLowerInvariant() -ne $runtimeFile.sha256.ToLowerInvariant()) {
+            throw "Full installer hash for $($runtimeFile.fileName) does not match recommended kit '$($runtimeKit.id)'."
+        }
+    }
 }
 
 $runtimeDirectoryCandidates = @()
@@ -115,13 +119,43 @@ foreach ($record in @($manifest.runtimeFiles)) {
             }
         }
     }
+    if ($name -eq 'libmpv-2.dll' -and
+        (-not (Test-Path -LiteralPath $source -PathType Leaf) -or (Get-Sha256 $source) -ne $record.sha256.ToLowerInvariant())) {
+        if ([string]$mpv.asset.format -ne 'zip' -or [string]$mpv.asset.sha256 -notmatch '^[a-fA-F0-9]{64}$') {
+            throw "Recommended kit '$($runtimeKit.id)' has invalid libmpv package metadata."
+        }
+        $downloadDirectory = Join-Path $payload ('.runtime-download-' + [guid]::NewGuid().ToString('N'))
+        $payloadRoot = [System.IO.Path]::GetFullPath($payload).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        $downloadFullPath = [System.IO.Path]::GetFullPath($downloadDirectory)
+        if (-not $downloadFullPath.StartsWith($payloadRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Runtime download staging path escaped the full installer payload.'
+        }
+        New-Item -ItemType Directory -Path $downloadDirectory | Out-Null
+        try {
+            $archivePath = Join-Path $downloadDirectory ([string]$mpv.asset.fileName)
+            $verifiedArchive = Get-PinnedFile $mpv.asset.url $mpv.asset.sha256 $archivePath "libmpv package for kit $($runtimeKit.id)"
+            $extractPath = Join-Path $downloadDirectory 'extracted'
+            Expand-Archive -LiteralPath $verifiedArchive -DestinationPath $extractPath
+            $dllCandidates = @(Get-ChildItem -LiteralPath $extractPath -File -Recurse | Where-Object { $_.Name -eq 'libmpv-2.dll' })
+            if ($dllCandidates.Count -ne 1) { throw "Recommended libmpv package must contain exactly one libmpv-2.dll; found $($dllCandidates.Count)." }
+            Assert-Hash $dllCandidates[0].FullName $record.sha256 'libmpv-2.dll in runtime package'
+            $stagedDll = Join-Path $runtimePayload 'libmpv-2.dll'
+            Copy-Item -LiteralPath $dllCandidates[0].FullName -Destination $stagedDll -Force
+            $source = $stagedDll
+        } finally {
+            if (Test-Path -LiteralPath $downloadDirectory) { Remove-Item -LiteralPath $downloadDirectory -Recurse -Force }
+        }
+    }
     Assert-Hash $source $record.sha256 $name
     if ($name -eq 'vulkan-1.dll') {
         $version = (Get-Item -LiteralPath $source).VersionInfo.FileVersion
         if ($version -ne $record.version) { throw "Vulkan loader version mismatch: expected $($record.version); got $version." }
         Assert-Authenticode $source 'Microsoft Corporation' 'Vulkan loader'
     }
-    Copy-Item -LiteralPath $source -Destination (Join-Path $runtimePayload $name) -Force
+    $destinationFile = Join-Path $runtimePayload $name
+    if (-not [string]::Equals([System.IO.Path]::GetFullPath($source), [System.IO.Path]::GetFullPath($destinationFile), [System.StringComparison]::OrdinalIgnoreCase)) {
+        Copy-Item -LiteralPath $source -Destination $destinationFile -Force
+    }
 }
 
 $ndiCache = Join-Path $payload $manifest.ndiRuntime.fileName

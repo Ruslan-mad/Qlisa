@@ -1,7 +1,7 @@
 import {
-  Article, ArrowBendDownRight, ArrowCounterClockwise, ArrowUUpLeft,
+  Article, ArrowBendDownRight, ArrowCounterClockwise, ArrowUUpLeft, ClockCountdown,
   ArrowsClockwise, Broadcast, Camera, Clock, DownloadSimple,
-  FilmStrip, FolderSimple, Globe, ImageSquare, Lightbulb, Microphone,
+  FilmStrip, FolderSimple, Globe, ImageSquare, Lightbulb, Microphone, PresentationChart,
   MusicNote, NotePencil, NumberSquareOne, Pause, Play, ShieldCheck, ShieldSlash,
   SlidersHorizontal, SpeakerHigh, Stop, Terminal, TextT, Timer,
 } from "@phosphor-icons/react";
@@ -17,6 +17,7 @@ export const CUE_TYPE_ICON_SPECS = {
   memo: NotePencil,
   wait: Timer,
   group: FolderSimple,
+  presentation: PresentationChart,
   number: NumberSquareOne,
   fade: SlidersHorizontal,
   stop: Stop,
@@ -30,6 +31,7 @@ export const CUE_TYPE_ICON_SPECS = {
   mic: Microphone,
   timecode: Clock,
   text: TextT,
+  timer: ClockCountdown,
   camera: Camera,
   browser: Globe,
   script: Terminal,

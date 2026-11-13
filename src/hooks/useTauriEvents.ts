@@ -73,6 +73,7 @@ export function useTauriEvents({ onLoadError, onReady, onSetupError }: TauriEven
             wait_phase: e.payload.wait_phase ?? null,
             wait_elapsed_ms: e.payload.wait_elapsed_ms ?? null,
             wait_duration_ms: e.payload.wait_duration_ms ?? null,
+            timer_zero_reached: e.payload.timer_zero_reached,
           });
         })
       );

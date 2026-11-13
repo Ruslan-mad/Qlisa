@@ -12,6 +12,7 @@ export interface CueTiming {
   wait_phase: "pre_wait" | "post_wait" | null;
   wait_elapsed_ms: number | null;
   wait_duration_ms: number | null;
+  timer_zero_reached?: boolean;
 }
 
 interface TimingState {

@@ -5,6 +5,8 @@ import { queueCueListPlayheadUpdate } from "../lib/cueListGoQueue";
 import { stopSelectedCueSet } from "../components/CueList/cueListKeyboard";
 import { getSelectedPauseTargets } from "../components/ActiveCues/activeCueModel";
 import { toggleSelectedPauseTargets } from "../components/ActiveCues/selectedPauseToggle";
+import { stepPresentation } from "../lib/commands";
+import { createPresentationPageKeyHandler, latestActivePresentation } from "../components/Presentation/presentationNavigation";
 
 const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
 const cmdOrCtrl = (e: KeyboardEvent) => isMac ? e.metaKey : e.ctrlKey;
@@ -155,6 +157,7 @@ export function useKeyboardShortcuts(
   onToggleSearch?: () => void,
   onNewWorkspace?: () => void,
   onSaveAs?: () => void,
+  onEditRefresh?: () => void | Promise<void>,
 ) {
   const lastEscapeRef = useRef<number>(0);
   const lastGoRef = useRef<number>(0);
@@ -338,11 +341,11 @@ export function useKeyboardShortcuts(
           if (cmdOrCtrl(e) && e.shiftKey) {
             // Ctrl+Shift+Z → Redo (alternative to Ctrl+Y)
             e.preventDefault();
-            await redoAction(onRefresh);
+            await redoAction(onEditRefresh ?? onRefresh);
           } else if (cmdOrCtrl(e)) {
             // Ctrl+Z → Undo
             e.preventDefault();
-            await undoAction(onRefresh);
+            await undoAction(onEditRefresh ?? onRefresh);
           }
           break;
         }
@@ -350,7 +353,7 @@ export function useKeyboardShortcuts(
         {
           if (cmdOrCtrl(e)) {
             e.preventDefault();
-            await redoAction(onRefresh);
+            await redoAction(onEditRefresh ?? onRefresh);
           }
           break;
         }
@@ -394,5 +397,23 @@ export function useKeyboardShortcuts(
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [selectedCueId, selectedCueIds, cues, generalPrefs, onRefresh, onOpenPreferences, onSave, onOpen, onToggleInspector, onGoto, onToggleOutputWindow, onToggleShowMode, onToggleSearch, onNewWorkspace, onSaveAs]);
+  }, [selectedCueId, selectedCueIds, cues, generalPrefs, onRefresh, onOpenPreferences, onSave, onOpen, onToggleInspector, onGoto, onToggleOutputWindow, onToggleShowMode, onToggleSearch, onNewWorkspace, onSaveAs, onEditRefresh]);
+
+  useEffect(() => {
+    const handler = createPresentationPageKeyHandler({
+      getTarget: () => {
+        const state = useWorkspaceStore.getState();
+        return latestActivePresentation(state.cueCatalog, state.cueStartOrder);
+      },
+      step: stepPresentation,
+      onRefresh,
+      onError: (error) => {
+        const message = String(error);
+        console.error(error);
+        window.dispatchEvent(new CustomEvent("inkue:transport-error", { detail: message }));
+      },
+    });
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [onRefresh]);
 }

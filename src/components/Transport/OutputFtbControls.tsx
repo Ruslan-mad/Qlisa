@@ -1,15 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getOutputControlStatuses, listOutputDestinations, toggleOutputFtb } from "../../lib/commands";
 import type { OutputControlStatus } from "../../lib/types";
 import { useLocale } from "../../i18n";
-import { orderOutputStatuses, outputFtbLedColor, outputFtbVisualState } from "./outputFtbModel";
+import { orderOutputStatuses, outputControlsNeedTwoRows, outputFtbLedColor, outputFtbVisualState } from "./outputFtbModel";
 import { animateButtonPress } from "../common/buttonPressAnimation";
 
 /** Compact per-destination operator FTB controls. Audio is not involved. */
 export function OutputFtbControls() {
   const { t } = useLocale();
   const [outputs, setOutputs] = useState<OutputControlStatus[]>([]);
+  const controlsRef = useRef<HTMLDivElement>(null);
+  const [twoRows, setTwoRows] = useState(false);
 
   const refresh = () => {
     void Promise.all([getOutputControlStatuses(), listOutputDestinations()])
@@ -30,21 +32,39 @@ export function OutputFtbControls() {
     };
   }, []);
 
+  useLayoutEffect(() => {
+    const container = controlsRef.current;
+    if (!container) return;
+    const measure = () => {
+      const chips = Array.from(container.querySelectorAll<HTMLElement>(".stage-output-chip"));
+      const gap = Number.parseFloat(getComputedStyle(container).columnGap) || 0;
+      setTwoRows(outputControlsNeedTwoRows(chips.map((chip) => chip.offsetWidth), container.clientWidth, gap));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    container.querySelectorAll(".stage-output-chip").forEach((chip) => observer.observe(chip));
+    return () => observer.disconnect();
+  }, [outputs.length]);
+
   if (outputs.length === 0) return null;
 
   return (
     <div
       className="stage-output-controls"
+      data-two-rows={twoRows ? "true" : "false"}
+      ref={controlsRef}
       aria-label={t("components.outputFtb.panelLabel")}
       style={{
-        display: "flex",
+        display: "grid",
         alignItems: "center",
         gap: 5,
-        maxWidth: 450,
+        maxWidth: "100%",
         minWidth: 0,
         overflowX: "auto",
-        flexShrink: 1,
-        marginLeft: "auto",
+        flexShrink: 0,
+        marginLeft: 0,
       }}
     >
       {outputs.map((output) => {

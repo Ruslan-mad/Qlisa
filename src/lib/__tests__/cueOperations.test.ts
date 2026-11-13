@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ confirm: vi.fn() }));
 
 // cueOperations also contains Tauri-backed edit actions; mock the bridge so
 // selection ordering and paste-selection behavior stay frontend-only tests.
-import { copySelection, cueIdsInPlaylist, pasteAfterSelection } from "../cueOperations";
+import { copySelection, cueIdsInPlaylist, pasteAfterSelection, redoAction, undoAction } from "../cueOperations";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 
 beforeEach(() => {
@@ -21,6 +21,18 @@ beforeEach(() => {
 });
 
 describe("playlist edit selection", () => {
+  it.each([
+    ["undo", undoAction],
+    ["redo", redoAction],
+  ] as const)("runs the edit refresh after the %s command completes", async (command, action) => {
+    const events: string[] = [];
+    invokeMock.mockImplementation(async (name: string) => { events.push(name); });
+
+    await action(() => events.push("edit-refresh"));
+
+    expect(events).toEqual([command, "edit-refresh"]);
+  });
+
   it("selects every cue in display/list order, including nested group children", () => {
     expect(cueIdsInPlaylist([
       { id: "a" },

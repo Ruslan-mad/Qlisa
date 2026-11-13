@@ -2,6 +2,11 @@ import type { CueSummary, OutputControlStatus, OutputDestination } from "../../l
 
 export type OutputFtbVisualState = "ok" | "ftb" | "unavailable";
 
+export function outputControlsNeedTwoRows(widths: readonly number[], availableWidth: number, gap: number): boolean {
+  const preferredWidth = widths.reduce((total, width) => total + width, 0) + Math.max(0, widths.length - 1) * gap;
+  return preferredWidth > availableWidth + 1;
+}
+
 export function outputFtbVisualState(output: Pick<OutputControlStatus, "available" | "healthy" | "ftb">): OutputFtbVisualState {
   if (!output.available || !output.healthy) return "unavailable";
   return output.ftb ? "ftb" : "ok";

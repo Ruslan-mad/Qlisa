@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { DragNumber } from "../common/DragNumber";
 import { useLocale } from "../../i18n";
+import { dialogActionButtonStyle, dialogActionFooterStyle } from "../common/dialogActionStyles";
 
 interface Props {
   cueCount: number;
@@ -34,7 +35,7 @@ export function RenumberDialog({ cueCount, onCancel, onConfirm }: Props) {
     <div
       style={{
         position: "fixed", inset: 0, zIndex: 10000,
-        background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center",
+        background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
       }}
       onClick={onCancel}
     >
@@ -46,7 +47,7 @@ export function RenumberDialog({ cueCount, onCancel, onConfirm }: Props) {
         }}
         style={{
           background: "var(--wc-bg-surface)", border: "1px solid var(--wc-border-strong)",
-          borderRadius: 8, padding: 20, minWidth: 320,
+          borderRadius: 8, padding: 20, width: 360, maxWidth: "calc(100vw - 32px)", boxSizing: "border-box",
           boxShadow: "0 16px 48px rgba(0,0,0,0.6)",
         }}
       >
@@ -79,7 +80,7 @@ export function RenumberDialog({ cueCount, onCancel, onConfirm }: Props) {
           {t("components.result")}: <span style={{ color: "var(--wc-text)" }}>{preview}</span>
         </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <div style={dialogActionFooterStyle}>
           <button onClick={onCancel} style={buttonStyle}>{t("common.cancel")}</button>
           <button
             onClick={submit}
@@ -120,6 +121,7 @@ const inputStyle: React.CSSProperties = {
 };
 
 const buttonStyle: React.CSSProperties = {
+  ...dialogActionButtonStyle,
   background: "var(--wc-bg-hover)", border: "1px solid var(--wc-border-strong)",
-  borderRadius: 5, color: "var(--wc-text)", fontSize: 12, padding: "5px 14px", cursor: "pointer",
+  borderRadius: 5, color: "var(--wc-text)", fontSize: 12, cursor: "pointer",
 };
