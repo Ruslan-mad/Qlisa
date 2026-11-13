@@ -106,6 +106,16 @@ $sourceFiles = @{
     'libmpv-2.dll' = $vendorFiles['libmpv-2.dll']
     'vulkan-1.dll' = Join-Path $env:WINDIR 'System32/vulkan-1.dll'
 }
+$vulkanRecord = $records | Where-Object { $_.fileName -eq 'vulkan-1.dll' } | Select-Object -First 1
+if ($null -eq $vulkanRecord) { throw 'Full installer manifest has no pinned vulkan-1.dll record.' }
+foreach ($directory in $runtimeDirectoryCandidates) {
+    $candidate = Join-Path $directory 'vulkan-1.dll'
+    if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and
+        (Get-Sha256 $candidate) -eq $vulkanRecord.sha256.ToLowerInvariant()) {
+        $sourceFiles['vulkan-1.dll'] = $candidate
+        break
+    }
+}
 foreach ($record in @($manifest.runtimeFiles)) {
     $name = [string]$record.fileName
     $source = $sourceFiles[$name]
@@ -150,7 +160,7 @@ foreach ($record in @($manifest.runtimeFiles)) {
     if ($name -eq 'vulkan-1.dll') {
         $version = (Get-Item -LiteralPath $source).VersionInfo.FileVersion
         if ($version -ne $record.version) { throw "Vulkan loader version mismatch: expected $($record.version); got $version." }
-        Assert-Authenticode $source 'Microsoft Corporation' 'Vulkan loader'
+        Assert-Authenticode $source 'LunarG, Inc.' 'Vulkan loader'
     }
     $destinationFile = Join-Path $runtimePayload $name
     if (-not [string]::Equals([System.IO.Path]::GetFullPath($source), [System.IO.Path]::GetFullPath($destinationFile), [System.StringComparison]::OrdinalIgnoreCase)) {
