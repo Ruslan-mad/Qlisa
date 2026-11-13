@@ -31,7 +31,7 @@
   },
   "webview2OfflineInstaller": {
     "url": "https://go.microsoft.com/fwlink/p/?LinkId=2124701",
-    "sha256": "9b0142e22e8daa92855d746ae4d1e9eeef561ccaf67d1dd452165c4af3df3191",
+    "sha256": "d3cbe8fedb104282d745fff106993efead51ae94f5595a4e75804446a974f9c3",
     "signer": "Microsoft Corporation"
   }
 }
