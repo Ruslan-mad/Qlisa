@@ -40,7 +40,10 @@ const FILES = {
 };
 const VERSION_PATHS = Object.values(FILES).map((path) => path.slice(ROOT.length + 1));
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const executable = options.shell && process.platform === "win32" && /\s/.test(command)
+    ? `"${command}"`
+    : command;
+  const result = spawnSync(executable, args, {
     cwd: options.cwd ?? ROOT,
     encoding: "utf8",
     stdio: options.inherit ? "inherit" : "pipe",
