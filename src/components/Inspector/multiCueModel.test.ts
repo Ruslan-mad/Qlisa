@@ -91,8 +91,7 @@ describe("multi-cue Inspector model", () => {
     const updates = buildMultiCueFitUpdates([cueData], "main", "fill", { fit_mode: "fit", pan_x: 0, crop_left: 0 } as VideoGeometry, new Map([[cueData.id, ids]]));
     expect(ids).toEqual(["main"]);
     expect(updates[0].properties).toEqual({
-      geometry: { fit_mode: "fill", pan_x: 0.15, crop_left: 0 },
-      geometry_by_output: {},
+      geometry_by_output: { main: { fit_mode: "fill", pan_x: 0.15, crop_left: 0 } },
     });
   });
 

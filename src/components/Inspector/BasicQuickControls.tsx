@@ -73,7 +73,7 @@ function QuickControlsSection({
     </div>
     {outputs.length > 0 && <div style={{ marginTop: 8 }}>
       <div style={{ fontSize: 10, color: "var(--wc-text-muted)", marginBottom: 5 }}>{isRu ? "Вписывание по выходам" : "Fit by output"}</div>
-      <div style={{ fontSize: 10, color: "var(--wc-text-faint)", marginBottom: 5 }}>{isRu ? "Связь выходов настраивается на вкладке «Геометрия»." : "Output linking is configured in the Geometry tab."}</div>
+      <div style={{ fontSize: 10, color: "var(--wc-text-faint)", marginBottom: 5 }}>{isRu ? "Каждая строка меняет режим только для этого выхода." : "Each row changes the mode for that output only."}</div>
       <FitByOutputRows outputs={outputs} geometryByOutput={geometryByOutput} fallback={fallback} disabled={disabled} mixedOutputIds={mixedOutputIds} mixedLabel={mixedLabel || undefined} onSelect={onFit} />
     </div>}
     {loopDisabled && showLoop && <div style={{ fontSize: 11, color: "var(--wc-warning, #fbbf24)", marginTop: 7 }}>{isRu ? "Остановите или сбросьте выбранные cue, чтобы изменить зацикливание." : "Stop or reset selected cues to change looping."}</div>}

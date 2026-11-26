@@ -10,12 +10,6 @@ export function buildGeometryFitPatch(
   fitMode: VideoGeometry["fit_mode"],
 ): { geometry?: VideoGeometry; geometry_by_output: GeometryOutputOverrides } {
   const current = overrides ?? {};
-  if (Object.keys(current).length === 0) {
-    return {
-      geometry: { ...geometry, fit_mode: fitMode },
-      geometry_by_output: {},
-    };
-  }
   const existing = { ...geometry, ...(current[outputId] ?? {}) };
   return {
     geometry_by_output: { ...current, [outputId]: { ...existing, fit_mode: fitMode } },

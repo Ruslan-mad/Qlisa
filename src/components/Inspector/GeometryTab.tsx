@@ -413,11 +413,6 @@ export function GeometryTab({
   const enqueueLiveSave = (payload: Partial<GeometryCue>, target: string, final: boolean) => {
     geometryQueueRef.current.enqueue(target, payload, saveGeometry, final);
   };
-  const setLinkedGeometry = (next: VideoGeometry) => {
-    currentRef.current = { ...currentRef.current, geometry: next, overrides: {} };
-    setLocalOverrides({ cueId: cue.id, values: {} });
-    enqueueSave({ geometry: next, geometry_by_output: {} });
-  };
   const setOutputGeometry = (outputId: string, partial: Partial<VideoGeometry>) => {
     const next = mergeGeometryOutputOverride(currentRef.current.overrides, outputId, currentRef.current.geometry, partial);
     currentRef.current = { ...currentRef.current, overrides: next };
@@ -494,10 +489,7 @@ export function GeometryTab({
     };
     return <>
       {!overlay && <Section title={localeLabel("fit-title", locale)}>
-        <FitByOutputRows outputs={selectedOutputs} geometryByOutput={activeOverrides} fallback={currentRef.current.geometry} onSelect={(id, fitMode) => {
-          if (linked) setLinkedGeometry({ ...currentRef.current.geometry, fit_mode: fitMode });
-          else setOutputGeometry(id, { fit_mode: fitMode });
-        }} />
+        <FitByOutputRows outputs={selectedOutputs} geometryByOutput={activeOverrides} fallback={currentRef.current.geometry} onSelect={(id, fitMode) => setOutputGeometry(id, { fit_mode: fitMode })} />
       </Section>}
       <Section title={localeLabel("output", locale)}>
         <div role="tablist" aria-label={localeLabel("output", locale)} style={{ display: "flex", gap: 5, overflowX: "auto", marginBottom: 8 }}>

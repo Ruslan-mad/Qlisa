@@ -3,12 +3,14 @@ import { DEFAULT_GEOMETRY } from "../../lib/types";
 import { buildGeometryFitPatch, cancelGeometryAxisGesture, consumeExpectedGeometryEcho, cropDisplayToGeometry, cropGeometryToDisplay, fittedFootprint, formatGeometryPanPercent, geometryCropClipPath, geometryLinkTransition, geometryOverridesForCue, geometryPanToOutputOffset, geometrySnapshotsMatch, mergeGeometryOutputOverride, nextGeometryAxisKeyboardValue, nextGeometryAxisWheelValue, nextGeometryRotationWheelValue, nextGeometryScaleWheelValue, outputAspectRatio, outputOffsetToGeometryPan, quantizeGeometryPan } from "./geometryOutputModel";
 
 describe("per-output geometry overrides", () => {
-  it("keeps quick Fit linked when no output overrides exist", () => {
+  it("changes Fit mode only for the selected output when no overrides exist", () => {
     const geometry = { ...DEFAULT_GEOMETRY, pan_x: 0.2 };
-    expect(buildGeometryFitPatch(geometry, {}, "led", "fill")).toEqual({
-      geometry: { ...geometry, fit_mode: "fill" },
-      geometry_by_output: {},
-    });
+    for (const fit_mode of ["fit", "fill", "stretch"] as const) {
+      const patch = buildGeometryFitPatch(geometry, {}, "led", fit_mode);
+      expect(patch.geometry).toBeUndefined();
+      expect(patch.geometry_by_output).toEqual({ led: { ...geometry, fit_mode } });
+      expect(patch.geometry_by_output.tv ?? geometry).toEqual(geometry);
+    }
   });
 
   it("changes only the selected output when overrides already exist", () => {
