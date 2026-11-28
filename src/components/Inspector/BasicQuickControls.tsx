@@ -14,6 +14,7 @@ type CueQuickState = {
   cue_type: string;
   continue_mode?: ContinueMode;
   loop_count?: number;
+  playlist_loop?: boolean;
   muted?: boolean;
   geometry?: VideoGeometry;
   geometry_by_output?: Record<string, VideoGeometry>;
@@ -24,6 +25,7 @@ const MODES: ContinueMode[] = ["do_not_continue", "auto_continue", "auto_follow"
 function QuickControlsSection({
   loop, mute, continueMode, outputs, geometryByOutput, fallback, mixedOutputIds = [], disabled = false,
   loopDisabled = false, mixedLabel = "", onLoop, onMute, onContinue, onFit,
+  loopLabels,
 }: {
   loop?: ValueState<boolean>;
   mute?: ValueState<boolean>;
@@ -35,6 +37,7 @@ function QuickControlsSection({
   disabled?: boolean;
   loopDisabled?: boolean;
   mixedLabel?: string;
+  loopLabels?: { on: string; off: string; title: string };
   onLoop?: () => void;
   onMute?: () => void;
   onContinue: (mode: ContinueMode) => void;
@@ -57,7 +60,7 @@ function QuickControlsSection({
   return <Section title={isRu ? "Быстрые настройки" : "Quick controls"}>
     <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "7px 10px" }}>
       {(showLoop || showMute) && <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-        {showLoop && <button type="button" disabled={disabled || loopDisabled} aria-pressed={loop.kind === "mixed" ? "mixed" : !!loopOn} aria-label={isRu ? (loopOn ? "Выключить бесконечное зацикливание" : "Зациклить бесконечно") : (loopOn ? "Turn infinite looping off" : "Loop infinitely")} title={isRu ? "Бесконечное зацикливание" : "Infinite looping"} style={style(!!loopOn, loop.kind === "mixed", loopDisabled)} onClick={onLoop}><Repeat size={15} /><span style={{ fontSize: 12, marginLeft: 2 }}>∞</span></button>}
+        {showLoop && <button type="button" disabled={disabled || loopDisabled} aria-pressed={loop.kind === "mixed" ? "mixed" : !!loopOn} aria-label={loopLabels ? (loopOn ? loopLabels.off : loopLabels.on) : (isRu ? (loopOn ? "Выключить бесконечное зацикливание" : "Зациклить бесконечно") : (loopOn ? "Turn infinite looping off" : "Loop infinitely"))} title={loopLabels?.title ?? (isRu ? "Бесконечное зацикливание" : "Infinite looping")} style={style(!!loopOn, loop.kind === "mixed", loopDisabled)} onClick={onLoop}><Repeat size={15} /><span style={{ fontSize: 12, marginLeft: 2 }}>∞</span></button>}
         {showMute && <button type="button" disabled={disabled} aria-pressed={mute.kind === "mixed" ? "mixed" : !!muteOn} aria-label={isRu ? (muteOn ? "Включить звук" : "Выключить звук") : (muteOn ? "Enable sound" : "Mute sound")} title={isRu ? "Звук" : "Sound"} style={style(!!muteOn, mute.kind === "mixed")} onClick={onMute}>{muteOn ? <VolumeX size={16} /> : <Volume2 size={16} />}</button>}
         {(loop?.kind === "mixed" || mute?.kind === "mixed") && <span style={{ fontSize: 10, color: "var(--wc-text-muted)" }}>{mixedLabel}</span>}
       </div>}
@@ -95,12 +98,15 @@ export function BasicQuickControls({
 }) {
   const isAudio = cue.cue_type === "audio";
   const isVideo = cue.cue_type === "video";
+  const isNumber = cue.cue_type === "number";
   const isCamera = cue.cue_type === "camera";
   const isImage = cue.cue_type === "image";
-  const canLoop = isAudio || isVideo;
+  const canLoop = isAudio || isVideo || isNumber;
   const canMute = isAudio || isVideo || isCamera;
   const canFit = isVideo || isImage || isCamera;
   const infiniteLoop = (cue.loop_count ?? 0) === LOOP_INFINITE;
+  const { locale } = useLocale();
+  const isRu = locale === "ru";
   const geometry = cue.geometry ?? DEFAULT_GEOMETRY;
   const { values, saveFit } = useGeometryOutputOverrides(
     cue.id,
@@ -111,14 +117,21 @@ export function BasicQuickControls({
   const selected = outputs.filter((output) => outputIds.includes(output.id)).map(({ id, name }) => ({ id, name }));
   const currentGeometryByOutput = Object.fromEntries(selected.map(({ id }) => [id, values[id] ?? geometry]));
   return <QuickControlsSection
-    loop={canLoop ? { kind: "uniform", value: infiniteLoop } : undefined}
+    loop={canLoop ? { kind: "uniform", value: isNumber ? (cue.playlist_loop ?? false) : infiniteLoop } : undefined}
     mute={canMute ? { kind: "uniform", value: cue.muted ?? false } : undefined}
     continueMode={cue.continue_mode ? { kind: "uniform", value: cue.continue_mode } : { kind: "empty" }}
     outputs={canFit ? selected : []}
     geometryByOutput={currentGeometryByOutput}
     fallback={geometry}
     disabled={disabled}
-    onLoop={() => onSave({ loop_count: loopQuickToggleAfterCount(cue.loop_count ?? 0) })}
+    loopLabels={isNumber ? {
+      on: isRu ? "Зациклить весь номер" : "Loop the whole Number",
+      off: isRu ? "Выключить повтор номера" : "Turn whole-Number looping off",
+      title: isRu ? "Повторять весь номер после окончания мастера" : "Repeat the whole Number after its master ends",
+    } : undefined}
+    onLoop={() => onSave(isNumber
+      ? { playlist_loop: !(cue.playlist_loop ?? false) }
+      : { loop_count: loopQuickToggleAfterCount(cue.loop_count ?? 0) })}
     onMute={() => onSave({ muted: !(cue.muted ?? false) })}
     onContinue={(mode) => onSave({ continue_mode: mode })}
     onFit={(id, mode) => saveFit(id, mode)}

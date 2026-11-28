@@ -28,6 +28,8 @@ export interface LiveMediaCandidate {
   duration_ms?: number | null;
   file_duration_ms?: number | null;
   cached_duration_ms?: number | null;
+  number_master_id?: string | null;
+  number_action_offsets_ms?: Record<string, number>;
   media_source_revision?: string;
   children?: LiveMediaCandidate[];
 }
@@ -40,20 +42,9 @@ export type OrderedLiveMediaCandidate<T extends LiveMediaCandidate = LiveMediaCa
 
 export interface ManualLiveMediaSelection {
   cueId: string;
-  /** Latest ordinary running start already visible when the choice was made. */
-  afterOrder: number;
 }
 
-export function createManualLiveMediaSelection(
-  candidates: OrderedLiveMediaCandidate[],
-  cueId: string,
-): ManualLiveMediaSelection {
-  const afterOrder = candidates.reduce((latest, candidate) =>
-    !candidate.isBackgroundScreensaver && candidate.state === "running"
-      ? Math.max(latest, candidate.startOrder)
-      : latest, 0);
-  return { cueId, afterOrder };
-}
+export function createManualLiveMediaSelection(cueId: string): ManualLiveMediaSelection { return { cueId }; }
 
 /** Return active media leaves, ordered with screensaver media first. */
 export function activeLiveMediaCandidates<T extends LiveMediaCandidate>(
@@ -67,9 +58,10 @@ export function activeLiveMediaCandidates<T extends LiveMediaCandidate>(
       const isBackgroundScreensaver = underScreensaver || cue.background_screensaver === true;
       const waiting = underPreWait || timings[cue.id]?.wait_phase === "pre_wait";
       if (cue.children?.length) visit(cue.children, isBackgroundScreensaver, waiting);
-      if ((cue.cue_type === "audio" || cue.cue_type === "video" || cue.cue_type === "image")
+      if ((cue.cue_type === "number" && !waiting && (cue.state === "running" || cue.state === "paused"))
+        || ((cue.cue_type === "audio" || cue.cue_type === "video" || cue.cue_type === "image")
         && !waiting && !!cue.file_path && !cue.is_loading
-        && (cue.state === "running" || cue.state === "paused")) {
+        && (cue.state === "running" || cue.state === "paused"))) {
         // Runtime state is authoritative. Missing order data uses zero, then
         // the stable catalog traversal order resolves ties deterministically.
         const order = startOrder[cue.id];
@@ -82,26 +74,24 @@ export function activeLiveMediaCandidates<T extends LiveMediaCandidate>(
     || a.startOrder - b.startOrder);
 }
 
-/** A manual choice lasts until a newer ordinary cue is both started and running. */
-export function shouldFollowLatestLiveMedia(
-  candidates: OrderedLiveMediaCandidate[],
-  manualSelection: ManualLiveMediaSelection | null,
-): boolean {
-  return !!manualSelection && candidates.some((candidate) =>
-    !candidate.isBackgroundScreensaver
-    && candidate.state === "running"
-    && candidate.startOrder > manualSelection.afterOrder);
-}
-
 /** Follow the newest running ordinary track; paused tracks remain manually selectable. */
 export function resolveLiveMediaSelection(
   candidates: OrderedLiveMediaCandidate[],
   manualSelection: ManualLiveMediaSelection | null,
+  pinnedNumberId: string | null = null,
 ): OrderedLiveMediaCandidate | null {
-  if (manualSelection && !shouldFollowLatestLiveMedia(candidates, manualSelection)) {
+  if (manualSelection) {
     const selected = candidates.find((candidate) => candidate.id === manualSelection.cueId);
     if (selected) return selected;
   }
+  const activeNumbers = candidates.filter((candidate) => candidate.cue_type === "number" && !candidate.isBackgroundScreensaver
+    && (candidate.state === "running" || candidate.state === "paused"));
+  const pinnedNumber = activeNumbers.find((candidate) => candidate.id === pinnedNumberId);
+  if (pinnedNumber) return pinnedNumber;
+  const latestActiveNumber = activeNumbers.reduce<OrderedLiveMediaCandidate | null>((latest, candidate) => {
+    return !latest || candidate.startOrder > latest.startOrder ? candidate : latest;
+  }, null);
+  if (latestActiveNumber) return latestActiveNumber;
   const latestInState = (background: boolean, state: string) => candidates.reduce<OrderedLiveMediaCandidate | null>((latest, candidate) => {
     if (candidate.isBackgroundScreensaver !== background || candidate.state !== state) return latest;
     return !latest || candidate.startOrder > latest.startOrder ? candidate : latest;

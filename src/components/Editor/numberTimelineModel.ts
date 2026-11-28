@@ -1,4 +1,4 @@
-import type { CueSummary, GroupMode, NumberCueData, WaveformData } from "../../lib/types";
+import type { CueSummary, GroupMode, NumberCueData, SliceList, WaveformData } from "../../lib/types";
 
 export type NumberVisualAction = CueSummary & {
   start_time_ms?: number | null;
@@ -18,6 +18,7 @@ export interface NumberAudioSegment {
   endMs: number;
   sourceStartMs: number;
   sourceEndMs: number;
+  rate?: number;
 }
 
 type WaveformAsset = WaveformData | null | undefined;
@@ -36,7 +37,7 @@ type NumberMediaIdentityCue = CueSummary & {
 function mediaIdentityTree(cues: readonly NumberMediaIdentityCue[]): unknown[] {
   const identities: unknown[] = [];
   for (const cue of cues) {
-    if (cue.cue_type === "audio" || cue.cue_type === "video") {
+    if (cue.cue_type === "audio" || cue.cue_type === "video" || cue.cue_type === "image") {
       identities.push([cue.id, cue.cue_type, cue.file_path, cue.media_source_revision ?? null]);
     } else if (cue.children) {
       identities.push([cue.id, cue.cue_type, mediaIdentityTree(cue.children)]);
@@ -116,13 +117,14 @@ function cueMediaDurationMs(cue: CueSummary): number {
     return Math.max(0, cue.duration_ms ?? cueFileDurationMs(cue));
   }
   const fileDuration = cueFileDurationMs(cue);
-  const timed = cue as CueSummary & { start_time_ms?: number | null; end_time_ms?: number | null };
+  const timed = cue as CueSummary & { start_time_ms?: number | null; end_time_ms?: number | null; rate?: number; cached_duration_ms?: number | null };
+  const rate = Number.isFinite(timed.rate) && (timed.rate ?? 0) > 0 ? timed.rate! : 1;
   if (timed.start_time_ms == null && timed.end_time_ms == null) {
-    return Math.max(0, cue.duration_ms ?? fileDuration);
+    return Math.max(0, timed.cached_duration_ms != null ? fileDuration / rate : cue.duration_ms ?? fileDuration);
   }
   const startMs = Math.min(fileDuration, Math.max(0, timed.start_time_ms ?? 0));
   const endMs = Math.min(fileDuration, Math.max(startMs, timed.end_time_ms ?? fileDuration));
-  return endMs - startMs;
+  return (endMs - startMs) / rate;
 }
 
 export function cueSourceWindow(cue: CueSummary): { startMs: number; endMs: number } {
@@ -131,6 +133,32 @@ export function cueSourceWindow(cue: CueSummary): { startMs: number; endMs: numb
   const startMs = Math.min(fileDuration, Math.max(0, timed.start_time_ms ?? 0));
   const rawEnd = timed.end_time_ms ?? fileDuration;
   return { startMs, endMs: Math.min(fileDuration, Math.max(startMs, rawEnd ?? startMs)) };
+}
+
+/** Show source slice markers on the trimmed, rate-adjusted Number clock. */
+export function numberSourceSlicesToAction(
+  slices: SliceList | null | undefined,
+  sourceStartMs: number,
+  sourceEndMs: number,
+  rate: number,
+  actionDurationMs: number,
+  looped: boolean,
+): SliceList {
+  const safeRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+  const passDuration = Math.max(0, sourceEndMs - sourceStartMs) / safeRate;
+  if (!slices?.markers.length || passDuration <= 0) return { markers: [], play_counts: [1] };
+  const cycles = looped ? Math.min(256, Math.max(1, Math.ceil(actionDurationMs / passDuration))) : 1;
+  const markers: number[] = [];
+  for (let cycle = 0; cycle < cycles; cycle++) {
+    if (cycle * passDuration >= actionDurationMs) break;
+    for (const sourceMs of slices.markers) {
+      if (sourceMs <= sourceStartMs || sourceMs >= sourceEndMs) continue;
+      const actionMs = Math.round(cycle * passDuration + (sourceMs - sourceStartMs) / safeRate);
+      if (actionMs > 0 && actionMs < actionDurationMs) markers.push(actionMs);
+    }
+  }
+  const uniqueMarkers = [...new Set(markers)].sort((a, b) => a - b);
+  return { markers: uniqueMarkers, play_counts: Array.from({ length: uniqueMarkers.length + 1 }, () => 1) };
 }
 
 function leafDurationWithWaits(cue: CueSummary): number {
@@ -178,6 +206,9 @@ function directChildSegments(cue: CueSummary, baseMs: number): NumberAudioSegmen
         endMs: childStart + Math.max(0, duration),
         sourceStartMs: source.startMs,
         sourceEndMs: source.endMs,
+        rate: child.cue_type === "audio" && Number.isFinite((child as CueSummary & { rate?: number }).rate)
+          ? Math.max(0.01, (child as CueSummary & { rate: number }).rate)
+          : 1,
       });
     } else if (child.cue_type === "group") {
       result.push(...directChildSegments(child, childStart));
@@ -220,10 +251,10 @@ export function composeGroupWaveform(
     const startBin = Math.max(0, Math.floor((segment.startMs / totalMs) * bins));
     const endBin = Math.min(bins, Math.ceil((segment.endMs / totalMs) * bins));
     const sourceSpan = Math.max(1, segment.sourceEndMs - segment.sourceStartMs);
-    const segmentSpan = Math.max(1, segment.endMs - segment.startMs);
     for (let bin = startBin; bin < endBin; bin++) {
       const timelineMs = ((bin + 0.5) / bins) * totalMs;
-      const sourceMs = segment.sourceStartMs + Math.max(0, Math.min(sourceSpan, timelineMs - segment.startMs)) * sourceSpan / segmentSpan;
+      const rate = Number.isFinite(segment.rate) && (segment.rate ?? 0) > 0 ? segment.rate! : 1;
+      const sourceMs = segment.sourceStartMs + Math.max(0, Math.min(sourceSpan, (timelineMs - segment.startMs) * rate));
       const sourceBin = Math.min(source.peaks.length - 1, Math.max(0, Math.floor((sourceMs / Math.max(1, source.file_duration_s * 1000)) * source.peaks.length)));
       peaks[bin] = Math.max(peaks[bin], source.peaks[sourceBin] ?? 0);
       rms[bin] = Math.max(rms[bin], source.rms[sourceBin] ?? 0);
@@ -247,16 +278,19 @@ export function numberDragRange(
   pointerMs: number,
   masterDurationMs: number,
   maxSpanMs = Number.POSITIVE_INFINITY,
+  minSpanMs = 0,
 ): { startMs: number; endMs: number } {
   const duration = Math.max(0, masterDurationMs);
   const start = Math.max(0, Math.min(duration, originStartMs));
   const end = Math.max(start, Math.min(duration, originEndMs));
   const maxSpan = Number.isFinite(maxSpanMs) ? Math.max(0, maxSpanMs) : Number.POSITIVE_INFINITY;
   if (kind === "start") {
-    return { startMs: Math.max(Math.max(0, end - maxSpan), Math.min(end, pointerMs)), endMs: end };
+    const minSpan = Math.min(Math.max(0, minSpanMs), end, maxSpan);
+    return { startMs: Math.max(Math.max(0, end - maxSpan), Math.min(end - minSpan, pointerMs)), endMs: end };
   }
   if (kind === "end") {
-    return { startMs: start, endMs: Math.max(start, Math.min(Math.min(duration, start + maxSpan), pointerMs)) };
+    const minSpan = Math.min(Math.max(0, minSpanMs), duration - start, maxSpan);
+    return { startMs: start, endMs: Math.max(start + minSpan, Math.min(Math.min(duration, start + maxSpan), pointerMs)) };
   }
   const length = Math.min(end - start, maxSpan);
   const nextStart = Math.max(0, Math.min(Math.max(0, duration - length), pointerMs));
@@ -301,7 +335,9 @@ export function numberMasterDuration(cue: NumberCueData): number {
   // summary duration and do not multiply it a second time.
   if (!hasSourceDuration) return cueMediaDurationMs(master);
   const source = cueSourceWindow(master);
-  const onePass = Math.max(0, source.endMs - source.startMs);
+  const rawRate = master.cue_type === "audio" ? (master as CueSummary & { rate?: number }).rate : undefined;
+  const rate = Number.isFinite(rawRate) && (rawRate ?? 0) > 0 ? rawRate! : 1;
+  const onePass = Math.max(0, source.endMs - source.startMs) / rate;
   // Number's master clock includes finite media repeats. Keep the waveform's
   // source window at one pass; only the timeline duration is multiplied.
   if ((master.cue_type === "audio" || master.cue_type === "video")
@@ -317,7 +353,33 @@ export function numberActionDuration(child: NumberVisualAction, masterDuration: 
   const file = Math.max(0, child.file_duration_ms ?? child.duration_ms ?? child.cached_duration_ms ?? 0);
   const start = Math.max(0, child.start_time_ms ?? 0);
   const end = child.end_time_ms == null ? file : Math.max(start, child.end_time_ms);
-  return Math.max(0, end - start);
+  const rawRate = child.cue_type === "audio" ? (child as NumberVisualAction & { rate?: number }).rate : undefined;
+  const rate = Number.isFinite(rawRate) && (rawRate ?? 0) > 0 ? rawRate! : 1;
+  return Math.max(0, end - start) / rate;
+}
+
+/** Convert a drag delta on the Number clock to source-file milliseconds. */
+export function numberActionTimelineDeltaToSource(child: NumberVisualAction, timelineDeltaMs: number): number {
+  const rawRate = child.cue_type === "audio" ? (child as NumberVisualAction & { rate?: number }).rate : undefined;
+  const rate = Number.isFinite(rawRate) && (rawRate ?? 0) > 0 ? rawRate! : 1;
+  return timelineDeltaMs * rate;
+}
+
+/** Convert a source-file delta to the action's displayed Number duration. */
+export function numberActionSourceDeltaToTimeline(child: NumberVisualAction, sourceDeltaMs: number): number {
+  const rawRate = child.cue_type === "audio" ? (child as NumberVisualAction & { rate?: number }).rate : undefined;
+  const rate = Number.isFinite(rawRate) && (rawRate ?? 0) > 0 ? rawRate! : 1;
+  return sourceDeltaMs / rate;
+}
+
+/** Maximum resize span: images use the Number clock, while media keeps its source trim limit. */
+export function numberActionMaxResizeSpan(child: NumberVisualAction, masterDuration: number): number {
+  if (child.cue_type === "image") return Math.max(0, masterDuration);
+  const fileDuration = Math.max(0, child.file_duration_ms ?? child.duration_ms ?? child.cached_duration_ms ?? 0);
+  const sourceStart = Math.max(0, child.start_time_ms ?? 0);
+  const rawRate = child.cue_type === "audio" ? (child as NumberVisualAction & { rate?: number }).rate : undefined;
+  const rate = Number.isFinite(rawRate) && (rawRate ?? 0) > 0 ? rawRate! : 1;
+  return Math.max(0, fileDuration - sourceStart) / rate;
 }
 
 export function numberActionLooped(child: NumberVisualAction): boolean {

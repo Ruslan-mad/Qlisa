@@ -342,6 +342,8 @@ fn configure_output(output: &OutputEngine, path: &Path, layers: u32, is_image: b
             presentation_video_layout: None,
             live_source: false,
             layer_style: LayerStyle { layer: Some(layer + 1), ..LayerStyle::default() },
+            layer_group_order: None,
+            layer_child_order: None,
             slices: Vec::new(),
             preload: false,
         })?;
@@ -400,6 +402,8 @@ fn show_check_image(output: &OutputEngine, output_id: &str, path: &Path) -> Resu
         presentation_video_layout: None,
         live_source: false,
         layer_style: LayerStyle::default(),
+        layer_group_order: None,
+        layer_child_order: None,
         slices: Vec::new(),
         preload: false,
     })?;

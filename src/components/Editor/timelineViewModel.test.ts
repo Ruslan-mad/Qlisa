@@ -35,5 +35,6 @@ describe("timeline viewport", () => {
   it("maps a short final repeat pass to only the matching part of the crop", () => {
     expect(sourceRangeForTimelinePass(12_000, 14_500, 2_000, 6_000)).toEqual({ startMs: 2_000, endMs: 4_500 });
     expect(sourceRangeForTimelinePass(12_000, 16_000, 2_000, 6_000)).toEqual({ startMs: 2_000, endMs: 6_000 });
+    expect(sourceRangeForTimelinePass(0, 1000, 2000, 4000, 2)).toEqual({ startMs: 2000, endMs: 4000 });
   });
 });

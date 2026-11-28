@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, groupAudioSegments, groupDurationMs, numberActionDuration, numberActionLooped, numberChildTimelineStartMs, numberDragRange, numberMasterDuration, numberMediaLayoutSignature, numberMediaSourceSignature, numberPreviewItem, numberPreviewSourcePosition, numberPreviewSourceWindow, numberVisualActions, shouldRetainNumberPreviewAsset, snapNumberTime } from "./numberTimelineModel";
+import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, groupAudioSegments, groupDurationMs, numberActionDuration, numberActionLooped, numberActionMaxResizeSpan, numberActionSourceDeltaToTimeline, numberActionTimelineDeltaToSource, numberChildTimelineStartMs, numberDragRange, numberMasterDuration, numberMediaLayoutSignature, numberMediaSourceSignature, numberPreviewItem, numberPreviewSourcePosition, numberPreviewSourceWindow, numberSourceSlicesToAction, numberVisualActions, shouldRetainNumberPreviewAsset, snapNumberTime } from "./numberTimelineModel";
 import { mediaSourceMsAtPixel, sourceRangeForTimelinePass, waveformBinAtSourceMs } from "./timelineViewModel";
+import { normalizeNumberCueData } from "../Inspector/numberModel";
 
 const child = (id: string, type: "video" | "image", extra: Record<string, unknown> = {}) => ({
   id, cue_type: type, name: id, duration_ms: 4000, file_duration_ms: 5000,
@@ -8,6 +9,32 @@ const child = (id: string, type: "video" | "image", extra: Record<string, unknow
 }) as any;
 
 describe("numberTimelineModel", () => {
+  it("maps master slice markers through trim, rate, and loop passes", () => {
+    expect(numberSourceSlicesToAction({ markers: [1000, 3000], play_counts: [1, 2, 1] }, 2000, 4000, 2, 2000, true))
+      .toEqual({ markers: [500, 1500], play_counts: [1, 1, 1] });
+  });
+  it("uses the rate-adjusted master clock when mapping trim and slices", () => {
+    const cue = {
+      id: "n", cue_type: "number", number_master_id: "m", number_action_offsets_ms: {},
+      children: [{
+        id: "m", cue_type: "audio", name: "master", file_path: "m.wav", file_duration_ms: 5000,
+        cached_duration_ms: 5000, duration_ms: 5000, start_time_ms: 2000, end_time_ms: 4000,
+        rate: 2, loop_count: 1,
+      }],
+    } as any;
+    const duration = numberMasterDuration(cue);
+    expect(duration).toBe(2000);
+    expect(numberSourceSlicesToAction({ markers: [3000], play_counts: [1, 1] }, 2000, 4000, 2, duration, true).markers)
+      .toEqual([500, 1500]);
+  });
+  it("round-trips Number trim deltas between timeline and source time at audio rates", () => {
+    const fast = { cue_type: "audio", rate: 2 } as any;
+    const slow = { cue_type: "audio", rate: 0.5 } as any;
+    expect(numberActionTimelineDeltaToSource(fast, 1000)).toBe(2000);
+    expect(numberActionSourceDeltaToTimeline(fast, 2000)).toBe(1000);
+    expect(numberActionTimelineDeltaToSource(slow, 1000)).toBe(500);
+    expect(numberActionSourceDeltaToTimeline(slow, 500)).toBe(1000);
+  });
   it("includes audio actions and snaps to nearby master/action edges", () => {
     const cue = { number_master_id: "master", number_action_offsets_ms: { a: 1000 }, children: [
       child("master", "video", { duration_ms: 5000, file_duration_ms: 5000 }),
@@ -207,9 +234,73 @@ describe("numberTimelineModel", () => {
     expect(numberMediaLayoutSignature({ ...groupCue, children: [{ ...groupCue.children[0], slices: { markers: [500], play_counts: [1, 2] } }] })).not.toBe(groupLayout);
   });
 
+  it("invalidates rapid trim, offset, and reorder layouts while reusing unchanged waveform data", () => {
+    const waveform = { peaks: [0.4], rms: [0.2], file_duration_s: 1 };
+    const asset = { cueId: "audio-a", filePath: "a.wav", sourceRevision: "r1", waveform };
+    const cue = {
+      id: "number-a", number_master_id: "audio-a", number_action_offsets_ms: { image: 100 },
+      children: [
+        { id: "audio-a", cue_type: "audio", file_path: "a.wav", media_source_revision: "r1", start_time_ms: 0, end_time_ms: 1000, duration_ms: 1000 },
+        { id: "image", cue_type: "image", file_path: "still.png", display_duration_ms: 500 },
+      ],
+    } as any;
+    const base = numberMediaLayoutSignature(cue);
+    const trimmed = { ...cue, children: [{ ...cue.children[0], end_time_ms: 800 }, cue.children[1]] };
+    const moved = { ...trimmed, number_action_offsets_ms: { image: 250 } };
+    const reordered = { ...moved, children: [...moved.children].reverse() };
+    expect([trimmed, moved, reordered].every((layout) => numberMediaLayoutSignature(layout) !== base)).toBe(true);
+    expect(canReuseNumberWaveformAsset(asset, "audio-a", "a.wav", "r1")).toBe(true);
+  });
+
   it("bounds a resize to the available source span", () => {
     expect(numberDragRange("end", 1000, 3000, 9000, 10000, 2500)).toEqual({ startMs: 1000, endMs: 3500 });
     expect(numberDragRange("start", 1000, 5000, -1000, 10000, 2500)).toEqual({ startMs: 2500, endMs: 5000 });
+  });
+
+  it("resizes images against the Number clock and keeps a usable minimum span", () => {
+    const master = child("master", "video", { duration_ms: 92_000, file_duration_ms: 92_000 });
+    const image = child("image", "image", { duration_ms: null, file_duration_ms: null, display_duration_ms: null });
+    const cue = { number_master_id: "master", number_action_offsets_ms: { image: 80_000 }, children: [master, image] } as any;
+    const action = numberVisualActions(cue)[0];
+    expect(action.timeline_end_ms).toBe(92_000); // null duration resets to master span
+
+    const imageMaxSpan = numberActionMaxResizeSpan(action, numberMasterDuration(cue));
+    expect(imageMaxSpan).toBe(92_000);
+    expect(numberActionMaxResizeSpan(child("video", "video", { file_duration_ms: 5000, start_time_ms: 1000 }) as any, 92_000))
+      .toBe(4000);
+    const resizedEnd = numberDragRange("end", 80_000, 92_000, 90_000, 92_000, imageMaxSpan, 100);
+    expect(resizedEnd).toEqual({ startMs: 80_000, endMs: 90_000 });
+    expect(numberDragRange("end", 80_000, 90_000, 92_000, 92_000, imageMaxSpan, 100))
+      .toEqual({ startMs: 80_000, endMs: 92_000 });
+    expect(numberDragRange("start", 80_000, 92_000, 85_000, 92_000, imageMaxSpan, 100))
+      .toEqual({ startMs: 85_000, endMs: 92_000 });
+    expect(numberDragRange("move", 80_000, 92_000, 40_000, 92_000, imageMaxSpan, 100))
+      .toEqual({ startMs: 40_000, endMs: 52_000 });
+
+    // A finite duration can grow, and even a legacy zero duration can recover.
+    expect(numberDragRange("end", 80_000, 85_000, 90_000, 92_000, imageMaxSpan, 100))
+      .toEqual({ startMs: 80_000, endMs: 90_000 });
+    expect(numberDragRange("end", 80_000, 80_000, 80_000, 92_000, imageMaxSpan, 100))
+      .toEqual({ startMs: 80_000, endMs: 80_100 });
+    expect(numberDragRange("end", 0, 0, 0, 50, 50, Math.min(100, 50)))
+      .toEqual({ startMs: 0, endMs: 50 });
+
+    // The live canvas snaps within 1.38s (9px / 600px) of the adjacent edge.
+    // Its post-snap minimum clamp must survive commit without a second snap.
+    const dragProposed = numberDragRange("end", 80_000, 80_100, 80_050, 92_000, imageMaxSpan, 100);
+    const draggedSnap = snapNumberTime(dragProposed.endMs, 92_000, [80_000], 1380);
+    const postSnap = applyNumberDragSnap("end", dragProposed, { startMs: 80_000, endMs: draggedSnap });
+    const finalRange = numberDragRange("end", dragProposed.startMs, dragProposed.endMs, postSnap.endMs, 92_000, imageMaxSpan, 100);
+    expect(finalRange).toEqual({ startMs: 80_000, endMs: 80_100 });
+    // The commit handler stores this final range directly; it must not snap it again.
+    expect(finalRange.endMs - finalRange.startMs).toBeGreaterThan(0);
+
+    // Resize writes a finite duration; null remains the reset/infinite value.
+    const saved = { ...image, display_duration_ms: resizedEnd.endMs - resizedEnd.startMs };
+    const serverEcho = normalizeNumberCueData({ ...cue, children: [master, saved] } as any);
+    expect(numberVisualActions(serverEcho as any)[0].timeline_end_ms).toBe(90_000);
+    const resetEcho = normalizeNumberCueData({ ...cue, children: [master, { ...saved, display_duration_ms: null }] } as any);
+    expect(numberVisualActions(resetEcho as any)[0].timeline_end_ms).toBe(92_000);
   });
 
   it("defaults omitted action offsets to zero", () => {

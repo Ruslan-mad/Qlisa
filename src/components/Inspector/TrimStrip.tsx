@@ -4,10 +4,59 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useLocale } from "../../i18n";
+import { beginCanvasPointer, cancelCanvasPointer, endCanvasPointer, ownsCanvasPointer } from "../Editor/sliceTimelineInteraction";
 
 export const TRIM_START_COLOR = "#60a5fa";
 export const TRIM_END_COLOR = "#fb923c";
 export const SLICE_MARKER_COLOR = "#facc15";
+export const TRIM_HANDLE_ZONE_HEIGHT = 12;
+export const TRIM_HANDLE_WIDTH = 16;
+export const TRIM_HANDLE_HIT_RADIUS = 12;
+export const TRIM_HANDLE_HIT_MARGIN = 4;
+
+export function trimHandleBaseBounds(x: number, canvasWidth: number): { left: number; right: number } {
+  if (canvasWidth <= TRIM_HANDLE_WIDTH) return { left: 0, right: Math.max(0, canvasWidth) };
+  const left = Math.max(0, Math.min(canvasWidth - TRIM_HANDLE_WIDTH, x - TRIM_HANDLE_WIDTH / 2));
+  return { left, right: left + TRIM_HANDLE_WIDTH };
+}
+
+/** Horizontal distance to the visible handle cap; Infinity means it is off-screen. */
+export function trimHandleHitDistance(pointerX: number, markerX: number, canvasWidth: number): number {
+  if (markerX < 0 || markerX > canvasWidth) return Number.POSITIVE_INFINITY;
+  const { left, right } = trimHandleBaseBounds(markerX, canvasWidth);
+  if (pointerX < left) return left - pointerX;
+  if (pointerX > right) return pointerX - right;
+  return 0;
+}
+
+/** Draw one trim stem and a solid handle above the media strip. */
+export function drawTrimMarker(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  canvasWidth: number,
+  zoneTop: number,
+  mediaTop: number,
+  bottom: number,
+  color: string,
+) {
+  if (x < 0 || x > canvasWidth) return;
+  const { left: baseLeft, right: baseRight } = trimHandleBaseBounds(x, canvasWidth);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, mediaTop);
+  ctx.lineTo(x, bottom);
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(baseLeft, zoneTop);
+  ctx.lineTo(baseRight, zoneTop);
+  ctx.lineTo(x, mediaTop);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
 
 /** Thin dashed vertical line marking a slice boundary. */
 export function drawSliceLine(
@@ -59,27 +108,6 @@ export type TrimPainter = (
   view: TrimView,
 ) => void;
 
-function drawMarker(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  height: number,
-  color: string,
-) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(x, 0);
-  ctx.lineTo(x, height);
-  ctx.stroke();
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.moveTo(x - 6, 0);
-  ctx.lineTo(x + 6, 0);
-  ctx.lineTo(x, 10);
-  ctx.closePath();
-  ctx.fill();
-}
-
 export function TrimStrip({
   durationMs,
   startMs,
@@ -87,6 +115,7 @@ export function TrimStrip({
   height,
   paint,
   paintKey,
+  resetKey,
   onCommitStart,
   onCommitEnd,
   centerLabel,
@@ -103,6 +132,8 @@ export function TrimStrip({
   paint: TrimPainter;
   /** Changes when the background data changes (triggers a repaint). */
   paintKey: unknown;
+  /** Stable cue identity. Background detail swaps do not cancel an active drag. */
+  resetKey?: unknown;
   /** Called on drag release; `null` = back to the file boundary. */
   onCommitStart: (ms: number | null) => void;
   onCommitEnd: (ms: number | null) => void;
@@ -117,6 +148,7 @@ export function TrimStrip({
 }) {
   const { t } = useLocale();
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const activePointerId = useRef<number | null>(null);
   const canvasWidth = useCanvasWidth(canvasRef);
   const [dragging, setDragging] = useState<"start" | "end" | null>(null);
   const [localStartMs, setLocalStartMs] = useState<number | null>(null);
@@ -127,7 +159,9 @@ export function TrimStrip({
   useEffect(() => {
     setLocalStartMs(null);
     setLocalEndMs(null);
-  }, [paintKey]);
+    cancelActivePointer();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey]);
 
   const effStartMs = localStartMs ?? startMs ?? 0;
   const effEndMs = localEndMs ?? endMs ?? durationMs;
@@ -146,16 +180,20 @@ export function TrimStrip({
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+    const mediaHeight = Math.max(1, height - TRIM_HANDLE_ZONE_HEIGHT);
     const startX = durationMs > 0 ? (effStartMs / durationMs) * W : 0;
     const endX = durationMs > 0 ? (effEndMs / durationMs) * W : W;
-    paint(ctx, W, height, startX, endX, { startMs: 0, endMs: durationMs });
+    ctx.save();
+    ctx.translate(0, TRIM_HANDLE_ZONE_HEIGHT);
+    paint(ctx, W, mediaHeight, startX, endX, { startMs: 0, endMs: durationMs });
     for (const m of sliceMarkersMs ?? []) {
       if (durationMs > 0 && m > 0 && m < durationMs) {
-        drawSliceLine(ctx, (m / durationMs) * W, height);
+        drawSliceLine(ctx, (m / durationMs) * W, mediaHeight);
       }
     }
-    drawMarker(ctx, startX, height, TRIM_START_COLOR);
-    drawMarker(ctx, endX, height, TRIM_END_COLOR);
+    ctx.restore();
+    drawTrimMarker(ctx, startX, W, 0, TRIM_HANDLE_ZONE_HEIGHT, height, TRIM_START_COLOR);
+    drawTrimMarker(ctx, endX, W, 0, TRIM_HANDLE_ZONE_HEIGHT, height, TRIM_END_COLOR);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paint, paintKey, effStartMs, effEndMs, durationMs, height, canvasWidth,
       (sliceMarkersMs ?? []).join(",")]);
@@ -168,24 +206,48 @@ export function TrimStrip({
     return (relX / rect.width) * durationMs;
   };
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (durationMs === 0) return;
+  const cancelActivePointer = () => {
+    const pointerId = activePointerId.current;
+    const hadPointer = cancelCanvasPointer(activePointerId);
+    const canvas = canvasRef.current;
+    if (hadPointer && pointerId !== null && canvas?.hasPointerCapture(pointerId)) {
+      canvas.releasePointerCapture(pointerId);
+    }
+    setDragging(null);
+    setCursor(null);
+    setLocalStartMs(null);
+    setLocalEndMs(null);
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (durationMs === 0 || e.button !== 0 || !e.isPrimary || activePointerId.current !== null || dragging) return;
     const rect = canvasRef.current!.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const W = rect.width;
     const sX = (effStartMs / durationMs) * W;
     const eX = (effEndMs / durationMs) * W;
-    if (Math.abs(x - sX) <= Math.abs(x - eX) && Math.abs(x - sX) < 14) {
+    const dStart = trimHandleHitDistance(x, sX, W);
+    const dEnd = trimHandleHitDistance(x, eX, W);
+    const startHit = dStart <= TRIM_HANDLE_HIT_MARGIN;
+    const endHit = dEnd <= TRIM_HANDLE_HIT_MARGIN;
+    const chooseStart = startHit && (!endHit || Math.abs(x - sX) <= Math.abs(x - eX));
+    if (chooseStart) {
+      e.preventDefault();
+      beginCanvasPointer(activePointerId, e.pointerId);
+      e.currentTarget.setPointerCapture(e.pointerId);
       setDragging("start");
       setCursor({ x: sX, width: W });
-    } else if (Math.abs(x - eX) < 14) {
+    } else if (endHit) {
+      e.preventDefault();
+      beginCanvasPointer(activePointerId, e.pointerId);
+      e.currentTarget.setPointerCapture(e.pointerId);
       setDragging("end");
       setCursor({ x: eX, width: W });
     }
   };
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!dragging) return;
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!dragging || !ownsCanvasPointer(activePointerId, e.pointerId)) return;
     const ms = xToMs(e.clientX);
     const rect = canvasRef.current!.getBoundingClientRect();
     setCursor({
@@ -199,7 +261,9 @@ export function TrimStrip({
     }
   };
 
-  const handleMouseUp = () => {
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!endCanvasPointer(activePointerId, e.pointerId)) return;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     setCursor(null);
     if (!dragging) return;
     if (dragging === "start" && localStartMs !== null) {
@@ -210,6 +274,14 @@ export function TrimStrip({
       onCommitEnd(ms >= durationMs ? null : ms);
     }
     setDragging(null);
+  };
+
+  const handlePointerCancel = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!endCanvasPointer(activePointerId, e.pointerId)) return;
+    setDragging(null);
+    setCursor(null);
+    setLocalStartMs(null);
+    setLocalEndMs(null);
   };
 
   const draggedMs = dragging === "start" ? effStartMs : effEndMs;
@@ -275,11 +347,13 @@ export function TrimStrip({
           display: "block",
           borderRadius: 4,
           cursor: dragging ? "ew-resize" : "default",
+          touchAction: "none",
         }}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+        onLostPointerCapture={handlePointerCancel}
       />
       <div
         style={{

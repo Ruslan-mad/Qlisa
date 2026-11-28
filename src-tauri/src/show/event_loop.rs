@@ -56,7 +56,20 @@ fn workspace_cue_states(workspace: &Workspace) -> Vec<(CueId, CueState)> {
     states
 }
 
-fn changed_cue_states(
+#[cfg(test)]
+pub(crate) fn cue_tree_cue_states(cue: &dyn crate::cue::traits::Cue) -> Vec<(CueId, CueState)> {
+    let mut states = Vec::new();
+    collect_cue_states(cue, &mut states);
+    states
+}
+
+pub(crate) fn cue_list_cue_states(cue_list: &CueList) -> Vec<(CueId, CueState)> {
+    let mut states = Vec::new();
+    for cue in &cue_list.cues { collect_cue_states(cue.as_ref(), &mut states); }
+    states
+}
+
+pub(crate) fn changed_cue_states(
     before: &[(CueId, CueState)],
     after: &[(CueId, CueState)],
 ) -> Vec<(CueId, CueState, CueState)> {
@@ -1127,6 +1140,11 @@ fn tick(
     });
 
     for &list_id in &cue_list_ids {
+        let tick_states_before = ws
+            .cue_list_by_id(list_id)
+            .map(cue_list_cue_states)
+            .unwrap_or_default();
+
         // 5. Tick all Running cues.
         let mut tick_fired_ids = Vec::new();
         if let Some(cl) = ws.cue_list_by_id_mut(list_id) {
@@ -1160,6 +1178,13 @@ fn tick(
                 group_child_changed = true;
             }
             all_go_fired.extend(tick_fired_ids);
+        }
+
+        if let Some(cl) = ws.cue_list_by_id(list_id) {
+            all_state_changes.extend(changed_cue_states(
+                &tick_states_before,
+                &cue_list_cue_states(cl),
+            ));
         }
 
         // 5a. A `stop_at_end` Fade that just finished asks (via take_fade_stop_targets)
@@ -1211,6 +1236,10 @@ fn tick(
         let mut newly_completed: Vec<(CueId, ContinueMode, Duration)> = Vec::new();
         let mut completed_auto_continue: Vec<(CueId, Duration)> = Vec::new();
         let mut advance_playhead_ids: Vec<CueId> = Vec::new();
+        let completion_states_before = ws
+            .cue_list_by_id(list_id)
+            .map(cue_list_cue_states)
+            .unwrap_or_default();
 
         if let Some(cl) = ws.cue_list_by_id_mut(list_id) {
             // Reap nested children whose voice completed first, so a group whose
@@ -1261,6 +1290,16 @@ fn tick(
                     newly_completed.push((id, cm, pw));
                 }
             }
+        }
+
+        // The scheduler can complete a parent and reset every descendant
+        // during this tick. Capture that whole state transition so the UI
+        // refreshes nested cue rows as well as the top-level cue.
+        if let Some(cl) = ws.cue_list_by_id(list_id) {
+            all_state_changes.extend(changed_cue_states(
+                &completion_states_before,
+                &cue_list_cue_states(cl),
+            ));
         }
 
         if !number_finish_starts.is_empty() {
@@ -1663,6 +1702,11 @@ fn tick(
     // ------------------------------------------------------------------
 
     for (cue_id, _, _) in &newly_completed {
+        if all_state_changes.iter().any(|(changed_id, old_state, new_state)| {
+            changed_id == cue_id && *old_state == CueState::Running && *new_state == CueState::Standby
+        }) {
+            continue;
+        }
         let _ = handle.emit(
             "cue-state-changed",
             serde_json::json!({
@@ -1992,17 +2036,50 @@ fn format_timer(ms: u64, show_ms: bool) -> String {
     #[cfg(test)]
     mod tests {
     use super::{
-        append_wait_clear_snapshots, merge_wait_snapshot, ordered_ready_continuations,
+        append_wait_clear_snapshots, changed_cue_states, cue_list_cue_states,
+        merge_wait_snapshot, ordered_ready_continuations,
         pending_continuation_is_valid,
         pending_continuation_status, preview_playhead_payload, progress_values,
         should_complete_with_voice_state, CueTimeSnapshot, PendingContinuation,
         PendingContinuationStatus,
     };
-    use crate::cue::{memo_cue::MemoCue, traits::Cue, types::ContinueMode, wait_cue::WaitCue};
+    use crate::cue::{
+        memo_cue::MemoCue,
+        timer_cue::TimerCue,
+        traits::{Cue, RuntimeState},
+        types::{ContinueMode, CueState},
+        wait_cue::WaitCue,
+    };
     use crate::show::cue_list::CueList;
     use crate::state::PreviewSession;
     use std::time::{Duration, Instant};
     use uuid::Uuid;
+
+    #[test]
+    fn tick_state_snapshots_are_scoped_to_their_cue_list() {
+        let mut first_list = CueList::new("first");
+        let first = WaitCue::new();
+        first_list.push(Box::new(first));
+        let mut second_list = CueList::new("second");
+        let second = TimerCue::new();
+        let second_id = second.id();
+        second_list.push(Box::new(second));
+
+        let first_before = cue_list_cue_states(&first_list);
+        let second_before = cue_list_cue_states(&second_list);
+        second_list.get_mut(&second_id).unwrap().restore_runtime_state(RuntimeState {
+            state: CueState::Running,
+            voice_id: None,
+            started_at: None,
+            action_started_at: None,
+        });
+
+        assert!(changed_cue_states(&first_before, &cue_list_cue_states(&first_list)).is_empty());
+        assert_eq!(
+            changed_cue_states(&second_before, &cue_list_cue_states(&second_list)),
+            vec![(second_id, CueState::Standby, CueState::Running)],
+        );
+    }
 
     #[test]
     fn pending_number_wait_updates_only_existing_wait_fields() {

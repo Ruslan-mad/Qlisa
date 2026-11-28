@@ -3,9 +3,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { GainEnvelopePoint, SliceList, WaveformData } from "../../lib/types";
-import type { TrimPainter } from "../Inspector/TrimStrip";
-import type { TrimView } from "../Inspector/TrimStrip";
-import { useCanvasWidth } from "../Inspector/TrimStrip";
+import type { TrimPainter, TrimView } from "../Inspector/TrimStrip";
+import { TRIM_END_COLOR, TRIM_HANDLE_HIT_MARGIN, TRIM_HANDLE_HIT_RADIUS, TRIM_HANDLE_ZONE_HEIGHT, TRIM_START_COLOR, drawTrimMarker, trimHandleHitDistance, useCanvasWidth } from "../Inspector/TrimStrip";
 import { applyNumberDragSnap, numberDragRange } from "./numberTimelineModel";
 import { mediaSourceMsAtPixel, panTimelineView, sourceRangeForTimelinePass, waveformBinAtSourceMs, zoomTimelineView } from "./timelineViewModel";
 import { useTimelineEditorStore } from "../../stores/timelineEditorStore";
@@ -13,6 +12,8 @@ import { useLocale } from "../../i18n";
 import { formatDurationMs } from "../CueList/formatDuration";
 import { GainEnvelopeOverlay } from "./GainEnvelopeOverlay";
 import type { AudioFadeOverlay, FadeDirection } from "./audioFadeModel";
+import { drawVideoFilmstripWindows, type VideoFilmstripWindow } from "./videoFilmstripModel";
+import { beginCanvasPointer, cancelCanvasPointer, endCanvasPointer, ownsCanvasPointer } from "./sliceTimelineInteraction";
 
 const SLICE_COLOR = "#facc15";
 
@@ -23,40 +24,45 @@ export interface NumberTimelineTrack {
   endMs: number;
   master?: boolean;
   cueType?: "audio" | "video" | "image" | "group";
-  media?: { waveform?: WaveformData | null; tiles?: HTMLImageElement[] | null };
+  media?: { waveform?: WaveformData | null; tiles?: HTMLImageElement[] | null; filmstrips?: VideoFilmstripWindow[] };
+  sourcePath?: string | null;
+  sourceRevision?: string | null;
   sourceStartMs?: number;
   sourceEndMs?: number;
   /** Maximum one-pass source span available for edge resizing. */
   maxDurationMs?: number;
   /** Repeat the source pass until endMs instead of stretching it. */
   looped?: boolean;
+  /** Source media runs at this speed on the Number clock. */
+  rate?: number;
   /** Group headers and nested children are display-only until nested editing is wired. */
   readonly?: boolean;
   /** Child media blocks rendered inside one container row. */
   segments?: NumberTimelineTrack[];
 }
 
-function marker(ctx: CanvasRenderingContext2D, x: number, h: number, color: string, dashed = false) {
+function fillEllipsizedLabel(ctx: CanvasRenderingContext2D, label: string, x: number, y: number, maxWidth: number) {
+  if (maxWidth < 24) return;
+  let text = label;
+  while (text.length > 1 && ctx.measureText(text).width > maxWidth) text = `${text.slice(0, -2)}…`;
+  if (ctx.measureText(text).width <= maxWidth) ctx.fillText(text, x, y);
+}
+
+function drawSliceMarker(ctx: CanvasRenderingContext2D, x: number, top: number, bottom: number, color: string) {
   ctx.save();
   ctx.strokeStyle = color;
-  ctx.lineWidth = dashed ? 1.5 : 2;
-  if (dashed) ctx.setLineDash([5, 3]);
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 3]);
   ctx.beginPath();
-  ctx.moveTo(x, 0);
-  ctx.lineTo(x, h);
+  ctx.moveTo(x, top);
+  ctx.lineTo(x, bottom);
   ctx.stroke();
   ctx.setLineDash([]);
   ctx.fillStyle = color;
   ctx.beginPath();
-  if (dashed) {
-    ctx.moveTo(x - 5, h);
-    ctx.lineTo(x + 5, h);
-    ctx.lineTo(x, h - 8);
-  } else {
-    ctx.moveTo(x - 6, 0);
-    ctx.lineTo(x + 6, 0);
-    ctx.lineTo(x, 10);
-  }
+  ctx.moveTo(x - 5, bottom);
+  ctx.lineTo(x + 5, bottom);
+  ctx.lineTo(x, bottom - 8);
   ctx.closePath();
   ctx.fill();
   ctx.restore();
@@ -96,6 +102,8 @@ export interface LiveTimelineProps {
   onAudioFadeDurationChange?: (direction: FadeDirection, durationMs: number) => void;
   /** Optional multi-track Number overlay rendered in this same native canvas. */
   numberTracks?: NumberTimelineTrack[];
+  /** Disable operator track selection while preserving Number timeline seek. */
+  selectNumberTracks?: boolean;
   /** Keep Number timing bands out of non-Number views that reuse its track overlay. */
   showNumberTimingBands?: boolean;
   /** Number-only timing bands. The track clock remains action-relative. */
@@ -134,6 +142,7 @@ export function LiveTimeline({
   audioFadeContextKey,
   onAudioFadeDurationChange,
   numberTracks = [],
+  selectNumberTracks = true,
   showNumberTimingBands = true,
   numberPreWaitMs = 0,
   numberPostWaitMs = 0,
@@ -143,6 +152,7 @@ export function LiveTimeline({
 }: LiveTimelineProps) {
   const { t, locale } = useLocale();
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const activePointerId = useRef<number | null>(null);
   const canvasWidth = useCanvasWidth(canvasRef);
   const [dragging, setDragging] = useState(false);
   const [view, setView] = useState<{ s: number; e: number } | null>(null);
@@ -159,6 +169,8 @@ export function LiveTimeline({
     moved: boolean;
   } | null>(null);
   const numberMode = numberTracks.length > 0;
+  const timelineContentTop = numberMode ? 0 : TRIM_HANDLE_ZONE_HEIGHT;
+  const timelineContentHeight = Math.max(1, height - timelineContentTop);
   const editLocked = useTimelineEditorStore((state) => state.locked);
   const toggleEditLock = useTimelineEditorStore((state) => state.toggle);
   const numberTotalTimingMs = Math.max(1, numberPreWaitMs + durationMs + numberPostWaitMs);
@@ -168,13 +180,28 @@ export function LiveTimeline({
   const lastPositionRef = useRef(0);
   viewRef.current = view;
 
+  const cancelActivePointer = () => {
+    const pointerId = activePointerId.current;
+    const hadPointer = cancelCanvasPointer(activePointerId);
+    const canvas = canvasRef.current;
+    if (hadPointer && pointerId !== null && canvas?.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+    setNumberDrag(null);
+    setDragging(false);
+  };
+
   // A lock can be enabled while a drag is already active. Invalidate the
   // transient drag so a later browser mouseup cannot commit that edit.
   useEffect(() => {
     if (!editLocked) return;
-    setNumberDrag(null);
-    setDragging(false);
+    cancelActivePointer();
   }, [editLocked]);
+
+  useEffect(() => {
+    cancelActivePointer();
+    // A new cue/Number invalidates an in-flight gesture. Paint detail updates
+    // are deliberately excluded from resetKey.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetKey]);
 
   const visible = view ?? { s: 0, e: durationMs };
   const span = Math.max(1, visible.e - visible.s);
@@ -241,7 +268,14 @@ export function LiveTimeline({
     if (!ctx) return;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const toX = (ms: number) => ((ms - visible.s) / span) * width;
-    paint(ctx, width, height, toX(startMs ?? 0), toX(endMs ?? durationMs), { startMs: visible.s, endMs: visible.e });
+    if (timelineContentTop > 0) {
+      ctx.save();
+      ctx.translate(0, timelineContentTop);
+      paint(ctx, width, timelineContentHeight, toX(startMs ?? 0), toX(endMs ?? durationMs), { startMs: visible.s, endMs: visible.e });
+      ctx.restore();
+    } else {
+      paint(ctx, width, timelineContentHeight, toX(startMs ?? 0), toX(endMs ?? durationMs), { startMs: visible.s, endMs: visible.e });
+    }
     if (numberMode) {
       const rowH = height / numberTracks.length;
       const renderedTracks = numberTracks.map((track) => numberDrag?.track.id === track.id
@@ -251,6 +285,9 @@ export function LiveTimeline({
         const top = index * rowH;
         const x0 = toX(track.startMs);
         const x1 = toX(track.endMs);
+        const hasChildHandles = !track.master && !track.readonly;
+        const trackContentTop = top + 3;
+        const trackContentHeight = Math.max(2, rowH - 6);
         ctx.fillStyle = track.master ? "rgba(15,23,42,.42)" : "rgba(2,6,23,.58)";
         ctx.fillRect(0, top, width, rowH);
         const drawMedia = (
@@ -265,14 +302,22 @@ export function LiveTimeline({
           waveformHeight: number,
         ) => {
           const tiles = media?.tiles;
-          if (tiles?.length && visualHeight > 1) {
-            tiles.forEach((image, tile) => {
-              const t0 = toX(mediaStart + tile * (mediaEnd - mediaStart) / tiles.length), t1 = toX(mediaStart + (tile + 1) * (mediaEnd - mediaStart) / tiles.length);
-              if (t1 < 0 || t0 > width) return;
-              const cellW = Math.max(1, t1 - t0), scale = Math.max(cellW / image.width, visualHeight / image.height);
-              const dw = image.width * scale, dh = image.height * scale;
-              ctx.save(); ctx.beginPath(); ctx.rect(t0, visualTop, cellW, visualHeight); ctx.clip();
-              ctx.drawImage(image, t0 + (cellW - dw) / 2, visualTop + (visualHeight - dh) / 2, dw, dh); ctx.restore();
+          const strips = media?.filmstrips?.length
+            ? media.filmstrips
+            : tiles?.length
+              ? [{ sourceStartMs: sourceStart, sourceEndMs: sourceEnd, tiles }]
+              : [];
+          if (strips.length && visualHeight > 1) {
+            drawVideoFilmstripWindows(ctx, strips, {
+              timelineStartMs: mediaStart,
+              timelineEndMs: mediaEnd,
+              sourceStartMs: sourceStart,
+              sourceEndMs: sourceEnd,
+              viewStartMs: visible.s,
+              viewEndMs: visible.e,
+              width,
+              top: visualTop,
+              height: visualHeight,
             });
             ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, visualTop, width, visualHeight);
           }
@@ -294,8 +339,8 @@ export function LiveTimeline({
         const sourceStart = track.sourceStartMs ?? 0;
         const sourceEnd = track.sourceEndMs ?? Math.max(1, track.endMs - track.startMs);
         const sourceSpan = Math.max(1, sourceEnd - sourceStart);
-        const contentTop = top + 3;
-        const contentHeight = Math.max(2, rowH - 6);
+        const rate = Number.isFinite(track.rate) && (track.rate ?? 0) > 0 ? track.rate! : 1;
+        const timelinePassDuration = sourceSpan / rate;
         if (!track.master) {
           const fill = track.cueType === "video" ? "rgba(37,99,235,.24)"
             : track.cueType === "image" ? "rgba(168,85,247,.24)"
@@ -304,21 +349,21 @@ export function LiveTimeline({
           // Paint the cue tint first. Filmstrip and waveform pixels must stay
           // above it instead of being hidden by a later solid rectangle.
           ctx.fillStyle = fill;
-          ctx.fillRect(Math.max(0, x0), contentTop, Math.max(5, x1 - x0), contentHeight);
+          ctx.fillRect(Math.max(0, x0), trackContentTop, Math.max(5, x1 - x0), trackContentHeight);
         }
         const hasVideoWaveform = track.cueType === "video" && !!track.media?.tiles?.length && !!track.media?.waveform?.peaks?.length;
-        const waveformHeight = hasVideoWaveform ? Math.max(8, Math.floor(contentHeight * 0.36)) : contentHeight;
-        const visualHeight = hasVideoWaveform ? Math.max(2, contentHeight - waveformHeight - 1) : contentHeight;
-        const waveformTop = hasVideoWaveform ? contentTop + visualHeight + 1 : contentTop;
+        const waveformHeight = hasVideoWaveform ? Math.max(8, Math.floor(trackContentHeight * 0.36)) : trackContentHeight;
+        const visualHeight = hasVideoWaveform ? Math.max(2, trackContentHeight - waveformHeight - 1) : trackContentHeight;
+        const waveformTop = hasVideoWaveform ? trackContentTop + visualHeight + 1 : trackContentTop;
         const drawPass = (passStart: number, passEnd: number) => {
-          const sourceRange = sourceRangeForTimelinePass(passStart, passEnd, sourceStart, sourceEnd);
+          const sourceRange = sourceRangeForTimelinePass(passStart, passEnd, sourceStart, sourceEnd, rate);
           drawMedia(
             track.media,
             passStart,
             passEnd,
             sourceRange.startMs,
             sourceRange.endMs,
-            contentTop,
+            trackContentTop,
             visualHeight,
             waveformTop,
             waveformHeight,
@@ -328,8 +373,8 @@ export function LiveTimeline({
           // Keep each pass at source duration. A short looping video therefore
           // reads as repeated filmstrip blocks/waveforms instead of a fake
           // stretched clip.
-          for (let passStart = track.startMs; passStart < track.endMs; passStart += sourceSpan) {
-            drawPass(passStart, Math.min(track.endMs, passStart + sourceSpan));
+          for (let passStart = track.startMs; passStart < track.endMs; passStart += timelinePassDuration) {
+            drawPass(passStart, Math.min(track.endMs, passStart + timelinePassDuration));
           }
         } else {
           drawPass(track.startMs, track.endMs);
@@ -338,30 +383,49 @@ export function LiveTimeline({
         // as segments in that row instead of allocating one lane per child.
         if (track.segments?.length) {
           track.segments.forEach((segment) => {
-            const segmentTop = contentTop;
+            const segmentTop = trackContentTop;
             const segmentSourceStart = segment.sourceStartMs ?? 0;
             const segmentSourceEnd = segment.sourceEndMs ?? Math.max(1, segment.endMs - segment.startMs);
             ctx.fillStyle = segment.cueType === "video" ? "rgba(37,99,235,.28)" : "rgba(22,163,74,.28)";
             const segmentX = Math.max(0, toX(segment.startMs));
             const segmentWidth = Math.max(5, toX(segment.endMs) - toX(segment.startMs));
-            ctx.fillRect(segmentX, segmentTop, segmentWidth, contentHeight);
+            ctx.fillRect(segmentX, segmentTop, segmentWidth, trackContentHeight);
             const segmentHasVideo = segment.cueType === "video" && !!segment.media?.tiles?.length && !!segment.media?.waveform?.peaks?.length;
-            const segmentWaveformHeight = segmentHasVideo ? Math.max(8, Math.floor(contentHeight * 0.36)) : contentHeight;
-            const segmentVisualHeight = segmentHasVideo ? Math.max(2, contentHeight - segmentWaveformHeight - 1) : contentHeight;
+            const segmentWaveformHeight = segmentHasVideo ? Math.max(8, Math.floor(trackContentHeight * 0.36)) : trackContentHeight;
+            const segmentVisualHeight = segmentHasVideo ? Math.max(2, trackContentHeight - segmentWaveformHeight - 1) : trackContentHeight;
             const segmentWaveformTop = segmentHasVideo ? segmentTop + segmentVisualHeight + 1 : segmentTop;
             // Keep nested media inside its Group lane. Audio waveforms use the
             // full segment height; video splits that height below its filmstrip.
             ctx.save();
             ctx.beginPath();
-            ctx.rect(segmentX, segmentTop, segmentWidth, contentHeight);
+            ctx.rect(segmentX, segmentTop, segmentWidth, trackContentHeight);
             ctx.clip();
-            drawMedia(segment.media, segment.startMs, segment.endMs, segmentSourceStart, segmentSourceEnd, segmentTop, segmentVisualHeight, segmentWaveformTop, segmentWaveformHeight);
+            const segmentRate = Number.isFinite(segment.rate) && (segment.rate ?? 0) > 0 ? segment.rate! : 1;
+            const segmentPassDuration = Math.max(1, (segmentSourceEnd - segmentSourceStart) / segmentRate);
+            const drawSegmentPass = (passStart: number, passEnd: number) => {
+              const sourceRange = sourceRangeForTimelinePass(passStart, passEnd, segmentSourceStart, segmentSourceEnd, segmentRate);
+              drawMedia(segment.media, passStart, passEnd, sourceRange.startMs, sourceRange.endMs, segmentTop, segmentVisualHeight, segmentWaveformTop, segmentWaveformHeight);
+            };
+            if (segment.looped) {
+              for (let passStart = segment.startMs; passStart < segment.endMs; passStart += segmentPassDuration) {
+                drawSegmentPass(passStart, Math.min(segment.endMs, passStart + segmentPassDuration));
+              }
+            } else {
+              drawSegmentPass(segment.startMs, segment.endMs);
+            }
             ctx.restore();
             ctx.strokeStyle = segment.cueType === "video" ? "#93c5fd" : "#86efac";
-            ctx.strokeRect(segmentX, segmentTop, segmentWidth, contentHeight);
+            ctx.strokeRect(segmentX, segmentTop, segmentWidth, trackContentHeight);
             ctx.fillStyle = "rgba(226,232,240,.9)";
             ctx.font = "10px sans-serif";
-            ctx.fillText(segment.name, Math.max(7, segmentX + 4), segmentTop + 11);
+            if (trackContentHeight >= 40 && segmentWidth >= 48) {
+              ctx.save();
+              ctx.beginPath();
+              ctx.rect(segmentX + 3, segmentTop + 2, Math.max(0, segmentWidth - 6), 14);
+              ctx.clip();
+              fillEllipsizedLabel(ctx, segment.name, segmentX + 4, segmentTop + 11, segmentWidth - 8);
+              ctx.restore();
+            }
           });
         }
         if (hasVideoWaveform) {
@@ -380,27 +444,51 @@ export function LiveTimeline({
         const trackLabel = track.master
           ? `${masterLabel.charAt(0).toUpperCase()}${masterLabel.slice(1)} · ${track.name}`
           : track.name;
-        ctx.fillText(trackLabel, 7, top + rowH / 2 + 4);
         if (!track.master) {
           const border = track.cueType === "video" ? "#93c5fd"
             : track.cueType === "image" ? "#d8b4fe"
               : track.cueType === "group" ? "#fde047"
               : "#86efac";
           ctx.strokeStyle = border;
-          ctx.strokeRect(Math.max(0, x0), top + 3, Math.max(5, x1 - x0), Math.max(2, rowH - 6));
+          ctx.strokeRect(Math.max(0, x0), trackContentTop, Math.max(5, x1 - x0), trackContentHeight);
+          if (hasChildHandles) {
+            drawTrimMarker(ctx, x0, width, top, top + TRIM_HANDLE_ZONE_HEIGHT, top + rowH, TRIM_START_COLOR);
+            drawTrimMarker(ctx, x1, width, top, top + TRIM_HANDLE_ZONE_HEIGHT, top + rowH, TRIM_END_COLOR);
+          }
         }
-        if (selectedNumberTrackId === track.id) {
+        const labelY = hasChildHandles ? top + rowH - 3 : top + rowH / 2 + 4;
+        const visibleLeft = track.master ? 0 : Math.max(0, Math.min(width, x0));
+        const visibleRight = track.master ? width : Math.max(visibleLeft, Math.min(width, x1));
+        const labelX = track.master ? 7 : Math.max(visibleLeft + 4, Math.min(visibleRight - 4, x0 + 4));
+        const labelWidth = Math.max(0, visibleRight - visibleLeft - (track.master ? 14 : 8));
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(visibleLeft, top, Math.max(0, visibleRight - visibleLeft), rowH);
+        ctx.clip();
+        fillEllipsizedLabel(ctx, trackLabel, labelX, labelY, labelWidth);
+        ctx.restore();
+        if (selectNumberTracks && selectedNumberTrackId === track.id) {
           ctx.strokeStyle = "#f8fafc"; ctx.lineWidth = 2; ctx.strokeRect(1, top + 1, width - 2, rowH - 2);
         }
       });
     }
     // Trim and slice data are deliberately overlays: they have no hit target
     // and cannot be edited from Live.
-    marker(ctx, toX(startMs ?? 0), height, "#38bdf8");
-    marker(ctx, toX(endMs ?? durationMs), height, "#fb923c");
+    if (numberMode) {
+      ctx.save();
+      ctx.strokeStyle = TRIM_START_COLOR;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(toX(startMs ?? 0), 0); ctx.lineTo(toX(startMs ?? 0), height); ctx.stroke();
+      ctx.strokeStyle = TRIM_END_COLOR;
+      ctx.beginPath(); ctx.moveTo(toX(endMs ?? durationMs), 0); ctx.lineTo(toX(endMs ?? durationMs), height); ctx.stroke();
+      ctx.restore();
+    } else {
+      drawTrimMarker(ctx, toX(startMs ?? 0), width, 0, timelineContentTop, height, TRIM_START_COLOR);
+      drawTrimMarker(ctx, toX(endMs ?? durationMs), width, 0, timelineContentTop, height, TRIM_END_COLOR);
+    }
     for (const m of slices.markers) {
       if (m > (startMs ?? 0) && m < (endMs ?? durationMs) && m >= visible.s && m <= visible.e) {
-        marker(ctx, toX(m), height, SLICE_COLOR, true);
+        drawSliceMarker(ctx, toX(m), timelineContentTop, height, SLICE_COLOR);
       }
     }
     if (mediaPositionMs != null) {
@@ -412,7 +500,7 @@ export function LiveTimeline({
       ctx.shadowColor = "rgba(0,0,0,.8)";
       ctx.shadowBlur = 4;
       ctx.beginPath();
-      ctx.moveTo(x, 0);
+      ctx.moveTo(x, timelineContentTop);
       ctx.lineTo(x, height);
       ctx.stroke();
       ctx.fillStyle = "#f8fafc";
@@ -432,23 +520,23 @@ export function LiveTimeline({
       ctx.lineWidth = 1.5;
       ctx.setLineDash([4, 3]);
       ctx.beginPath();
-      ctx.moveTo(x, 0);
+      ctx.moveTo(x, timelineContentTop);
       ctx.lineTo(x, height);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.fillStyle = "#facc15";
       ctx.beginPath();
-      ctx.moveTo(x - 4, 0);
-      ctx.lineTo(x + 4, 0);
-      ctx.lineTo(x, 7);
+      ctx.moveTo(x - 4, timelineContentTop);
+      ctx.lineTo(x + 4, timelineContentTop);
+      ctx.lineTo(x, timelineContentTop + 7);
       ctx.closePath();
       ctx.fill();
       ctx.restore();
     }
-  }, [t, locale, paint, paintKey, startMs, endMs, slices, durationMs, height, visible.s, visible.e, span, mediaPositionMs, previewPositionMs, canvasWidth, numberMode, numberTracks, numberDrag, selectedNumberTrackId]);
+  }, [t, locale, paint, paintKey, startMs, endMs, slices, durationMs, height, visible.s, visible.e, span, mediaPositionMs, previewPositionMs, canvasWidth, numberMode, numberTracks, numberDrag, selectedNumberTrackId, selectNumberTracks]);
 
-  const positionFromEvent = (e: React.MouseEvent<HTMLCanvasElement>) => xToMs(e.clientX);
-  const numberTrackFromEvent = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const positionFromEvent = (e: React.PointerEvent<HTMLCanvasElement>) => xToMs(e.clientX);
+  const numberTrackFromEvent = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!numberMode || numberTracks.length === 0) return null;
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return null;
@@ -456,18 +544,29 @@ export function LiveTimeline({
       Math.floor(((e.clientY - rect.top) / Math.max(1, rect.height)) * numberTracks.length)));
     return numberTracks[index] ?? null;
   };
-  const numberDragFromEvent = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const numberDragFromEvent = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (editLocked) return null;
     const track = numberTrackFromEvent(e);
     if (!track || track.master || track.readonly) return null;
     const at = positionFromEvent(e);
-    const px = canvasRef.current?.getBoundingClientRect().width ?? 1;
-    const edge = (span / Math.max(1, px)) * 9;
-    const kind = Math.abs(at - track.startMs) <= edge ? "start"
-      : Math.abs(at - track.endMs) <= edge ? "end" : "move";
+    const rect = canvasRef.current?.getBoundingClientRect();
+    const px = rect?.width ?? 1;
+    const pointerX = rect ? e.clientX - rect.left : 0;
+    const startX = ((track.startMs - visible.s) / span) * px;
+    const endX = ((track.endMs - visible.s) / span) * px;
+    const startCenterDistance = Math.abs(pointerX - startX);
+    const endCenterDistance = Math.abs(pointerX - endX);
+    const startCapDistance = trimHandleHitDistance(pointerX, startX, px);
+    const endCapDistance = trimHandleHitDistance(pointerX, endX, px);
+    const startCapHit = startCapDistance <= TRIM_HANDLE_HIT_MARGIN;
+    const endCapHit = endCapDistance <= TRIM_HANDLE_HIT_MARGIN;
+    const startHit = startCapHit || startCenterDistance <= TRIM_HANDLE_HIT_RADIUS;
+    const endHit = endCapHit || endCenterDistance <= TRIM_HANDLE_HIT_RADIUS;
+    const kind = startHit && (!endHit || startCenterDistance <= endCenterDistance) ? "start"
+      : endHit ? "end" : "move";
     return { track, kind: kind as "move" | "start" | "end", at };
   };
-  const announcePosition = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const announcePosition = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const ms = Math.round(positionFromEvent(e));
     lastPositionRef.current = ms;
     if (seekEnabled) onSeek?.(ms);
@@ -491,6 +590,27 @@ export function LiveTimeline({
     // otherwise stale zoomed frames can remain visible after Fit.
     onViewChange?.(null);
   };
+  const gainMasterIndex = gainEnvelopeReadOnly && numberMode
+    ? numberTracks.findIndex((track) => track.master)
+    : -1;
+  const gainOverlayHeight = gainMasterIndex >= 0 ? height / Math.max(1, numberTracks.length) : timelineContentHeight;
+  const gainOverlay = (
+    <GainEnvelopeOverlay
+      points={gainEnvelope}
+      durationMs={durationMs}
+      view={{ startMs: visible.s, endMs: visible.e }}
+      width={canvasWidth}
+      height={gainOverlayHeight}
+      editable={gainEnvelopeEditable && !editLocked}
+      strokeWidth={gainEnvelopeReadOnly ? 2 : 4}
+      alwaysShowLabels={gainEnvelopeReadOnly}
+      fade={audioFade}
+      fadeEditable={audioFadeEditable && !editLocked}
+      fadeContextKey={audioFadeContextKey}
+      onFadeDurationChange={onAudioFadeDurationChange}
+      onCommit={onGainEnvelopeChange}
+    />
+  );
 
   return (
     <div
@@ -548,19 +668,22 @@ export function LiveTimeline({
         <canvas
           ref={canvasRef}
           aria-label={previewPositionMs != null ? `Live media timeline; ${previewLabel.toLowerCase()} active` : "Live media timeline"}
-          style={{ width: "100%", height, display: "block", borderRadius: 4, cursor: numberMode ? (numberDrag ? "ew-resize" : "crosshair") : (seekEnabled ? "crosshair" : "default") }}
-          onMouseDown={(e) => {
-          if (e.button !== 0) return;
+          style={{ width: "100%", height, display: "block", borderRadius: 4, cursor: numberMode ? (numberDrag ? "ew-resize" : "crosshair") : (seekEnabled ? "crosshair" : "default"), touchAction: "none" }}
+          onPointerDown={(e) => {
+          if (e.button !== 0 || !e.isPrimary || activePointerId.current !== null) return;
           // The timeline lock is a complete position lock.  It must prevent
           // seeking/scrubbing as well as move/trim/slice edits.  Returning at
           // the event boundary also prevents a click from selecting another
           // Number layer or changing the preview cursor.
           if (editLocked) return;
+          e.preventDefault();
+          beginCanvasPointer(activePointerId, e.pointerId);
+          e.currentTarget.setPointerCapture(e.pointerId);
           if (numberMode) {
             const at = positionFromEvent(e);
             lastPositionRef.current = Math.round(at);
             const row = numberTrackFromEvent(e);
-            if (row) setSelectedNumberTrackId(row.id);
+            if (row && selectNumberTracks) setSelectedNumberTrackId(row.id);
             const hit = numberDragFromEvent(e);
             if (hit) setNumberDrag({
               track: hit.track,
@@ -578,7 +701,11 @@ export function LiveTimeline({
           }
           setDragging(true); announcePosition(e);
           }}
-          onMouseMove={(e) => {
+          onPointerMove={(e) => {
+          if (!ownsCanvasPointer(activePointerId, e.pointerId)) {
+            setHoverMs(positionFromEvent(e));
+            return;
+          }
           setHoverMs(positionFromEvent(e));
           if (editLocked) {
             // A lock blocks every position-changing operation.  Cancel any
@@ -611,13 +738,27 @@ export function LiveTimeline({
               pointerMs,
               durationMs,
               numberDrag.maxDurationMs,
+              numberDrag.track.cueType === "image" ? Math.min(100, durationMs) : 0,
             );
             const snapped = onNumberTrackSnap?.(numberDrag.track, numberDrag.kind, proposed.startMs, proposed.endMs) ?? proposed;
-            const next = applyNumberDragSnap(numberDrag.kind, proposed, snapped);
+            const snappedRange = applyNumberDragSnap(numberDrag.kind, proposed, snapped);
+            const next = numberDrag.track.cueType === "image" && numberDrag.kind !== "move"
+              ? numberDragRange(
+                  numberDrag.kind,
+                  proposed.startMs,
+                  proposed.endMs,
+                  numberDrag.kind === "start" ? snappedRange.startMs : snappedRange.endMs,
+                  durationMs,
+                  numberDrag.maxDurationMs,
+                  Math.min(100, durationMs),
+                )
+              : snappedRange;
             setNumberDrag({ ...numberDrag, startMs: next.startMs, endMs: next.endMs, moved });
           } else if (dragging) announcePosition(e);
           }}
-          onMouseUp={() => {
+          onPointerUp={(e) => {
+          if (!endCanvasPointer(activePointerId, e.pointerId)) return;
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
           if (editLocked) {
             setNumberDrag(null);
             setDragging(false);
@@ -633,40 +774,28 @@ export function LiveTimeline({
           else if (dragging) finishPosition();
           setDragging(false);
           }}
-          onMouseLeave={() => {
-          if (editLocked) {
+          onPointerCancel={(e) => {
+            if (!endCanvasPointer(activePointerId, e.pointerId)) return;
             setNumberDrag(null);
             setDragging(false);
-            setHoverMs(null);
-            return;
-          }
-          if (numberDrag) {
-            const d = numberDrag;
-            setNumberDrag(null);
-            if (d.moved) onNumberTrackChange?.(d.track, d.kind, d.startMs, d.endMs);
-            else announceNumberPosition(lastPositionRef.current);
-            if (!d.moved) onPreviewPositionEnd?.(lastPositionRef.current);
-          } else if (numberMode) onPreviewPositionEnd?.(lastPositionRef.current);
-          if (dragging) finishPosition();
-          setDragging(false); setHoverMs(null);
           }}
+          onLostPointerCapture={(e) => {
+            if (!endCanvasPointer(activePointerId, e.pointerId)) return;
+            setNumberDrag(null);
+            setDragging(false);
+          }}
+          onPointerLeave={() => setHoverMs(null)}
         />
         {(gainEnvelopeEditable || gainEnvelopeReadOnly) && (!numberMode || gainEnvelopeReadOnly) && (
-          <GainEnvelopeOverlay
-            points={gainEnvelope}
-            durationMs={durationMs}
-            view={{ startMs: visible.s, endMs: visible.e }}
-            width={canvasWidth}
-            height={height}
-            editable={gainEnvelopeEditable && !editLocked}
-            strokeWidth={gainEnvelopeReadOnly ? 2 : 4}
-            alwaysShowLabels={gainEnvelopeReadOnly}
-            fade={audioFade}
-            fadeEditable={audioFadeEditable && !editLocked}
-            fadeContextKey={audioFadeContextKey}
-            onFadeDurationChange={onAudioFadeDurationChange}
-            onCommit={onGainEnvelopeChange}
-          />
+          gainMasterIndex >= 0 ? (
+            <div style={{ position: "absolute", left: 0, right: 0, top: gainMasterIndex * gainOverlayHeight, height: gainOverlayHeight, zIndex: 2, pointerEvents: "none" }}>
+              {gainOverlay}
+            </div>
+          ) : numberMode && gainEnvelopeReadOnly ? null : (
+            <div style={{ position: "absolute", left: 0, right: 0, top: timelineContentTop, height: timelineContentHeight, zIndex: 2, pointerEvents: "none" }}>
+              {gainOverlay}
+            </div>
+          )
         )}
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--wc-text-faint)", marginTop: 3 }}>

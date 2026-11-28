@@ -302,6 +302,25 @@ impl Cue for BrowserCue {
         self.action_started_at_value = snap.action_started_at;
     }
 
+    fn runtime_extension(&self) -> Option<Value> {
+        Some(json!({
+            "play_generation": self.marker.generation(),
+            "auto_continue_fired": self.marker.is_fired(),
+        }))
+    }
+
+    fn restore_runtime_extension(&mut self, value: Value) {
+        let generation = value
+            .get("play_generation")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let fired = value
+            .get("auto_continue_fired")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.marker.restore(generation, fired);
+    }
+
     fn serialize(&self) -> Value {
         json!({
             "type": "browser", "cue_type": "browser", "id": self.id,

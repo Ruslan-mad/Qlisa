@@ -253,6 +253,17 @@ impl AudioEngineApi for AudioEngine {
 
 /// The output-engine operations the cue and transport layers depend on.
 pub trait OutputEngineApi: Send + Sync {
+    /// Reserve a request-order token. Concrete engines share one allocator
+    /// across output destinations; test doubles can use this fallback.
+    fn next_layer_order(&self) -> u64 {
+        static FALLBACK_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        FALLBACK_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+    /// Move an already-loaded/preloaded visual into a Number's ordering group
+    /// before it is revealed. The concrete engine updates every output member.
+    fn set_voice_layer_order(&self, _voice_id: VoiceId, _group_order: Option<u64>) -> bool {
+        false
+    }
     /// Start the application's single shared external Browser WebView.
     /// Compatibility test doubles can leave this unsupported.
     fn start_browser_surface(
@@ -379,7 +390,9 @@ pub trait OutputEngineApi: Send + Sync {
         layer_style: super::output_engine::LayerStyle,
         fade_in_ms: u32,
         geometry_by_output: &std::collections::HashMap<String, super::output_engine::VideoGeometry>,
+        layer_group_order: Option<u64>,
     ) -> Result<VoiceId> {
+        let _ = layer_group_order;
         if output_ids.is_empty() {
             if output_id.is_none() && !geometry_by_output.is_empty() {
                 anyhow::bail!("This output engine cannot resolve per-output geometry for the implicit destination");
@@ -529,6 +542,12 @@ pub trait OutputEngineApi: Send + Sync {
 }
 
 impl OutputEngineApi for OutputEngine {
+    fn next_layer_order(&self) -> u64 {
+        OutputEngine::next_layer_order(self)
+    }
+    fn set_voice_layer_order(&self, voice_id: VoiceId, group_order: Option<u64>) -> bool {
+        OutputEngine::set_voice_layer_order(self, voice_id, group_order)
+    }
     fn start_browser_surface(
         &self,
         cue_id: uuid::Uuid,
@@ -608,9 +627,11 @@ impl OutputEngineApi for OutputEngine {
         layer_style: super::output_engine::LayerStyle,
         fade_in_ms: u32,
         geometry_by_output: &std::collections::HashMap<String, super::output_engine::VideoGeometry>,
+        layer_group_order: Option<u64>,
     ) -> Result<VoiceId> {
         OutputEngine::show_external_bgra_source_multi_with_geometry(
             self, output_id, output_ids, source, geometry, layer_style, fade_in_ms, geometry_by_output,
+            layer_group_order,
         )
     }
     fn attach_cue_audio_voice(&self, visual_voice_id: VoiceId, audio_voice_id: VoiceId) {

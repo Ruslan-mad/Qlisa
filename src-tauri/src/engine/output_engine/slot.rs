@@ -11,7 +11,7 @@
 //!
 
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -29,7 +29,7 @@ use crate::engine::network_io::redact_srt_diagnostic;
 use crate::engine::AudioEngine;
 
 use super::blend::BlendMode;
-use super::types::{LayerStyle, MpvCtx, OutputStatus, VideoGeometry, VoiceId};
+use super::types::{LayerOrder, LayerOrderKey, LayerStyle, MpvCtx, OutputStatus, VideoGeometry, VoiceId};
 use super::{cs, get_prop_i64, opt_str};
 use crossbeam_channel::Sender;
 
@@ -108,7 +108,6 @@ pub(super) fn reports_hwdec_failure(text: &str) -> bool {
 /// slot cannot accidentally wake or report status to another output runtime.
 pub(super) struct SlotRegistry {
     slots: RwLock<Vec<Arc<VideoSlot>>>,
-    layer_seq: AtomicU64,
     status_tx: Sender<OutputStatus>,
     wake: Arc<dyn Fn() + Send + Sync>,
 }
@@ -120,7 +119,6 @@ impl SlotRegistry {
     ) -> Arc<Self> {
         Arc::new(Self {
             slots: RwLock::new(Vec::new()),
-            layer_seq: AtomicU64::new(1),
             status_tx,
             wake,
         })
@@ -146,10 +144,6 @@ impl SlotRegistry {
     fn wake(&self) {
         (self.wake)();
     }
-    pub(super) fn next_layer_seq(&self) -> u64 {
-        self.layer_seq.fetch_add(1, Ordering::Relaxed)
-    }
-
     /// Stop every slot client owned by this output. The caller must already
     /// have closed the output lifecycle gate and joined the GL owner; it also
     /// joins the overlay event owner before calling here, because that owner
@@ -256,9 +250,11 @@ pub(super) struct SlotState {
     /// Decoder display aspect and container rotation for the current source.
     pub source_aspect: f64,
     pub source_rotation: u32,
-    /// Compositor sort key: explicit layers order below automatic ones,
-    /// sequence breaks ties (newest on top).  See [`resolve_layer_key`].
-    pub layer_key: u64,
+    /// Authored band, then logical Number/standalone start, then child start.
+    pub layer_key: LayerOrderKey,
+    /// Actual content request age for pool eviction; independent of inherited
+    /// Number start order so a late child is not mistaken for an old slot.
+    pub last_order_seq: u64,
     pub blend_mode: BlendMode,
     /// The cue's base opacity; the animation multiplies against it.
     pub base_opacity: f32,
@@ -327,7 +323,8 @@ impl SlotState {
             presentation_video_layout: None,
             source_aspect: 0.0,
             source_rotation: 0,
-            layer_key: 0,
+            layer_key: LayerOrderKey::default(),
+            last_order_seq: 0,
             blend_mode: BlendMode::Normal,
             base_opacity: 1.0,
             anim: OpacityAnim::resting(0.0),
@@ -352,13 +349,25 @@ impl SlotState {
 
 /// Sort key so explicit layers (1–1000) stack below automatic ones, newest
 /// automatic content on top, ties broken by GO order.
-pub(super) fn resolve_layer_key(layer: Option<u32>, seq: u64) -> u64 {
-    match layer {
-        // Explicit layer L → band L, ordered by seq inside the band.
-        Some(l) => (l.clamp(1, 1000) as u64) << 40 | (seq & 0xFF_FFFF_FFFF),
-        // Automatic → above every explicit band.
-        None => (1001u64 << 40) | (seq & 0xFF_FFFF_FFFF),
+#[cfg(test)]
+pub(super) fn resolve_layer_key(layer: Option<u32>, seq: u64) -> LayerOrderKey {
+    resolve_layer_order_key(layer, seq, seq)
+}
+
+pub(super) fn resolve_layer_order_key(
+    layer: Option<u32>,
+    group_order: u64,
+    child_order: u64,
+) -> LayerOrderKey {
+    LayerOrderKey {
+        band: resolve_layer_band(layer),
+        group_order,
+        child_order,
     }
+}
+
+pub(super) fn resolve_layer_band(layer: Option<u32>) -> u32 {
+    layer.map(|value| value.clamp(1, 1000)).unwrap_or(1001)
 }
 
 // ---------------------------------------------------------------------------
@@ -570,16 +579,12 @@ pub(super) fn acquire_slot(
         return create_slot(registry, lib, audio_engine);
     }
 
-    // 3. Steal the oldest (lowest sequence) occupied slot.
+    // 3. Steal the oldest loaded content. Group order is not age: a delayed
+    // Number child can be new while retaining its parent's old group order.
     let victim = registry
         .all_slots()
         .into_iter()
-        .min_by_key(|s| {
-            s.state
-                .lock()
-                .map(|st| st.layer_key & 0xFF_FFFF_FFFF)
-                .unwrap_or(u64::MAX)
-        })
+        .min_by_key(|s| s.state.lock().map(|st| st.last_order_seq).unwrap_or(u64::MAX))
         .ok_or_else(|| anyhow!("video slot pool empty and at cap — cannot allocate"))?;
     log::warn!(
         "[slot] pool exhausted ({MAX_VIDEO_SLOTS} slots) — stealing slot {}",
@@ -772,6 +777,7 @@ pub(super) struct SlotLoad {
     pub geometry: VideoGeometry,
     pub presentation_video_layout: Option<PresentationVideoLayout>,
     pub layer_style: LayerStyle,
+    pub layer_order: LayerOrder,
     /// QLab-style slice segments `(start_s, end_s, play_count)`; empty = none.
     pub slices: Vec<(f64, f64, u32)>,
     /// Decode into the slot but hold the reveal (Load Cue) — see
@@ -842,12 +848,6 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) {
     }
     let lib = &slot.lib;
     let ctx = slot.mpv_ctx.0;
-    let seq = slot
-        .registry
-        .upgrade()
-        .map(|r| r.next_layer_seq())
-        .unwrap_or(1);
-
     set_background_color(lib, ctx, load.layer_style.black_bars);
 
     {
@@ -861,7 +861,12 @@ pub(super) fn load_into_slot(slot: &Arc<VideoSlot>, load: SlotLoad) {
         st.presentation_video_layout = load.presentation_video_layout;
         st.source_aspect = 0.0;
         st.source_rotation = 0;
-        st.layer_key = resolve_layer_key(load.layer_style.layer, seq);
+        st.layer_key = resolve_layer_order_key(
+            load.layer_style.layer,
+            load.layer_order.group_order,
+            load.layer_order.child_order,
+        );
+        st.last_order_seq = load.layer_order.child_order;
         st.blend_mode = load.layer_style.blend_mode;
         st.base_opacity = load.layer_style.opacity.clamp(0.0, 1.0) as f32;
         st.pending_unload = false;
@@ -1326,14 +1331,26 @@ pub(super) fn set_layer_style(slot: &Arc<VideoSlot>, style: &LayerStyle) {
     if let Ok(mut st) = slot.state.lock() {
         st.blend_mode = style.blend_mode;
         let new_base = style.opacity.clamp(0.0, 1.0) as f32;
-        // Re-key only the explicit band; the sequence part is kept so the
-        // stacking among same-layer content is stable.
-        let seq = st.layer_key & 0xFF_FFFF_FFFF;
-        st.layer_key = resolve_layer_key(style.layer, seq);
+        // Re-key only the authored band; request/group order stays stable.
+        st.layer_key = resolve_layer_order_key(
+            style.layer,
+            st.layer_key.group_order,
+            st.layer_key.child_order,
+        );
         if !st.anim.is_animating() && !st.pending_unload && st.pending_reveal.is_none() {
             st.anim.set(new_base);
         }
         st.base_opacity = new_base;
+    }
+    slot.wake();
+}
+
+/// Re-anchor an already-loaded visual before a preloaded cue is revealed.
+pub(super) fn set_layer_group_order(slot: &Arc<VideoSlot>, group_order: u64, child_order: u64) {
+    if let Ok(mut st) = slot.state.lock() {
+        st.layer_key.group_order = group_order;
+        st.layer_key.child_order = child_order;
+        st.last_order_seq = child_order;
     }
     slot.wake();
 }
@@ -2232,6 +2249,24 @@ mod tests {
     #[test]
     fn layer_key_same_band_ordered_by_sequence() {
         assert!(resolve_layer_key(Some(500), 1) < resolve_layer_key(Some(500), 2));
+    }
+
+    #[test]
+    fn number_anchor_keeps_late_children_below_later_standalone_content() {
+        let number_first = resolve_layer_order_key(None, 10, 11);
+        let standalone_b = resolve_layer_order_key(None, 20, 20);
+        let number_late = resolve_layer_order_key(None, 10, 30);
+        assert!(number_first < number_late);
+        assert!(number_late < standalone_b);
+
+        let new_number = resolve_layer_order_key(None, 40, 41);
+        assert!(standalone_b < new_number);
+        // A later seek/loop action keeps the original parent anchor while
+        // receiving a fresh child order.
+        let number_after_seek = resolve_layer_order_key(None, 10, 50);
+        assert!(number_after_seek < standalone_b);
+        // Explicit author bands retain global precedence over auto order.
+        assert!(resolve_layer_order_key(Some(1000), 10, 11) < number_late);
     }
 
     #[test]

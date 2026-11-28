@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, createManualLiveMediaSelection, normalizeClipEditorVisibility, previewPlayheadForCue, resolveClipEditorCueId, resolveClipEditorTargetCueId, resolveLiveMediaSelection, resolvePresentationPreviewCueId, shouldFollowLatestLiveMedia, toggleClipEditorDock, toggleClipEditorPanel } from "../clipEditorPrefs";
+import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, CLIP_EDITOR_TAB_LABELS, clipEditorDockVisible, createManualLiveMediaSelection, normalizeClipEditorVisibility, previewPlayheadForCue, resolveClipEditorCueId, resolveClipEditorTargetCueId, resolveLiveMediaSelection, resolvePresentationPreviewCueId, toggleClipEditorDock, toggleClipEditorPanel } from "../clipEditorPrefs";
 import type { CueSummary } from "../types";
 
 describe("Clip Editor workspace visibility", () => {
@@ -176,7 +176,7 @@ describe("Clip Editor workspace visibility", () => {
       "waiting-number": { wait_phase: "pre_wait" },
     });
 
-    expect(candidates.map(({ id }) => id)).toEqual(["screen-child", "nested-child", "no-order", "old", "new", "later"]);
+    expect(candidates.map(({ id }) => id)).toEqual(["screen", "screen-child", "nested-child", "no-order", "old", "new", "later"]);
     expect(candidates[0].isBackgroundScreensaver).toBe(true);
     expect(candidates[1].isBackgroundScreensaver).toBe(true);
     expect(candidates[3].isBackgroundScreensaver).toBe(false);
@@ -184,7 +184,7 @@ describe("Clip Editor workspace visibility", () => {
     expect(resolveLiveMediaSelection([...candidates].reverse(), null)?.id).toBe("later");
   });
 
-  it("keeps manual choice until a newer eligible ordinary start, including a restart", () => {
+  it("keeps manual choice until that media stops, including across newer starts", () => {
     const candidates = activeLiveMediaCandidates([
       { id: "screen", cue_type: "number", state: "running", background_screensaver: true, children: [
         { id: "screen-file", cue_type: "video", state: "running", file_path: "screen.mp4" },
@@ -192,10 +192,8 @@ describe("Clip Editor workspace visibility", () => {
       { id: "normal-a", cue_type: "audio", state: "running", file_path: "a.wav" },
       { id: "paused", cue_type: "video", state: "paused", file_path: "paused.mp4" },
     ], { "screen-file": 1, "normal-a": 2, paused: 3 });
-    const manualBackground = { cueId: "screen-file", afterOrder: 3 };
+    const manualBackground = createManualLiveMediaSelection("screen-file");
     expect(resolveLiveMediaSelection(candidates, manualBackground)?.id).toBe("screen-file");
-    expect(shouldFollowLatestLiveMedia(candidates, manualBackground)).toBe(false);
-    expect(shouldFollowLatestLiveMedia(candidates, { cueId: "screen-file", afterOrder: 2 })).toBe(false);
 
     const newer = activeLiveMediaCandidates([
       { id: "screen", cue_type: "number", state: "running", background_screensaver: true, children: [
@@ -205,19 +203,17 @@ describe("Clip Editor workspace visibility", () => {
       { id: "normal-b", cue_type: "video", state: "running", file_path: "b.mp4" },
       { id: "paused", cue_type: "video", state: "paused", file_path: "paused.mp4" },
     ], { "screen-file": 1, "normal-a": 2, paused: 3, "normal-b": 4 });
-    expect(shouldFollowLatestLiveMedia(newer, manualBackground)).toBe(true);
-    expect(resolveLiveMediaSelection(newer, manualBackground)?.id).toBe("normal-b");
+    expect(resolveLiveMediaSelection(newer, manualBackground)?.id).toBe("screen-file");
 
     const restartedSameId = activeLiveMediaCandidates([
       { id: "normal-a", cue_type: "audio", state: "running", file_path: "a.wav" },
     ], { "normal-a": 5 });
-    const selectedSameIdEarlier = { cueId: "normal-a", afterOrder: 4 };
-    expect(shouldFollowLatestLiveMedia(restartedSameId, selectedSameIdEarlier)).toBe(true);
+    const selectedSameIdEarlier = createManualLiveMediaSelection("normal-a");
     expect(resolveLiveMediaSelection(restartedSameId, selectedSameIdEarlier)?.id).toBe("normal-a");
   });
 
   it("waits for delayed candidates, then falls back to remaining running media or a background", () => {
-    const manual = { cueId: "a", afterOrder: 2 };
+    const manual = createManualLiveMediaSelection("a");
     const beforeCatalogUpdate = activeLiveMediaCandidates([
       { id: "a", cue_type: "audio", state: "running", file_path: "a.wav" },
     ], { a: 2, b: 3 });
@@ -226,7 +222,7 @@ describe("Clip Editor workspace visibility", () => {
       { id: "a", cue_type: "audio", state: "running", file_path: "a.wav" },
       { id: "b", cue_type: "video", state: "running", file_path: "b.mp4" },
     ], { a: 2, b: 3 });
-    expect(resolveLiveMediaSelection(afterCatalogUpdate, manual)?.id).toBe("b");
+    expect(resolveLiveMediaSelection(afterCatalogUpdate, manual)?.id).toBe("a");
 
     const remaining = afterCatalogUpdate.filter((candidate) => candidate.id === "a");
     expect(resolveLiveMediaSelection(remaining, null)?.id).toBe("a");
@@ -261,13 +257,11 @@ describe("Clip Editor workspace visibility", () => {
     ];
     const orders = { a: 1, "screen-file": 99, paused: 100, b: 3 };
     const beforeStart = activeLiveMediaCandidates(tree, orders, { prewait: { wait_phase: "pre_wait" } });
-    const manualBackground = createManualLiveMediaSelection(beforeStart, "screen-file");
-    expect(manualBackground.afterOrder).toBe(1);
+    const manualBackground = createManualLiveMediaSelection("screen-file");
     expect(resolveLiveMediaSelection(beforeStart, manualBackground)?.id).toBe("screen-file");
 
     const afterStart = activeLiveMediaCandidates(tree, orders);
-    expect(shouldFollowLatestLiveMedia(afterStart, manualBackground)).toBe(true);
-    expect(resolveLiveMediaSelection(afterStart, manualBackground)?.id).toBe("b");
+    expect(resolveLiveMediaSelection(afterStart, manualBackground)?.id).toBe("screen-file");
   });
 
   it("keeps the latest paused media visible only when no running media remains", () => {
@@ -282,6 +276,27 @@ describe("Clip Editor workspace visibility", () => {
       { id: "running", cue_type: "image", state: "running", file_path: "running.png" },
     ], { paused: 10, running: 2 });
     expect(resolveLiveMediaSelection(withRunning, null)?.id).toBe("running");
+  });
+
+  it("selects an active Number as one timeline and keeps the pinned Number through child starts", () => {
+    const initial = activeLiveMediaCandidates([
+      { id: "number-a", cue_type: "number", state: "running", children: [
+        { id: "master", cue_type: "audio", state: "running", file_path: "master.wav" },
+      ] },
+      { id: "other", cue_type: "video", state: "running", file_path: "other.mp4" },
+    ], { "number-a": 1, master: 2, other: 3 });
+    expect(resolveLiveMediaSelection(initial, null)?.id).toBe("number-a");
+
+    const withAnotherNumber = activeLiveMediaCandidates([
+      { id: "number-a", cue_type: "number", state: "paused", children: [
+        { id: "master", cue_type: "audio", state: "paused", file_path: "master.wav" },
+      ] },
+      { id: "number-b", cue_type: "number", state: "running", children: [
+        { id: "child-b", cue_type: "video", state: "running", file_path: "b.mp4" },
+      ] },
+    ], { "number-a": 1, master: 2, "number-b": 4, "child-b": 5 });
+    expect(resolveLiveMediaSelection(withAnotherNumber, null, "number-a")?.id).toBe("number-a");
+    expect(resolveLiveMediaSelection(withAnotherNumber, null)?.id).toBe("number-b");
   });
 
   it("never sends Preview or Slice clicks to the program seek command", () => {

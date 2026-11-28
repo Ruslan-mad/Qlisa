@@ -66,6 +66,9 @@ pub struct CueContext {
     /// Output buffer size from machine config — passed to `ensure_input_feed`
     /// so the input stream uses the same period as the output stream.
     pub audio_buffer_size: u32,
+    /// Runtime-only visual ordering anchor inherited by descendants of one
+    /// Number run. `None` keeps ordinary cues and Groups ungrouped.
+    visual_group_order: Option<u64>,
     /// Browser cues report actual shared-surface starts for transport
     /// ownership reconciliation, including nested Group children.
     browser_starts: Arc<Mutex<Vec<uuid::Uuid>>>,
@@ -103,6 +106,7 @@ impl CueContext {
             fixture_groups: Arc::new(fixture_groups),
             input_patches: Arc::new(input_patches),
             audio_buffer_size,
+            visual_group_order: None,
             browser_starts: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -189,6 +193,16 @@ impl CueContext {
     /// Silently drops the event if the receiver has been dropped.
     pub fn emit(&self, event: CueEvent) {
         let _ = self.event_sender.send(event);
+    }
+
+    pub fn visual_group_order(&self) -> Option<u64> {
+        self.visual_group_order
+    }
+
+    pub fn with_visual_group_order(&self, order: u64) -> Self {
+        let mut scoped = self.clone();
+        scoped.visual_group_order = Some(order);
+        scoped
     }
 }
 

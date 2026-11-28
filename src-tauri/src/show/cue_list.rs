@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::cue::{registry::CueRegistry, traits::Cue, types::{CueId, CueType}};
+use crate::cue::{registry::CueRegistry, traits::Cue, types::{CueId, CueState, CueType, GroupMode}};
 use crate::engine::midi_trigger::MidiTrigger;
 use crate::engine::timecode_types::{CueListTcConfig, TcTrigger};
 
@@ -873,6 +873,27 @@ impl CueList {
             .ok_or_else(|| anyhow!("Cue {:?} not found", cid))?;
         if let Some(group) = self.get_mut(&ancestor) {
             group.set_active_child(&cid);
+        }
+        self.playhead_cue_id = Some(ancestor);
+        Ok(())
+    }
+
+    /// Move the visible Playhead from a UI selection. A running or paused
+    /// Playlist owns its internal sequence position until an explicit GO or
+    /// Playhead command changes it.
+    pub fn set_playhead_for_selection(&mut self, id: Option<CueId>) -> Result<()> {
+        let Some(cid) = id.as_ref() else {
+            return self.set_playhead(None);
+        };
+        let Some(ancestor) = self.top_level_ancestor_of(cid) else {
+            return self.set_playhead(id);
+        };
+        let preserve_running_playlist = self.get(&ancestor).is_some_and(|group| {
+            group.group_mode() == Some(GroupMode::Playlist)
+                && matches!(group.state(), CueState::Running | CueState::Paused)
+        });
+        if !preserve_running_playlist {
+            return self.set_playhead(id);
         }
         self.playhead_cue_id = Some(ancestor);
         Ok(())

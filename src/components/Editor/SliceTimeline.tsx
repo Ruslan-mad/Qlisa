@@ -13,35 +13,14 @@ import type { GainEnvelopePoint, SliceList } from "../../lib/types";
 import type { AudioFadeOverlay, FadeDirection } from "./audioFadeModel";
 import { PLAY_COUNT_INFINITE } from "../../lib/types";
 import type { TrimPainter, TrimView } from "../Inspector/TrimStrip";
-import { TRIM_END_COLOR, TRIM_START_COLOR, useCanvasWidth } from "../Inspector/TrimStrip";
+import { TRIM_END_COLOR, TRIM_HANDLE_HIT_MARGIN, TRIM_HANDLE_ZONE_HEIGHT, TRIM_START_COLOR, drawTrimMarker, trimHandleHitDistance, useCanvasWidth } from "../Inspector/TrimStrip";
 import { useLocale } from "../../i18n";
 import { useTimelineEditorStore } from "../../stores/timelineEditorStore";
 import { GainEnvelopeOverlay } from "./GainEnvelopeOverlay";
-import { canCommitSliceTimelineGesture, sliceTimelinePointerAction } from "./sliceTimelineInteraction";
+import { beginCanvasPointer, cancelCanvasPointer, canCommitSliceTimelineGesture, endCanvasPointer, ownsCanvasPointer, sliceTimelinePointerAction } from "./sliceTimelineInteraction";
 import { formatDurationMs } from "../CueList/formatDuration";
 
 const SLICE_COLOR = "#facc15";
-
-function drawTrimMarker(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  height: number,
-  color: string,
-) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(x, 0);
-  ctx.lineTo(x, height);
-  ctx.stroke();
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.moveTo(x - 6, 0);
-  ctx.lineTo(x + 6, 0);
-  ctx.lineTo(x, 10);
-  ctx.closePath();
-  ctx.fill();
-}
 
 function drawSliceMarker(ctx: CanvasRenderingContext2D, x: number, height: number) {
   ctx.strokeStyle = SLICE_COLOR;
@@ -138,6 +117,7 @@ export function SliceTimeline({
   const editLocked = useTimelineEditorStore((state) => state.locked);
   const toggleEditLock = useTimelineEditorStore((state) => state.toggle);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const activePointerId = useRef<number | null>(null);
   const canvasWidth = useCanvasWidth(canvasRef);
   const [dragging, setDragging] = useState<DragTarget | null>(null);
   const [localStartMs, setLocalStartMs] = useState<number | null>(null);
@@ -159,6 +139,18 @@ export function SliceTimeline({
     cueKeyRef.current = resetKey;
   }
 
+  const cancelActivePointer = () => {
+    const pointerId = activePointerId.current;
+    const hadPointer = cancelCanvasPointer(activePointerId);
+    const canvas = canvasRef.current;
+    if (hadPointer && pointerId !== null && canvas?.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+    setDragging(null);
+    setCursor(null);
+    setLocalStartMs(null);
+    setLocalEndMs(null);
+    setLocalMarkers(null);
+  };
+
   // A cue switch resets editor state. `paintKey` is intentionally excluded:
   // higher-resolution waveform/filmstrip swaps must not break zoom or drags.
   const slicesKey = `${slices.markers.join(",")}|${slices.play_counts.join(",")}`;
@@ -167,8 +159,7 @@ export function SliceTimeline({
     setLocalEndMs(null);
     setLocalMarkers(null);
     setEditingBadge(null);
-    setDragging(null);
-    setCursor(null);
+    cancelActivePointer();
     setViewWindow(null);
     onViewChange?.(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -179,8 +170,7 @@ export function SliceTimeline({
     setLocalEndMs(null);
     setLocalMarkers(null);
     setEditingBadge(null);
-    setDragging(null);
-    setCursor(null);
+    cancelActivePointer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slicesKey]);
 
@@ -188,11 +178,7 @@ export function SliceTimeline({
   // Otherwise a delayed mouseup could still commit the stale trim or slice.
   useEffect(() => {
     if (!editLocked) return;
-    setDragging(null);
-    setLocalStartMs(null);
-    setLocalEndMs(null);
-    setLocalMarkers(null);
-    setCursor(null);
+    cancelActivePointer();
   }, [editLocked]);
 
   // Keep trim drafts only while a gesture is active. This also restores the
@@ -279,14 +265,19 @@ export function SliceTimeline({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const toX = (ms: number) => ((ms - view.s) / viewSpan) * W;
-    paint(ctx, W, height, toX(effStartMs), toX(effEndMs), { startMs: view.s, endMs: view.e });
+    const contentTop = TRIM_HANDLE_ZONE_HEIGHT;
+    const contentHeight = Math.max(1, height - contentTop);
+    ctx.save();
+    ctx.translate(0, contentTop);
+    paint(ctx, W, contentHeight, toX(effStartMs), toX(effEndMs), { startMs: view.s, endMs: view.e });
     for (const m of markers) {
       if (m > effStartMs && m < effEndMs && m >= view.s && m <= view.e) {
-        drawSliceMarker(ctx, toX(m), height);
+        drawSliceMarker(ctx, toX(m), contentHeight);
       }
     }
-    drawTrimMarker(ctx, toX(effStartMs), height, TRIM_START_COLOR);
-    drawTrimMarker(ctx, toX(effEndMs), height, TRIM_END_COLOR);
+    ctx.restore();
+    drawTrimMarker(ctx, toX(effStartMs), W, 0, contentTop, height, TRIM_START_COLOR);
+    drawTrimMarker(ctx, toX(effEndMs), W, 0, contentTop, height, TRIM_END_COLOR);
     if (previewPositionMs != null && previewPositionMs >= view.s && previewPositionMs <= view.e) {
       const x = toX(previewPositionMs);
       ctx.save();
@@ -294,15 +285,15 @@ export function SliceTimeline({
       ctx.lineWidth = 1.5;
       ctx.setLineDash([4, 3]);
       ctx.beginPath();
-      ctx.moveTo(x, 0);
+      ctx.moveTo(x, contentTop);
       ctx.lineTo(x, height);
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.fillStyle = "#facc15";
       ctx.beginPath();
-      ctx.moveTo(x - 4, 0);
-      ctx.lineTo(x + 4, 0);
-      ctx.lineTo(x, 7);
+      ctx.moveTo(x - 4, contentTop);
+      ctx.lineTo(x + 4, contentTop);
+      ctx.lineTo(x, contentTop + 7);
       ctx.closePath();
       ctx.fill();
       ctx.restore();
@@ -319,13 +310,28 @@ export function SliceTimeline({
     return Math.max(0, Math.min(view.s + (relX / rect.width) * viewSpan, durationMs));
   };
 
-  const hitTest = (clientX: number): DragTarget | null => {
+  const hitTest = (clientX: number, clientY: number): DragTarget | null => {
     const canvas = canvasRef.current;
     if (!canvas || durationMs === 0) return null;
     const rect = canvas.getBoundingClientRect();
     const x = clientX - rect.left;
+    const y = clientY - rect.top;
     const W = rect.width;
     const toX = (ms: number) => ((ms - view.s) / viewSpan) * W;
+    const trimTarget = (): DragTarget | null => {
+      const startX = toX(effStartMs);
+      const endX = toX(effEndMs);
+      const dStart = trimHandleHitDistance(x, startX, W);
+      const dEnd = trimHandleHitDistance(x, endX, W);
+      const startHit = dStart <= TRIM_HANDLE_HIT_MARGIN;
+      const endHit = dEnd <= TRIM_HANDLE_HIT_MARGIN;
+      if (startHit && (!endHit || Math.abs(x - startX) <= Math.abs(x - endX))) return { kind: "start" };
+      if (endHit) return { kind: "end" };
+      return null;
+    };
+
+    // The raised handle zone always targets trims, even beside a slice.
+    if (y < TRIM_HANDLE_ZONE_HEIGHT) return trimTarget();
 
     // Slice markers first (thinner target, higher precision need).
     let best: { index: number; dist: number } | null = null;
@@ -335,19 +341,19 @@ export function SliceTimeline({
     });
     if (best !== null) return { kind: "slice", index: (best as { index: number }).index };
 
-    const dStart = Math.abs(x - toX(effStartMs));
-    const dEnd = Math.abs(x - toX(effEndMs));
-    if (dStart <= dEnd && dStart < 14) return { kind: "start" };
-    if (dEnd < 14) return { kind: "end" };
-    return null;
+    return trimTarget();
   };
 
   // ── Mouse interactions ────────────────────────────────────────────────────
-  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (e.button !== 0) return;
-    const target = hitTest(e.clientX);
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0 || !e.isPrimary || activePointerId.current !== null) return;
+    const target = hitTest(e.clientX, e.clientY);
+    if (e.clientY - canvasRef.current!.getBoundingClientRect().top < TRIM_HANDLE_ZONE_HEIGHT && !target) return;
     const action = sliceTimelinePointerAction(editLocked, !!target, !!onPreviewPosition);
     if (action === "ignore") return;
+    e.preventDefault();
+    beginCanvasPointer(activePointerId, e.pointerId);
+    e.currentTarget.setPointerCapture(e.pointerId);
     dragCueKeyRef.current = resetKey;
     const rect = canvasRef.current!.getBoundingClientRect();
     setCursor({ x: e.clientX - rect.left, width: rect.width });
@@ -365,10 +371,11 @@ export function SliceTimeline({
     }
   };
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!dragging) return;
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!dragging || !ownsCanvasPointer(activePointerId, e.pointerId)) return;
     if (!canCommitSliceTimelineGesture(dragCueKeyRef.current, resetKey)) {
       setDragging(null);
+      cancelActivePointer();
       setCursor(null);
       setLocalStartMs(null);
       setLocalEndMs(null);
@@ -399,7 +406,9 @@ export function SliceTimeline({
     }
   };
 
-  const handleMouseUp = () => {
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!endCanvasPointer(activePointerId, e.pointerId)) return;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
     setCursor(null);
     if (!dragging) return;
     if (!canCommitSliceTimelineGesture(dragCueKeyRef.current, resetKey)) {
@@ -426,9 +435,18 @@ export function SliceTimeline({
     setLocalMarkers(null);
   };
 
+  const handlePointerCancel = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!endCanvasPointer(activePointerId, e.pointerId)) return;
+    setDragging(null);
+    setCursor(null);
+    setLocalStartMs(null);
+    setLocalEndMs(null);
+    setLocalMarkers(null);
+  };
+
   const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (editLocked) return;
-    if (hitTest(e.clientX)) return; // don't add on top of an existing marker
+    if (hitTest(e.clientX, e.clientY) || e.clientY - canvasRef.current!.getBoundingClientRect().top < TRIM_HANDLE_ZONE_HEIGHT) return; // don't add on top of an existing marker or handle zone
     const ms = Math.round(xToMs(e.clientX));
     if (ms <= effStartMs + 20 || ms >= effEndMs - 20) return;
     // Insert the marker in sorted position; the segment it splits keeps its
@@ -444,7 +462,7 @@ export function SliceTimeline({
 
   const handleContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (editLocked) return;
-    const target = hitTest(e.clientX);
+    const target = hitTest(e.clientX, e.clientY);
     if (target?.kind !== "slice") return;
     e.preventDefault();
     const next = slices.markers.filter((_, i) => i !== target.index);
@@ -551,28 +569,32 @@ export function SliceTimeline({
             display: "block",
             borderRadius: 4,
             cursor: dragging ? "ew-resize" : "default",
+            touchAction: "none",
           }}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseUp}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          onLostPointerCapture={handlePointerCancel}
           onDoubleClick={handleDoubleClick}
           onContextMenu={handleContextMenu}
         />
         {gainEnvelopeEditable && (
-          <GainEnvelopeOverlay
-            points={gainEnvelope}
-            durationMs={durationMs}
-            view={{ startMs: view.s, endMs: view.e }}
-            width={canvasWidth}
-            height={height}
-            editable={!editLocked}
-            fade={audioFade}
-            fadeEditable={audioFadeEditable && !editLocked}
-            fadeContextKey={audioFadeContextKey}
-            onFadeDurationChange={onAudioFadeDurationChange}
-            onCommit={onGainEnvelopeChange}
-          />
+          <div style={{ position: "absolute", left: 0, right: 0, top: TRIM_HANDLE_ZONE_HEIGHT, height: Math.max(1, height - TRIM_HANDLE_ZONE_HEIGHT), pointerEvents: "none" }}>
+            <GainEnvelopeOverlay
+              points={gainEnvelope}
+              durationMs={durationMs}
+              view={{ startMs: view.s, endMs: view.e }}
+              width={canvasWidth}
+              height={Math.max(1, height - TRIM_HANDLE_ZONE_HEIGHT)}
+              editable={!editLocked}
+              fade={audioFade}
+              fadeEditable={audioFadeEditable && !editLocked}
+              fadeContextKey={audioFadeContextKey}
+              onFadeDurationChange={onAudioFadeDurationChange}
+              onCommit={onGainEnvelopeChange}
+            />
+          </div>
         )}
       </div>
 

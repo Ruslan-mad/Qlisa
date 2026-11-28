@@ -64,9 +64,11 @@ export function sourceRangeForTimelinePass(
   passEndMs: number,
   sourceStartMs: number,
   sourceEndMs: number,
+  rate = 1,
 ): TimelineViewRange {
+  const safeRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
   return {
     startMs: sourceStartMs,
-    endMs: Math.min(sourceEndMs, sourceStartMs + Math.max(0, passEndMs - passStartMs)),
+    endMs: Math.min(sourceEndMs, sourceStartMs + Math.max(0, passEndMs - passStartMs) * safeRate),
   };
 }

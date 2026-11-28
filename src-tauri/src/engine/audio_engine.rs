@@ -7267,6 +7267,94 @@ mod tests {
     }
 
     #[test]
+    fn number_loop_stops_a_live_audio_master_before_starting_the_next_pass() {
+        use crate::cue::audio_cue::AudioCue;
+        use crate::cue::context::CueContext;
+        use crate::cue::group_cue::GroupCue;
+        use crate::cue::types::CueState;
+        use std::time::Duration;
+
+        fn render(engine: &AudioEngine, commands: &mut ringbuf::HeapCons<AudioCommand>) {
+            let frames = 64;
+            let mut output = vec![0.0; frames * 2];
+            let mut program = vec![0.0; frames * 2];
+            let (mut status_prod, _) = HeapRb::<AudioStatus>::new(32).split();
+            fill_buffer(
+                &mut output,
+                &mut program,
+                2,
+                48_000,
+                &engine.voices.rt_handle(),
+                &engine.input_feeds,
+                &empty_program_audio_taps(),
+                commands,
+                &mut status_prod,
+                &engine.master_gain,
+                &engine.output_period,
+            );
+        }
+
+        let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
+        let (command_prod, mut command_cons) = HeapRb::<AudioCommand>::new(32).split();
+        *engine.cmd_prod.lock().unwrap() = command_prod;
+        let (events, _event_rx) = unbounded();
+        let context = CueContext::new(
+            engine.clone(),
+            Arc::new(NullOutput),
+            events,
+            0,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            Arc::new(crate::engine::dmx_engine::DmxEngine::new()),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            256,
+        );
+
+        let mut master = AudioCue::new();
+        master.accept_preloaded_audio(
+            Arc::new(vec![0.25; 192_000]),
+            2,
+            48_000,
+            Duration::from_millis(1),
+        );
+        let master_id = master.id();
+        let mut number = GroupCue::new_number();
+        number.add_child(Box::new(master), -1).unwrap();
+        number.set_number_master(master_id).unwrap();
+        number.set_playlist_loop(true);
+        number.set_post_wait(Duration::ZERO);
+        number.go(&context).unwrap();
+        let first_voice_id = number.child_cues().unwrap()[0].playing_voice_id().unwrap();
+        let first_voice = engine.voices.with(|voices| {
+            voices.iter().find(|voice| voice.id == first_voice_id).cloned()
+        }).flatten().unwrap();
+        assert_eq!(first_voice.voice_state(), VoiceState::Playing);
+
+        // Model a Number whose authored master duration ends before its active
+        // PCM voice. Stop the old id before completion drops its cue reference.
+        std::thread::sleep(Duration::from_millis(5));
+        number.tick(&context).unwrap();
+        assert!(number.is_running());
+        assert!(!number.is_complete(), "whole-Number loop remains active through the pass boundary");
+        assert_eq!(number.child_cues().unwrap()[0].state(), CueState::Standby);
+        assert!(engine.voice_is_alive(first_voice_id), "the callback has not consumed the queued Stop yet");
+        render(&engine, &mut command_cons);
+        assert_eq!(first_voice.voice_state(), VoiceState::Stopped);
+        assert!(!engine.voice_is_alive(first_voice_id));
+
+        number.tick(&context).unwrap();
+        let second_voice_id = number.child_cues().unwrap()[0].playing_voice_id().unwrap();
+        assert_ne!(first_voice_id, second_voice_id);
+        render(&engine, &mut command_cons);
+        assert_eq!(first_voice.voice_state(), VoiceState::Stopped);
+        assert!(engine.voice_is_alive(second_voice_id));
+    }
+
+    #[test]
     fn active_mute_outputs_exact_zero_while_gain_fade_and_playback_advance() {
         let engine = AudioEngine::new_silent(&MachineAudioConfig::default());
         let (test_prod, mut commands) = HeapRb::<AudioCommand>::new(32).split();

@@ -5,14 +5,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AudioCueData, CueSummary, ImageCueData, NumberCueData, SliceList, VideoCueData, WaveformData } from "../../lib/types";
 import { PLAY_COUNT_INFINITE } from "../../lib/types";
-import { getCue, getVideoFilmstrip, getVideoFilmstripRange, getWaveformPeaks, previewCueOnHeadphones, stopCuePreview, stopPreview, controlCuePreview, seekCueMedia, updateCue, setNumberActionOffset } from "../../lib/commands";
+import { getCue, getMediaThumbnail, getVideoFilmstrip, getVideoFilmstripRange, getWaveformPeaks, previewCueOnHeadphones, stopCuePreview, stopPreview, controlCuePreview, seekCue, seekCueMedia, updateCue, setNumberActionOffset } from "../../lib/commands";
 import { SliceTimeline } from "./SliceTimeline";
 import { LiveTimeline, type NumberTimelineTrack } from "./LiveTimeline";
 import type { TrimPainter, TrimView } from "../Inspector/TrimStrip";
 import { useLocale } from "../../i18n";
 import { useTimingStore } from "../../stores/timingStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, createManualLiveMediaSelection, previewPlayheadForCue, resolveLiveMediaSelection, shouldFollowLatestLiveMedia, type ClipEditorTab, type ManualLiveMediaSelection } from "../../lib/clipEditorPrefs";
+import { activeLiveMediaCandidates, canSeekProgramFromClipEditor, createManualLiveMediaSelection, previewPlayheadForCue, resolveLiveMediaSelection, type ClipEditorTab, type ManualLiveMediaSelection } from "../../lib/clipEditorPrefs";
 import { findCueIsLoading, isCurrentClipLoad, previewUiForCue, shouldRetainCueDataForTarget, shouldRetryWaveform, type CueBoundPreviewUi } from "../../lib/clipEditorLoadGuards";
 import { formatInspectorSaveError, isCurrentCueRequest, persistThenCommit } from "../Inspector/singleCueSave";
 import { normalizeNumberCueData } from "../Inspector/numberModel";
@@ -24,7 +24,7 @@ import { NumberPreviewControls } from "../Inspector/NumberPreview";
 import { MediaPreview } from "../Inspector/MediaThumbnail";
 import { resolveMediaPreviewKind } from "../Inspector/mediaPreviewModel";
 import { useVideoPreviewTransport } from "../Inspector/mediaPreviewTransport";
-import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, numberActionDuration, numberActionLooped, numberGroupTimelineActions, numberMasterDuration, numberMediaLayoutSignature, numberMediaSourceSignature, numberVisualActions, snapNumberTime } from "./numberTimelineModel";
+import { applyNumberDragSnap, canReuseNumberWaveformAsset, composeGroupWaveform, cueSourceWindow, numberActionDuration, numberActionLooped, numberActionMaxResizeSpan, numberActionTimelineDeltaToSource, numberGroupTimelineActions, numberMasterDuration, numberMediaLayoutSignature, numberMediaSourceSignature, numberSourceSlicesToAction, numberVisualActions, snapNumberTime, type NumberVisualAction } from "./numberTimelineModel";
 import { useNumberPreviewStore } from "../../stores/numberPreviewStore";
 import { formatDurationMs } from "../CueList/formatDuration";
 import { liveTimingLabels as getLiveTimingLabels } from "./liveTimingLabels";
@@ -45,6 +45,7 @@ import {
   splitVideoTimelineHeight,
   usesCompactLiveHeader,
 } from "./clipEditorLayout";
+import { drawVideoFilmstripWindows, filmstripFrameAtSourceTime, videoFilmstripRequest, visibleFilmstripSourceWindows, type VideoFilmstripWindow } from "./videoFilmstripModel";
 
 const FILMSTRIP_TILES = 16;
 const FILMSTRIP_TILE_WIDTH = 160;
@@ -70,7 +71,79 @@ type NumberMediaAsset = {
   filmstripKey: string | null;
   waveform: WaveformData | null;
   tiles: HTMLImageElement[] | null;
+  filmstrips?: VideoFilmstripWindow[];
 };
+
+type NumberRangeAsset = {
+  filePath: string;
+  sourceRevision: string | null;
+  windows: VideoFilmstripWindow[];
+};
+
+function buildNumberTimelineTracks(
+  numberCue: NumberCueData,
+  numberAssets: Record<string, NumberMediaAsset>,
+  timelineDurationMs: number,
+  numberRangeStrips: Record<string, NumberRangeAsset> = {},
+): NumberTimelineTrack[] {
+  const mediaFor = (id: string) => {
+    const media = numberAssets[id];
+    if (!media) return undefined;
+    const ownedDetail = numberRangeStrips[id];
+    const detail = ownedDetail
+      && ownedDetail.filePath === media.filePath
+      && ownedDetail.sourceRevision === (media.sourceRevision ?? null)
+      ? ownedDetail.windows
+      : [];
+    return detail.length ? { ...media, filmstrips: [...(media.filmstrips ?? []), ...detail] } : media;
+  };
+  const master = numberCue.children.find((child) => child.id === numberCue.number_master_id);
+  const actions = numberVisualActions(numberCue);
+  const groupTracks = (group: typeof numberCue.children[number], baseMs: number, limitMs: number, prefix: string): NumberTimelineTrack[] => {
+    if (group.cue_type !== "group") return [];
+    const segments = numberGroupTimelineActions(group, baseMs, limitMs, prefix).map((action) => ({
+      id: action.id,
+      name: action.name,
+      startMs: action.timeline_start_ms ?? baseMs,
+      endMs: action.timeline_end_ms ?? baseMs,
+      cueType: action.cue_type as NumberTimelineTrack["cueType"],
+      media: mediaFor(action.id),
+      sourcePath: action.file_path ?? null,
+      sourceRevision: action.media_source_revision ?? null,
+      sourceStartMs: Math.max(0, action.start_time_ms ?? 0),
+      sourceEndMs: Math.max(0, action.end_time_ms ?? action.file_duration_ms ?? action.duration_ms ?? action.cached_duration_ms ?? 0),
+      maxDurationMs: numberActionDuration(action, limitMs),
+      looped: action.looped,
+      rate: action.cue_type === "audio" ? (action as NumberVisualAction & { rate?: number }).rate ?? 1 : 1,
+      readonly: true,
+    }));
+    return [{ id: group.id, name: `Group · ${group.name}`, startMs: baseMs, endMs: limitMs, cueType: "group", readonly: true, segments }];
+  };
+  const masterTracks = master?.cue_type === "group"
+    ? groupTracks(master, 0, timelineDurationMs, master.name)
+    : master
+      ? [{ id: master.id, name: master.name, startMs: 0, endMs: numberMasterDuration(numberCue), sourceStartMs: cueSourceWindow(master).startMs, sourceEndMs: cueSourceWindow(master).endMs, master: true, looped: numberActionLooped(master as NumberVisualAction), rate: master.cue_type === "audio" ? (master as AudioCueData).rate : 1, cueType: master.cue_type as NumberTimelineTrack["cueType"], media: mediaFor(master.id), sourcePath: master.file_path ?? null, sourceRevision: master.media_source_revision ?? null }]
+      : [];
+  const actionTracks: NumberTimelineTrack[] = [];
+  for (const action of actions) {
+    if (action.cue_type === "group") {
+      actionTracks.push(...groupTracks(action, action.timeline_start_ms ?? 0, action.timeline_end_ms ?? timelineDurationMs, action.name));
+      continue;
+    }
+    const sourceStartMs = Math.max(0, action.start_time_ms ?? 0);
+    const sourceDurationMs = Math.max(0, action.file_duration_ms ?? action.duration_ms ?? action.cached_duration_ms ?? 0);
+    actionTracks.push({
+      id: action.id, name: action.name, startMs: action.timeline_start_ms ?? 0, endMs: action.timeline_end_ms ?? 0,
+      cueType: action.cue_type as NumberTimelineTrack["cueType"], media: mediaFor(action.id), sourceStartMs,
+      sourcePath: action.file_path ?? null,
+      sourceRevision: action.media_source_revision ?? null,
+      sourceEndMs: Math.max(sourceStartMs, action.end_time_ms ?? sourceDurationMs),
+      maxDurationMs: numberActionMaxResizeSpan(action, timelineDurationMs), looped: action.looped,
+      rate: action.cue_type === "audio" ? (action as NumberVisualAction & { rate?: number }).rate ?? 1 : 1,
+    });
+  }
+  return [...masterTracks, ...actionTracks];
+}
 
 function normalizeSlices(s: SliceList | undefined): SliceList {
   return { markers: s?.markers ?? [], play_counts: s?.play_counts ?? [1] };
@@ -152,16 +225,18 @@ export function ClipEditorDock({
   const [waveform, setWaveform] = useState<WaveformData | null>(null);
   const [tiles, setTiles] = useState<HTMLImageElement[] | null>(null);
   const [numberAssets, setNumberAssets] = useState<Record<string, NumberMediaAsset>>({});
+  const [numberRangeStrips, setNumberRangeStrips] = useState<Record<string, NumberRangeAsset>>({});
   const [previewUi, setPreviewUi] = useState<CueBoundPreviewUi | null>(null);
   /** Set on first zoom ≥ 2× — swaps in high-resolution media data. */
   const [wantDetail, setWantDetail] = useState(false);
   /** Visible window while zoomed (video: drives the range filmstrip). */
   const [zoomView, setZoomView] = useState<TrimView | null>(null);
   /** Window-matched frames streamed in while zoomed. */
-  const [rangeStrip, setRangeStrip] =
-    useState<{ startMs: number; endMs: number; tiles: HTMLImageElement[] } | null>(null);
-  const [localActiveTab, setLocalActiveTab] = useState<ClipEditorTab>("Preview");
+  const [rangeStrip, setRangeStrip] = useState<VideoFilmstripWindow | null>(null);
+  const [filmstripViewportRef, filmstripViewportWidth] = useMeasuredWidth();
+  const [localActiveTab, setLocalActiveTab] = useState<ClipEditorTab>("Live");
   const [manualLiveSelection, setManualLiveSelection] = useState<ManualLiveMediaSelection | null>(null);
+  const [pinnedLiveNumberId, setPinnedLiveNumberId] = useState<string | null>(null);
   const [presentationNavigationRef, presentationNavigationHeight] = useMeasuredHeight(!!presentationPreview && !!presentationOwner);
   const previewActiveRef = useRef(false);
   const previewPlayingIntentRef = useRef(false);
@@ -189,6 +264,8 @@ export function ClipEditorDock({
   const previewError = displayedPreviewUi?.error ?? null;
   const cueIsLoading = useWorkspaceStore((state) => cueId ? findCueIsLoading(state.cues, cueId) : undefined);
   const cueRuntimeSummary = useWorkspaceStore((state) => cueId ? findCueSummary(state.cues, cueId) : null);
+  const cueNumberSourceKey = cueRuntimeSummary?.cue_type === "number" ? numberMediaSourceSignature(cueRuntimeSummary.children ?? []) : "";
+  const cueNumberLayoutKey = cueRuntimeSummary?.cue_type === "number" ? numberMediaLayoutSignature(cueRuntimeSummary as NumberCueData) : "";
   const liveCueCatalog = useWorkspaceStore((state) => state.cueCatalog);
   const cueStartOrder = useWorkspaceStore((state) => state.cueStartOrder);
   const preWaitCueIds = useTimingStore(useShallow((state) => Object.keys(state.timings)
@@ -200,11 +277,19 @@ export function ClipEditorDock({
     cueStartOrder,
     preWaitTimings,
   ), [liveCueCatalog, cueStartOrder, preWaitTimings]);
-  const selectedLiveCue = resolveLiveMediaSelection(liveCandidates, manualLiveSelection);
+  const selectedLiveCue = resolveLiveMediaSelection(liveCandidates, manualLiveSelection, pinnedLiveNumberId);
   const livePresentationOwner = resolveLivePresentationOwner(selectedLiveCue?.id, liveCueCatalog, cueStartOrder);
   useEffect(() => {
+    const activeNumbers = liveCandidates.filter((candidate) => candidate.cue_type === "number"
+      && (candidate.state === "running" || candidate.state === "paused"));
+    if (pinnedLiveNumberId && activeNumbers.some((candidate) => candidate.id === pinnedLiveNumberId)) return;
+    const nextPinnedNumber = activeNumbers.reduce<typeof activeNumbers[number] | null>((latest, candidate) =>
+      !latest || candidate.startOrder > latest.startOrder ? candidate : latest, null);
+    if (nextPinnedNumber?.id !== pinnedLiveNumberId) setPinnedLiveNumberId(nextPinnedNumber?.id ?? null);
+  }, [liveCandidates, pinnedLiveNumberId]);
+  useEffect(() => {
     const manualStillActive = manualLiveSelection && liveCandidates.some((candidate) => candidate.id === manualLiveSelection.cueId);
-    if (manualLiveSelection && (!manualStillActive || shouldFollowLatestLiveMedia(liveCandidates, manualLiveSelection))) {
+    if (manualLiveSelection && !manualStillActive) {
       setManualLiveSelection(null);
     }
   }, [liveCandidates, manualLiveSelection]);
@@ -376,8 +461,7 @@ export function ClipEditorDock({
         if (!cancelled && isCurrentClipLoad(generation, cueLoadGenerationRef.current)) onClose();
       }); // cue deleted — close the dock
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cueId, reloadToken]);
+  }, [cueId, reloadToken, cueNumberSourceKey, cueNumberLayoutKey]);
 
   const mediaSourceIdentity = cue?.id === cueId && cue.file_path
     ? JSON.stringify([cue.id, cue.cue_type, cue.file_path, cue.media_source_revision ?? null])
@@ -458,6 +542,7 @@ export function ClipEditorDock({
   const numberMediaLayoutKey = numberCueForMedia ? numberMediaLayoutSignature(numberCueForMedia) : "";
   useLayoutEffect(() => {
     ++numberAssetGenerationRef.current;
+    setNumberRangeStrips({});
   }, [cue?.id, cue?.cue_type, numberMediaSourceKey, numberMediaLayoutKey]);
   useEffect(() => {
     const generation = ++numberAssetGenerationRef.current;
@@ -495,6 +580,9 @@ export function ClipEditorDock({
         filmstripKey: nextFilmstripKey,
         waveform: canReuseWaveform ? cached.waveform : null,
         tiles: canReuseTiles ? cached.tiles : null,
+        filmstrips: canReuseTiles && cached.tiles?.length
+          ? [{ sourceStartMs: cueSourceWindow(child).startMs, sourceEndMs: cueSourceWindow(child).endMs, tiles: cached.tiles }]
+          : undefined,
       } satisfies NumberMediaAsset];
     })) as Record<string, NumberMediaAsset>;
     setNumberAssets(pendingAssets);
@@ -519,7 +607,10 @@ export function ClipEditorDock({
               : getVideoFilmstrip(child.file_path, FILMSTRIP_TILES, FILMSTRIP_TILE_WIDTH))
               .then((urls) => Promise.all(urls.map(loadImage))).catch(() => null)
           : null;
-        return [child.id, { cueId: child.id, filePath: path, sourceRevision, filmstripKey: key, waveform, tiles }] as const;
+        return [child.id, {
+          cueId: child.id, filePath: path, sourceRevision, filmstripKey: key, waveform, tiles,
+          filmstrips: tiles?.length ? [{ sourceStartMs, sourceEndMs, tiles }] : [],
+        }] as const;
       }))
       .then((entries) => {
         if (cancelled || generation !== numberAssetGenerationRef.current) return;
@@ -609,8 +700,9 @@ export function ClipEditorDock({
     if (activeTab === "Preview" && !showLivePanel) setActiveTab("Live");
   }, [activeTab, showLivePanel]);
 
-  // High-resolution swap once the operator zooms in: finer waveform bins /
-  // a denser filmstrip (both cached, so this costs once per file).
+  // High-resolution waveform swap once the operator zooms in. Video frames
+  // are requested only for the visible window below, not decoded for the
+  // entire file.
   useEffect(() => {
     if (!cueId || !wantDetail || !cue?.file_path) return;
     const generation = assetGenerationRef.current;
@@ -621,12 +713,6 @@ export function ClipEditorDock({
         .then((data) => {
           if (!cancelled && waveformRequest === waveformRequestRef.current
             && isCurrentClipLoad(generation, assetGenerationRef.current)) setWaveform(data);
-        })
-        .catch(() => {});
-      getVideoFilmstrip(cue.file_path, 48, FILMSTRIP_TILE_WIDTH)
-        .then((urls) => Promise.all(urls.map(loadImage)))
-        .then((images) => {
-          if (!cancelled && isCurrentClipLoad(generation, assetGenerationRef.current)) setTiles(images);
         })
         .catch(() => {});
     } else {
@@ -640,21 +726,33 @@ export function ClipEditorDock({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cueId, cue?.file_path, cue?.cue_type, wantDetail]);
 
-  // Zoomed video: stream in frames for the visible window (debounced — waits
-  // for the zoom/pan to settle; results are disk-cached on a ½ s grid).
+  // Zoomed video: request source frames for the visible window. The backend
+  // cache keys exact millisecond ranges, so the request uses finer rounding at
+  // high zoom and sizes its frame count to the actual canvas width.
   useEffect(() => {
     if (!isVideo || !zoomView || !cue?.file_path) return;
     const path = cue.file_path;
     const generation = assetGenerationRef.current;
-    const startS = Math.max(0, Math.floor((zoomView.startMs / 1000) * 2) / 2);
-    const endS = Math.ceil((zoomView.endMs / 1000) * 2) / 2;
+    const fileDurationMs = [
+      (cue as VideoCueData).cached_duration_ms,
+      cue.file_duration_ms,
+      cue.duration_ms,
+      (waveform?.file_duration_s ?? 0) * 1000,
+    ].find((value) => Number.isFinite(value) && (value ?? 0) > 0) ?? 0;
+    const request = videoFilmstripRequest(
+      zoomView.startMs,
+      zoomView.endMs,
+      fileDurationMs,
+      filmstripViewportWidth,
+    );
+    if (!request) return;
     let stale = false;
     const timer = setTimeout(() => {
-      getVideoFilmstripRange(path, startS, endS, 12, FILMSTRIP_TILE_WIDTH)
+      getVideoFilmstripRange(path, request.startMs / 1000, request.endMs / 1000, request.tiles, FILMSTRIP_TILE_WIDTH)
         .then((urls) => Promise.all(urls.map(loadImage)))
         .then((images) => {
           if (!stale && isCurrentClipLoad(generation, assetGenerationRef.current)) {
-            setRangeStrip({ startMs: startS * 1000, endMs: endS * 1000, tiles: images });
+            setRangeStrip({ sourceStartMs: request.startMs, sourceEndMs: request.endMs, tiles: images });
           }
         })
         .catch(() => {});
@@ -663,7 +761,7 @@ export function ClipEditorDock({
       stale = true;
       clearTimeout(timer);
     };
-  }, [isVideo, zoomView, cue?.file_path]);
+  }, [isVideo, zoomView, cue?.file_path, cue?.media_source_revision, cue?.cached_duration_ms, cue?.file_duration_ms, cue?.duration_ms, waveform?.file_duration_s, filmstripViewportWidth]);
 
   const save = async (partial: Partial<ClipCue>, fadeEdit = false) => {
     if (!cueId) return;
@@ -771,39 +869,23 @@ export function ClipEditorDock({
         ctx.fillText(tiles === null ? t("sweepUi.generatingPreview") : t("sweepUi.noPreview"), W / 2, H / 2);
         return;
       }
-      // Tiles are time-anchored: map each tile's time range into the visible
-      // window so zooming stays aligned.
-      const viewSpan = view.endMs - view.startMs;
-      const drawStrip = (
-        strip: HTMLImageElement[],
-        stripStartMs: number,
-        stripEndMs: number,
-      ) => {
-        const tileMs = (stripEndMs - stripStartMs) / strip.length;
-        for (let i = 0; i < strip.length; i++) {
-          const t0 = stripStartMs + i * tileMs;
-          const x0 = ((t0 - view.startMs) / viewSpan) * W;
-          const x1 = ((t0 + tileMs - view.startMs) / viewSpan) * W;
-          if (x1 < 0 || x0 > W) continue;
-          const img = strip[i];
-          const cellW = x1 - x0;
-          const scale = Math.max(cellW / img.width, H / img.height);
-          const dw = img.width * scale;
-          const dh = img.height * scale;
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(x0, 0, cellW, H);
-          ctx.clip();
-          ctx.drawImage(img, x0 + (cellW - dw) / 2, (H - dh) / 2, dw, dh);
-          ctx.restore();
-        }
-      };
-      drawStrip(tiles, 0, durationMs);
-      // Window-matched frames on top while zoomed in (crisper than the
-      // stretched whole-file tiles).
-      if (rangeStrip && rangeStrip.tiles.length > 0 && viewSpan < durationMs) {
-        drawStrip(rangeStrip.tiles, rangeStrip.startMs, rangeStrip.endMs);
-      }
+      const windows: VideoFilmstripWindow[] = [{
+        sourceStartMs: 0,
+        sourceEndMs: durationMs,
+        tiles,
+      }];
+      if (rangeStrip && rangeStrip.tiles.length > 0) windows.push(rangeStrip);
+      drawVideoFilmstripWindows(ctx, windows, {
+        timelineStartMs: 0,
+        timelineEndMs: durationMs,
+        sourceStartMs: 0,
+        sourceEndMs: durationMs,
+        viewStartMs: view.startMs,
+        viewEndMs: view.endMs,
+        width: W,
+        top: 0,
+        height: H,
+      });
       ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
       ctx.fillRect(0, 0, startX, H);
       ctx.fillRect(endX, 0, W - endX, H);
@@ -837,20 +919,20 @@ export function ClipEditorDock({
   const dragPreview = useCallback(
     (ms: number) => {
       if (!tiles || tiles.length === 0 || durationMs <= 0) return null;
-      const idx = Math.min(
-        tiles.length - 1,
-        Math.max(0, Math.round((ms / durationMs) * (tiles.length - 1))),
-      );
+      const windows: VideoFilmstripWindow[] = [{ sourceStartMs: 0, sourceEndMs: durationMs, tiles }];
+      if (rangeStrip) windows.push(rangeStrip);
+      const image = filmstripFrameAtSourceTime(windows, ms);
+      if (!image) return null;
       return (
         <div style={{ background: "#000", border: "1px solid var(--wc-border-strong)", borderRadius: 4, overflow: "hidden", boxShadow: "0 4px 16px rgba(0,0,0,0.6)" }}>
-          <img src={tiles[idx].src} alt="" style={{ display: "block", width: 200 }} />
+          <img src={image.src} alt="" style={{ display: "block", width: 200 }} />
           <div style={{ textAlign: "center", fontSize: 11, padding: "2px 0", color: "var(--wc-text)", fontVariantNumeric: "tabular-nums", background: "var(--wc-bg-deepest)" }}>
             {(ms / 1000).toFixed(3)}s
           </div>
         </div>
       );
     },
-    [tiles, durationMs],
+    [tiles, durationMs, rangeStrip],
   );
 
   // ── Dedicated headphone preview (never the main program output) ───────────
@@ -971,64 +1053,96 @@ export function ClipEditorDock({
     useNumberPreviewStore.getState().select(numberCue.id, numberMasterDuration(numberCue));
   }, [numberCue?.id, timelineDurationMs]);
 
-  const numberTracks = useMemo<NumberTimelineTrack[]>(() => {
-    if (!numberCue) return [];
-    const master = numberCue.children.find((child) => child.id === numberCue.number_master_id);
-    const actions = numberVisualActions(numberCue);
-    const groupTracks = (group: typeof numberCue.children[number], baseMs: number, limitMs: number, prefix: string): NumberTimelineTrack[] => {
-      if (group.cue_type !== "group") return [];
-      const segments = numberGroupTimelineActions(group, baseMs, limitMs, prefix).map((action) => ({
-        id: action.id,
-        name: action.name,
-        startMs: action.timeline_start_ms ?? baseMs,
-        endMs: action.timeline_end_ms ?? baseMs,
-        cueType: action.cue_type as NumberTimelineTrack["cueType"],
-        media: numberAssets[action.id],
-        sourceStartMs: Math.max(0, action.start_time_ms ?? 0),
-        sourceEndMs: Math.max(0, action.end_time_ms ?? action.file_duration_ms ?? action.duration_ms ?? action.cached_duration_ms ?? 0),
-        maxDurationMs: numberActionDuration(action, limitMs),
-        looped: action.looped,
-        readonly: true,
-      }));
-      return [{
-        id: group.id,
-        name: `Group · ${group.name}`,
-        startMs: baseMs,
-        endMs: limitMs,
-        cueType: "group" as const,
-        readonly: true,
-        segments,
-      }];
-    };
-    const masterTracks = master?.cue_type === "group"
-      ? groupTracks(master, 0, timelineDurationMs, master.name)
-      : master
-        ? [{ id: master.id, name: master.name, startMs: 0, endMs: numberMasterDuration(numberCue), sourceStartMs: cueSourceWindow(master).startMs, sourceEndMs: cueSourceWindow(master).endMs, master: true, looped: numberActionLooped(master), cueType: master.cue_type as NumberTimelineTrack["cueType"], media: numberAssets[master.id] }]
-        : [];
-    const actionTracks: NumberTimelineTrack[] = [];
-    for (const action of actions) {
-      if (action.cue_type === "group") {
-        actionTracks.push(...groupTracks(action, action.timeline_start_ms ?? 0, action.timeline_end_ms ?? timelineDurationMs, action.name));
-        continue;
-      }
-        const sourceStartMs = Math.max(0, action.start_time_ms ?? 0);
-        const fileDurationMs = Math.max(0, action.file_duration_ms ?? action.duration_ms ?? action.cached_duration_ms ?? 0);
-        const sourceDurationMs = fileDurationMs;
-        actionTracks.push({
-          id: action.id,
-          name: action.name,
-          startMs: action.timeline_start_ms ?? 0,
-          endMs: action.timeline_end_ms ?? 0,
-          cueType: action.cue_type as NumberTimelineTrack["cueType"],
-          media: numberAssets[action.id],
-          sourceStartMs,
-          sourceEndMs: Math.max(sourceStartMs, action.end_time_ms ?? sourceDurationMs),
-          maxDurationMs: Math.max(0, sourceDurationMs - sourceStartMs),
-          looped: action.looped,
-        });
+  const numberTracks = useMemo(() => numberCue
+    ? buildNumberTimelineTracks(numberCue, numberAssets, timelineDurationMs, numberRangeStrips)
+    : [], [numberCue, numberAssets, timelineDurationMs, numberRangeStrips]);
+
+  // Number video tracks use the same window loader as a standalone video.
+  // Convert each visible action/pass back to source time before requesting;
+  // this keeps trims, rate changes, and loop boundaries aligned.
+  useEffect(() => {
+    if (!numberCue || !zoomView) {
+      setNumberRangeStrips({});
+      return;
     }
-    return [...masterTracks, ...actionTracks];
-  }, [numberCue, numberAssets]);
+    const generation = numberAssetGenerationRef.current;
+    const baseTracks = buildNumberTimelineTracks(numberCue, numberAssets, timelineDurationMs);
+    const plans: Array<{ id: string; path: string; revision: string | null; request: NonNullable<ReturnType<typeof videoFilmstripRequest>> }> = [];
+    const collect = (track: NumberTimelineTrack) => {
+      if (track.cueType === "video" && track.sourcePath
+        && typeof track.sourceEndMs === "number" && typeof track.sourceStartMs === "number") {
+        const windows = visibleFilmstripSourceWindows({
+          id: track.id,
+          startMs: track.startMs,
+          endMs: track.endMs,
+          sourceStartMs: track.sourceStartMs,
+          sourceEndMs: track.sourceEndMs,
+          rate: track.rate,
+          looped: track.looped,
+        }, zoomView.startMs, zoomView.endMs);
+        const fileDurationMs = Math.max(
+          track.sourceEndMs,
+          (track.media?.waveform?.file_duration_s ?? 0) * 1000,
+        );
+        for (const window of windows) {
+          const request = videoFilmstripRequest(
+            window.sourceStartMs,
+            window.sourceEndMs,
+            fileDurationMs,
+            filmstripViewportWidth,
+          );
+          if (request) plans.push({ id: track.id, path: track.sourcePath, revision: track.sourceRevision ?? null, request });
+        }
+      }
+      track.segments?.forEach(collect);
+    };
+    baseTracks.forEach(collect);
+    if (plans.length === 0) {
+      setNumberRangeStrips({});
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      const loaded = new Array<VideoFilmstripWindow | null>(plans.length).fill(null);
+      let cursor = 0;
+      const worker = async () => {
+        while (!cancelled) {
+          const index = cursor++;
+          if (index >= plans.length) return;
+          const plan = plans[index];
+          const urls = await getVideoFilmstripRange(
+            plan.path,
+            plan.request.startMs / 1000,
+            plan.request.endMs / 1000,
+            plan.request.tiles,
+            FILMSTRIP_TILE_WIDTH,
+          ).catch(() => null);
+          if (!urls || cancelled) continue;
+          const images = await Promise.all(urls.map(loadImage)).catch(() => null);
+          if (images && !cancelled) loaded[index] = {
+            sourceStartMs: plan.request.startMs,
+            sourceEndMs: plan.request.endMs,
+            tiles: images,
+          };
+        }
+      };
+      void Promise.all(Array.from({ length: Math.min(3, plans.length) }, worker)).then(() => {
+        if (cancelled || generation !== numberAssetGenerationRef.current) return;
+        const byCue: Record<string, NumberRangeAsset> = {};
+        loaded.forEach((window, index) => {
+          if (!window) return;
+          const plan = plans[index];
+          const asset = byCue[plan.id] ??= { filePath: plan.path, sourceRevision: plan.revision, windows: [] };
+          asset.windows.push(window);
+        });
+        setNumberRangeStrips(byCue);
+      });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [numberCue, numberMediaSourceKey, numberMediaLayoutKey, numberAssets, timelineDurationMs, zoomView, filmstripViewportWidth]);
 
   const applyNumberTrackEdit = useCallback((
     numberId: string,
@@ -1045,8 +1159,8 @@ export function ClipEditorDock({
       const nextChildren = (previous.children ?? []).map((child) => {
         if (child.id !== actionId) return child;
         const next = { ...(child as NumberEditableChild) };
-        if (kind === "start") next.start_time_ms = Math.max(0, Math.round(sourceStart + startMs - timelineStart));
-        if (kind === "end") next.end_time_ms = Math.max(0, Math.round(sourceStart + (endMs - startMs)));
+        if (kind === "start") next.start_time_ms = Math.max(0, Math.round(sourceStart + numberActionTimelineDeltaToSource(action, startMs - timelineStart)));
+        if (kind === "end") next.end_time_ms = Math.max(0, Math.round(sourceStart + numberActionTimelineDeltaToSource(action, endMs - startMs)));
         if (action.cue_type === "image" && kind !== "move") next.display_duration_ms = Math.max(0, Math.round(endMs - startMs));
         return next;
       });
@@ -1062,7 +1176,7 @@ export function ClipEditorDock({
         candidates={liveCandidates}
         selectedCue={selectedLiveCue}
         presentationOwner={livePresentationOwner as unknown as CueSummary | null}
-        onSelectCue={(cueId) => setManualLiveSelection(createManualLiveMediaSelection(liveCandidates, cueId))}
+        onSelectCue={(cueId) => setManualLiveSelection(createManualLiveMediaSelection(cueId))}
         onPresentationChanged={onSaved}
         showPreviewPanel={showLivePanel}
         reloadToken={reloadToken}
@@ -1173,7 +1287,7 @@ export function ClipEditorDock({
 
       {/* Timeline */}
       {presentationPreview && presentationOwner && <div ref={presentationNavigationRef} style={{ flexShrink: 0 }}><PresentationControls owner={presentationOwner} mode="preview" currentChildId={presentationPreviewChildId} onStep={(direction) => onPresentationPreviewStep?.(direction)} /></div>}
-      <div style={dockTimelineBody}>
+      <div style={dockTimelineBody} ref={filmstripViewportRef}>
         {previewMediaOnly ? cue.file_path ? (
           <div style={{ height: "100%", display: "grid", placeItems: "center", overflow: "hidden" }}>
             <EditorErrorBoundary label={isVideo ? "Предпросмотр видео временно недоступен" : "Предпросмотр изображения временно недоступен"}>
@@ -1213,7 +1327,7 @@ export function ClipEditorDock({
               })}
               paint={isVideo ? paintVideoTimeline : paintWaveform}
               paintKey={isVideo ? videoPaintKey : waveform}
-              resetKey={cue.file_path}
+              resetKey={isNumber ? `${cue.id}\u0000${numberMediaSourceKey}` : cue.file_path}
               mediaPositionMs={null}
               previewPositionMs={previewPositionMs}
               seekEnabled={canSeekProgramFromClipEditor(activeTab, cue.state, cue.cue_type)}
@@ -1265,17 +1379,14 @@ export function ClipEditorDock({
               }}
               onNumberTrackChange={(track, kind, rawStart, rawEnd) => {
                 if (!numberCue || track.master) return;
-                const edges = numberTracks.filter((item) => item.id !== track.id).flatMap((item) => [item.startMs, item.endMs]);
-                // Approximate the native canvas 9px snap radius at its usual
-                // 600px width while keeping it proportional to clip length.
-                const threshold = Math.max(1, timelineDurationMs * 9 / 600);
-                const snappedStart = snapNumberTime(rawStart, timelineDurationMs, edges, threshold);
-                const snappedEnd = snapNumberTime(rawEnd, timelineDurationMs, edges, threshold);
-                const snapped = applyNumberDragSnap(kind, { startMs: rawStart, endMs: rawEnd }, { startMs: snappedStart, endMs: snappedEnd });
-                const start = Math.max(0, Math.min(timelineDurationMs, snapped.startMs));
-                const end = Math.max(start, Math.min(timelineDurationMs, snapped.endMs));
+                // LiveTimeline already snaps and validates the final drag range.
+                // Re-snapping here can collapse an image's minimum 100ms span.
+                const start = Math.max(0, Math.min(timelineDurationMs, rawStart));
+                const end = Math.max(start, Math.min(timelineDurationMs, rawEnd));
                 const action = numberVisualActions(numberCue).find((item) => item.id === track.id);
                 if (!action) return;
+                const ticket = { cueId: numberCue.id, generation: ++saveGenerationRef.current };
+                const isCurrent = () => isCurrentCueRequest(ticket, saveGenerationRef.current, saveCueIdRef.current);
                 applyNumberTrackEdit(numberCue.id, action.id, kind, start, end, action);
                 void (async () => {
                   try {
@@ -1286,21 +1397,24 @@ export function ClipEditorDock({
                         const sourceStart = Math.max(0, action.start_time_ms ?? 0);
                         const sourceDelta = start - (action.timeline_start_ms ?? 0);
                         await updateCue(action.id, kind === "start"
-                          ? { start_time_ms: Math.max(0, Math.round(sourceStart + sourceDelta)) }
-                          : { end_time_ms: Math.max(0, Math.round(sourceStart + (end - start))) });
+                          ? { start_time_ms: Math.max(0, Math.round(sourceStart + numberActionTimelineDeltaToSource(action, sourceDelta))) }
+                          : { end_time_ms: Math.max(0, Math.round(sourceStart + numberActionTimelineDeltaToSource(action, end - start))) });
                       }
                     }
+                    if (!isCurrent()) return;
                     const refreshed = await getCue(numberCue.id);
-                    if (displayedCueIdRef.current === numberCue.id && refreshed.id === numberCue.id) {
+                    if (isCurrent() && displayedCueIdRef.current === numberCue.id && refreshed.id === numberCue.id) {
                       const normalized = normalizeNumberCueData(refreshed as NumberCueData & { master_child_id?: string | null; action_offsets_ms?: Record<string, number> });
                       setCue(normalized as ClipCue);
                     }
+                    if (!isCurrent()) return;
                     setSaveError(null);
                     onSaved();
                   } catch (error) {
+                    if (!isCurrent()) return;
                     setSaveError(formatInspectorSaveError(error, false, t));
                     const refreshed = await getCue(numberCue.id).catch(() => null);
-                    if (refreshed && displayedCueIdRef.current === numberCue.id) {
+                    if (refreshed && isCurrent() && displayedCueIdRef.current === numberCue.id) {
                       setCue(normalizeNumberCueData(refreshed as NumberCueData & { master_child_id?: string | null; action_offsets_ms?: Record<string, number> }) as ClipCue);
                     }
                   }
@@ -1386,10 +1500,19 @@ function LiveMediaDock({
   const headerRef = useRef<HTMLDivElement>(null);
   const [presentationNavigationRef, presentationNavigationHeight] = useMeasuredHeight(!!presentationOwner);
   const [cue, setCue] = useState<AudioCueData | VideoCueData | ImageCueData | null>(null);
+  const [numberCue, setNumberCue] = useState<NumberCueData | null>(null);
+  const [numberAssets, setNumberAssets] = useState<Record<string, NumberMediaAsset>>({});
+  const liveLoadedNumberSourceKey = numberCue ? numberMediaSourceSignature(numberCue.children) : "";
+  const liveLoadedNumberLayoutKey = numberCue ? numberMediaLayoutSignature(numberCue) : "";
   const [waveform, setWaveform] = useState<WaveformData | null>(null);
   const [tiles, setTiles] = useState<HTMLImageElement[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const timing = useTimingStore((state) => selectedCue ? state.timings[selectedCue.id] : undefined);
+  const liveNumberSourceKey = selectedCue?.cue_type === "number" ? numberMediaSourceSignature((selectedCue.children ?? []) as unknown as CueSummary[]) : "";
+  const liveNumberLayoutKey = selectedCue?.cue_type === "number" ? numberMediaLayoutSignature({
+    children: (selectedCue.children ?? []) as unknown as CueSummary[], number_master_id: selectedCue.number_master_id ?? null,
+    number_action_offsets_ms: selectedCue.number_action_offsets_ms,
+  }) : "";
 
   useLayoutEffect(() => {
     const header = headerRef.current;
@@ -1403,6 +1526,7 @@ function LiveMediaDock({
 
   useEffect(() => {
     setCue(null);
+    setNumberCue(null);
     setWaveform(null);
     setTiles(null);
     setLoadError(null);
@@ -1416,6 +1540,10 @@ function LiveMediaDock({
       try {
         const details = await getCue(selectedCue.id);
         if (cancelled) return;
+        if (details.cue_type === "number") {
+          setNumberCue(normalizeNumberCueData(details as NumberCueData));
+          return;
+        }
         if (details.cue_type !== "audio" && details.cue_type !== "video" && details.cue_type !== "image") return;
         setCue(details as AudioCueData | VideoCueData | ImageCueData);
       } catch (error) {
@@ -1423,7 +1551,70 @@ function LiveMediaDock({
       }
     })();
     return () => { cancelled = true; };
-  }, [selectedCue?.id, selectedCue?.media_source_revision, reloadToken]);
+  }, [selectedCue?.id, selectedCue?.media_source_revision, liveNumberSourceKey, liveNumberLayoutKey, reloadToken]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!numberCue) { setNumberAssets({}); return () => { cancelled = true; }; }
+    const generationCue = numberCue;
+    const children: CueSummary[] = [];
+    const collect = (items: CueSummary[]) => items.forEach((item) => {
+      if (item.cue_type === "audio" || item.cue_type === "video" || item.cue_type === "image") children.push(item);
+      if (item.cue_type === "group") collect(item.children ?? []);
+    });
+    collect(generationCue.children);
+    const filmstripKey = (child: CueSummary) => child.cue_type === "video" && child.file_path
+      ? JSON.stringify([child.file_path, cueSourceWindow(child).startMs, cueSourceWindow(child).endMs])
+      : child.cue_type === "image" ? JSON.stringify([child.file_path, child.media_source_revision ?? null]) : null;
+    const pendingAssets = Object.fromEntries(children.map((child) => {
+      const cached = numberAssets[child.id];
+      const path = child.file_path ?? null;
+      const key = filmstripKey(child);
+      const sameSource = cached?.cueId === child.id && cached.filePath === path
+        && cached.sourceRevision === child.media_source_revision;
+      return [child.id, {
+        cueId: child.id, filePath: path, sourceRevision: child.media_source_revision, filmstripKey: key,
+        waveform: canReuseNumberWaveformAsset(cached, child.id, path, child.media_source_revision) ? cached!.waveform : null,
+        tiles: sameSource && cached?.filmstripKey === key ? cached.tiles : null,
+      } satisfies NumberMediaAsset];
+    })) as Record<string, NumberMediaAsset>;
+    setNumberAssets(pendingAssets);
+    void Promise.all(children.map(async (child) => {
+      const cached = numberAssets[child.id];
+      const path = child.file_path ?? null;
+      const key = filmstripKey(child);
+      const waveform = canReuseNumberWaveformAsset(cached, child.id, path, child.media_source_revision)
+        ? cached!.waveform!
+        : path && (child.cue_type === "audio" || child.cue_type === "video")
+          ? await getWaveformPeaks(child.id, 1200).catch(() => null)
+          : null;
+      const source = cueSourceWindow(child);
+      const tiles = child.cue_type === "image" && child.file_path
+        ? cached?.cueId === child.id && cached.filePath === path && cached.sourceRevision === child.media_source_revision && cached.filmstripKey === key
+          ? cached.tiles
+          : await getMediaThumbnail(child.file_path, false).then(loadImage).then((image) => [image]).catch(() => null)
+        : child.cue_type === "video" && child.file_path
+        ? cached?.cueId === child.id && cached.filePath === path && cached.sourceRevision === child.media_source_revision && cached.filmstripKey === key
+          ? cached.tiles
+          : await (source.endMs > source.startMs
+            ? getVideoFilmstripRange(child.file_path, source.startMs / 1000, source.endMs / 1000, FILMSTRIP_TILES, FILMSTRIP_TILE_WIDTH)
+            : getVideoFilmstrip(child.file_path, FILMSTRIP_TILES, FILMSTRIP_TILE_WIDTH))
+            .then((urls) => Promise.all(urls.map(loadImage))).catch(() => null)
+        : null;
+      return [child.id, { cueId: child.id, filePath: path, sourceRevision: child.media_source_revision, filmstripKey: key, waveform, tiles }] as const;
+    })).then((entries) => {
+      if (cancelled) return;
+      const assets = Object.fromEntries(entries) as Record<string, NumberMediaAsset>;
+      const addGroups = (items: CueSummary[]) => items.forEach((item) => {
+        if (item.cue_type !== "group") return;
+        addGroups(item.children ?? []);
+        assets[item.id] = { cueId: item.id, filePath: null, filmstripKey: null, waveform: composeGroupWaveform(item, Object.fromEntries(Object.entries(assets).map(([id, asset]) => [id, asset.waveform]))), tiles: null };
+      });
+      addGroups(generationCue.children);
+      setNumberAssets(assets);
+    });
+    return () => { cancelled = true; };
+  }, [numberCue?.id, liveLoadedNumberSourceKey, liveLoadedNumberLayoutKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1444,7 +1635,9 @@ function LiveMediaDock({
     return () => { cancelled = true; };
   }, [selectedCue?.id, selectedCue?.media_source_revision, cue?.id, cue?.cue_type, cue?.file_path]);
 
-  const durationMs = cue && "display_duration_ms" in cue
+  const durationMs = numberCue
+    ? numberMasterDuration(numberCue)
+    : cue && "display_duration_ms" in cue
     ? Math.max(0, cue.display_duration_ms ?? selectedCue?.duration_ms ?? 0)
     : (waveform?.file_duration_s ?? 0) * 1000
       || cue?.file_duration_ms
@@ -1453,15 +1646,19 @@ function LiveMediaDock({
       || selectedCue?.file_duration_ms
       || selectedCue?.duration_ms
       || 0;
-  const cueType = cue?.cue_type ?? selectedCue?.cue_type;
-  const trackName = cue?.name ?? selectedCue?.name ?? "";
+  const cueType = numberCue ? "number" : cue?.cue_type ?? selectedCue?.cue_type;
+  const trackName = numberCue?.name ?? cue?.name ?? selectedCue?.name ?? "";
   const liveAudioFade = cue?.cue_type === "audio" || cue?.cue_type === "video"
     ? audioFadeForCue(cue, durationMs)
     : null;
-  const runtimePositionMs = cueType === "image"
+  const runtimePositionMs = cueType === "number"
+    ? timing?.action_elapsed_ms ?? null
+    : cueType === "image"
     ? timing?.elapsed_ms ?? null
     : timing?.media_position_ms ?? null;
-  const seekEnabled = canSeekProgramFromClipEditor("Live", selectedCue?.state, cueType);
+  const seekEnabled = cueType === "number"
+    ? selectedCue?.state === "running" || selectedCue?.state === "paused"
+    : canSeekProgramFromClipEditor("Live", selectedCue?.state, cueType);
   const trimStartMs = cue && "start_time_ms" in cue ? cue.start_time_ms : null;
   const trimEndMs = cue && "end_time_ms" in cue ? cue.end_time_ms : null;
   const liveSlices = cue && "slices" in cue ? cue.slices : undefined;
@@ -1469,7 +1666,22 @@ function LiveMediaDock({
     ctx.fillStyle = "#0f172a";
     ctx.fillRect(0, 0, width, height);
   }, []);
-  const track = selectedCue && durationMs > 0 ? [{
+  const masterCue = numberCue?.children.find((child) => child.id === numberCue.number_master_id);
+  const numberMasterSlices = (masterCue as (CueSummary & { slices?: SliceList }) | undefined)?.slices;
+  const numberTracks = useMemo(() => numberCue
+    ? buildNumberTimelineTracks(numberCue, numberAssets, durationMs).map((track) => ({
+      ...track,
+      readonly: true,
+      segments: track.segments?.map((segment) => ({ ...segment, readonly: true })),
+    }))
+    : [], [numberCue, numberAssets, durationMs]);
+  const masterSource = masterCue ? cueSourceWindow(masterCue) : { startMs: 0, endMs: 0 };
+  const masterRate = masterCue?.cue_type === "audio" ? (masterCue as AudioCueData).rate : 1;
+  const masterLooped = masterCue ? numberActionLooped(masterCue as NumberVisualAction) : false;
+  const numberSlices = useMemo(() => numberSourceSlicesToAction(numberMasterSlices,
+    masterSource.startMs, masterSource.endMs, masterRate, durationMs, masterLooped),
+  [numberMasterSlices, masterSource.startMs, masterSource.endMs, masterRate, durationMs, masterLooped]);
+  const track = selectedCue && durationMs > 0 && !numberCue ? [{
     id: selectedCue.id,
     name: trackName,
     startMs: 0,
@@ -1550,6 +1762,40 @@ function LiveMediaDock({
           <div role="alert" style={{ color: "var(--wc-text-muted)", padding: 16 }}>{loadError}</div>
         ) : !selectedCue ? (
           <div style={{ color: "var(--wc-text-faint)", fontSize: 12, padding: 16, textAlign: "center" }}>{t("editorUi.noLiveMedia")}</div>
+        ) : numberCue ? (
+          durationMs <= 0 ? (
+            <div style={{ color: "var(--wc-text-faint)", fontSize: 12, padding: 16, textAlign: "center" }}>{t("sweepUi.waitingMedia")}</div>
+          ) : (
+            <EditorErrorBoundary label="Таймлайн временно недоступен">
+              <LiveTimeline
+                durationMs={durationMs}
+                startMs={null}
+                endMs={durationMs}
+                slices={numberSlices}
+                height={liveTimelineCanvasHeight(
+                  compactHeader ? CLIP_EDITOR_LIVE_HEADER_COMPACT_HEIGHT : CLIP_EDITOR_DOCK_HEADER_HEIGHT,
+                  { numberBands: false, gainHint: false, reservedHeight: presentationNavigationHeight },
+                )}
+                paint={livePaint}
+                paintKey={numberAssets}
+                resetKey={`${numberCue.id}\u0000${liveLoadedNumberSourceKey}`}
+                mediaPositionMs={runtimePositionMs}
+                seekEnabled={seekEnabled}
+                numberTracks={numberTracks}
+                selectNumberTracks={false}
+                showNumberTimingBands={false}
+                numberPreWaitMs={numberCue.pre_wait_ms}
+                numberPostWaitMs={numberCue.post_wait_ms}
+                numberRuntimeElapsedMs={timing?.elapsed_ms ?? null}
+                gainEnvelope={null}
+                gainEnvelopeReadOnly={false}
+                onSeek={(positionMs) => {
+                  if (!seekEnabled) return;
+                  void seekCue(numberCue.id, Math.max(0, Math.round(positionMs))).catch((error) => setLoadError(String(error)));
+                }}
+              />
+            </EditorErrorBoundary>
+          )
         ) : !cue || (durationMs <= 0 && cue.cue_type !== "image") ? (
           <div style={{ color: "var(--wc-text-faint)", fontSize: 12, padding: 16, textAlign: "center" }}>{t("sweepUi.waitingMedia")}</div>
         ) : cue.cue_type === "image" ? (
@@ -1627,6 +1873,25 @@ function useMeasuredHeight(enabled: boolean): readonly [React.RefCallback<HTMLDi
     return () => observer.disconnect();
   }, [enabled, element]);
   return [ref, height] as const;
+}
+
+function useMeasuredWidth(): readonly [React.RefCallback<HTMLDivElement>, number] {
+  const [element, setElement] = useState<HTMLDivElement | null>(null);
+  const ref = useCallback((node: HTMLDivElement | null) => setElement(node), []);
+  const [width, setWidth] = useState(0);
+  useLayoutEffect(() => {
+    if (!element) {
+      setWidth(0);
+      return;
+    }
+    const measure = () => setWidth(Math.max(1, element.clientWidth - 24));
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element]);
+  return [ref, width] as const;
 }
 
 const dockShell: React.CSSProperties = {

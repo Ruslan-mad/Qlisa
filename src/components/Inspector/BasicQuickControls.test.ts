@@ -30,6 +30,27 @@ describe("Basics quick controls", () => {
     expect(loopQuickToggleAfterCount(LOOP_INFINITE)).toBe(0);
   });
 
+  it("shows whole-Number looping from playlist_loop instead of media loop_count", () => {
+    const onHtml = renderToStaticMarkup(createElement(BasicQuickControls, {
+      cue: { id: "number-1", cue_type: "number", continue_mode: "do_not_continue", playlist_loop: true },
+      outputs: [],
+      outputIds: [],
+      onSave: vi.fn(),
+    }));
+    const offHtml = renderToStaticMarkup(createElement(BasicQuickControls, {
+      cue: { id: "number-1", cue_type: "number", continue_mode: "do_not_continue", playlist_loop: false, loop_count: LOOP_INFINITE },
+      outputs: [],
+      outputIds: [],
+      onSave: vi.fn(),
+    }));
+
+    expect(onHtml).toContain('aria-pressed="true"');
+    expect(onHtml).toContain("Повторять весь номер после окончания мастера");
+    expect(offHtml).toContain('aria-pressed="false"');
+    expect(offHtml).toContain("Зациклить весь номер");
+    expect(offHtml).toMatch(/aria-pressed="false" aria-label="Зациклить весь номер"/);
+  });
+
   it("keeps shared Fit buttons unpressed for mixed rows and preserves uniform single rows", () => {
     const html = renderToStaticMarkup(createElement(FitByOutputRows, {
       outputs: [{ id: "led", name: "LED" }, { id: "tv", name: "TV" }],

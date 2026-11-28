@@ -412,8 +412,8 @@ export const stopPreview = (voiceId: string) =>
 // Playhead
 // ---------------------------------------------------------------------------
 
-export const setPlayhead = (cueId: CueId | null) =>
-  invoke<void>("set_playhead", { cueId });
+export const setPlayhead = (cueId: CueId | null, selectionOnly = false) =>
+  invoke<void>("set_playhead", selectionOnly ? { cueId, selectionOnly: true } : { cueId });
 export const getPlayhead = () => invoke<CueId | null>("get_playhead");
 
 // ---------------------------------------------------------------------------

@@ -2,11 +2,11 @@
 //!
 //! The cue delegates rendering to the [`OutputEngine`], which uses libmpv with
 //! `audio=no,image-display-duration=inf` to show the image in the unified
-//! output window.  Images stay visible until explicitly stopped — there is no
-//! auto-complete via duration.
+//! output window. Finite display duration is tracked by the cue clock so seek,
+//! pause, and resume use the same timing source.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -174,12 +174,16 @@ impl ImageCue {
             },
             output_id: self.output_id.as_deref(),
             audio_voice_id: None,
-            display_duration_ms: self.display_duration_ms,
+            // The cue's pause-aware clock owns image lifetime. mpv's fixed
+            // TTL cannot follow a timeline seek backwards.
+            display_duration_ms: None,
             hold_last_frame: false,
             geometry: self.geometry,
             presentation_video_layout: None,
             live_source: false,
             layer_style: self.layer_style,
+            layer_group_order: context.visual_group_order(),
+            layer_child_order: None,
             slices: Vec::new(),
             preload: self.preloading,
         }, &self.output_ids, &self.geometry_by_output)?;
@@ -193,20 +197,6 @@ impl ImageCue {
         context.emit(CueEvent::ActionStarted { cue_id: self.id });
         Ok(())
     }
-}
-
-fn timed_gif_duration_elapsed(
-    file_path: Option<&Path>,
-    action_elapsed: Duration,
-    display_duration_ms: Option<u64>,
-) -> bool {
-    let is_gif = file_path
-        .and_then(Path::extension)
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("gif"));
-    is_gif
-        && display_duration_ms
-            .map(Duration::from_millis)
-            .is_some_and(|duration| action_elapsed >= duration)
 }
 
 impl Default for ImageCue {
@@ -398,6 +388,7 @@ impl Cue for ImageCue {
         if let Some(vid) = self.active_voice_id {
             if self.preloaded {
                 // Held off-screen by a Load Cue — this is the reveal.
+                context.output_engine.set_voice_layer_order(vid, context.visual_group_order());
                 context.output_engine.start_preloaded(vid);
                 self.started_at = Some(now);
                 self.action_started_at = Some(now);
@@ -438,6 +429,34 @@ impl Cue for ImageCue {
         Ok(())
     }
 
+    fn seek(&mut self, position_ms: u64, context: &CueContext) {
+        if self.in_pre_wait
+            || self.active_voice_id.is_none()
+            || !matches!(self.state, CueState::Running | CueState::Paused)
+        {
+            return;
+        }
+
+        let action_elapsed = Duration::from_millis(position_ms);
+        if self.eof_fade_started {
+            if let Some(voice_id) = self.active_voice_id {
+                context.output_engine.set_voice_opacity(
+                    voice_id,
+                    self.layer_style.opacity.clamp(0.0, 1.0) as f32,
+                );
+            }
+            self.eof_fade_started = false;
+        }
+        if self.state == CueState::Paused {
+            self.action_elapsed_before_pause = action_elapsed;
+            self.elapsed_before_pause = self.pre_wait + action_elapsed;
+        } else {
+            let now = Instant::now();
+            self.action_started_at = Some(now - action_elapsed);
+            self.started_at = Some(now - self.pre_wait - action_elapsed);
+        }
+    }
+
     fn reset(&mut self) -> Result<()> {
         self.state = CueState::Standby;
         self.active_voice_id = None;
@@ -462,7 +481,7 @@ impl Cue for ImageCue {
         // Timed images: trigger the visual fade-out that lands on the end of
         // the display duration (mirrors VideoCue's natural-end fade — without
         // it the image hard-cuts to black when image-display-duration expires).
-        if !self.eof_fade_started && !self.in_pre_wait {
+        if !self.eof_fade_started && !self.in_pre_wait && self.state == CueState::Running {
             if let (Some(voice_id), Some(fade), Some(total)) =
                 (self.active_voice_id, &self.fade_out, self.duration())
             {
@@ -477,16 +496,13 @@ impl Cue for ImageCue {
             }
         }
 
-        // Animated GIFs loop at the slot level because mpv's
-        // image-display-duration only applies to single-frame images. End a
-        // timed GIF through the ImageCue action clock so pause/resume and the
-        // normal cue completion path keep their existing semantics.
+        // Image lifetime follows the cue's clock for both still images and
+        // animated GIFs. mpv's own image TTL is fixed at load time.
         if !self.in_pre_wait
-            && timed_gif_duration_elapsed(
-                self.file_path.as_deref(),
-                self.action_elapsed(),
-                self.display_duration_ms,
-            )
+            && self.state == CueState::Running
+            && self.display_duration_ms
+                .map(Duration::from_millis)
+                .is_some_and(|duration| self.action_elapsed() >= duration)
         {
             if let Some(voice_id) = self.active_voice_id.take() {
                 context.output_engine.stop_content(voice_id, 0, 0);
@@ -632,6 +648,22 @@ impl Cue for ImageCue {
         self.started_at = snap.started_at;
         self.action_started_at = snap.action_started_at;
         self.in_pre_wait = snap.state == CueState::Running && snap.action_started_at.is_none();
+    }
+
+    fn runtime_extension(&self) -> Option<Value> {
+        Some(json!({
+            "play_generation": self.play_generation,
+            "auto_continue_fired": self.auto_continue_fired,
+        }))
+    }
+
+    fn restore_runtime_extension(&mut self, value: Value) {
+        if let Some(generation) = value.get("play_generation").and_then(Value::as_u64) {
+            self.play_generation = generation;
+        }
+        if let Some(fired) = value.get("auto_continue_fired").and_then(Value::as_bool) {
+            self.auto_continue_fired = fired;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -793,11 +825,14 @@ mod tests {
     #[derive(Default)]
     struct RecordingOutput {
         stopped: Mutex<Vec<VoiceId>>,
+        requested_durations: Mutex<Vec<Option<u64>>>,
+        opacities: Mutex<Vec<(VoiceId, f32)>>,
     }
 
     impl OutputEngineApi for RecordingOutput {
-        fn show_content(&self, _req: ContentRequest<'_>) -> Result<VoiceId> {
-            anyhow::bail!("unused in ImageCue timing tests")
+        fn show_content(&self, req: ContentRequest<'_>) -> Result<VoiceId> {
+            self.requested_durations.lock().unwrap().push(req.display_duration_ms);
+            Ok(Uuid::new_v4())
         }
         fn stop_content(&self, voice_id: VoiceId, _visual_fade_ms: u32, _audio_fade_ms: u32) {
             self.stopped.lock().unwrap().push(voice_id);
@@ -807,7 +842,9 @@ mod tests {
         fn video_audio_voice(&self, _voice_id: VoiceId) -> Option<VoiceId> { None }
         fn resync_audio_to_video(&self, _voice_id: VoiceId) {}
         fn get_voice_opacity(&self, _voice_id: VoiceId) -> f32 { 1.0 }
-        fn set_voice_opacity(&self, _voice_id: VoiceId, _opacity: f32) {}
+        fn set_voice_opacity(&self, voice_id: VoiceId, opacity: f32) {
+            self.opacities.lock().unwrap().push((voice_id, opacity));
+        }
         fn stop_voice(&self, _voice_id: VoiceId, _fade_ms: u32) -> Result<()> { Ok(()) }
         fn pause_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
         fn resume_voice(&self, _voice_id: VoiceId) -> Result<()> { Ok(()) }
@@ -841,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn timed_gif_is_stopped_by_image_cue_clock_but_other_images_are_unchanged() {
+    fn finite_still_and_gif_images_are_stopped_by_the_pause_aware_cue_clock() {
         let (context, output) = test_context();
         let voice = Uuid::new_v4();
         let mut cue = ImageCue::new();
@@ -869,13 +906,54 @@ mod tests {
         let mut png = ImageCue::new();
         png.file_path = Some(PathBuf::from("still.PNG"));
         png.display_duration_ms = Some(5_000);
-        png.active_voice_id = Some(Uuid::new_v4());
+        let png_voice = Uuid::new_v4();
+        png.active_voice_id = Some(png_voice);
         png.state = CueState::Running;
         png.started_at = Some(expired);
         png.action_started_at = Some(expired);
         png.tick(&context).unwrap();
+        assert_eq!(*output.stopped.lock().unwrap(), vec![voice, png_voice]);
+        assert_eq!(png.active_voice_id, None);
+    }
+
+    #[test]
+    fn image_seek_repositions_remaining_lifetime_and_respects_pause() {
+        let (context, output) = test_context();
+        let voice = Uuid::new_v4();
+        let mut cue = ImageCue::new();
+        cue.file_path = Some(PathBuf::from("still.png"));
+        cue.display_duration_ms = Some(10_000);
+        cue.active_voice_id = Some(voice);
+        cue.state = CueState::Running;
+        cue.started_at = Some(Instant::now());
+        cue.action_started_at = Some(Instant::now());
+
+        cue.seek(9_990, &context);
+        assert!(cue.action_elapsed() >= Duration::from_millis(9_990));
+        cue.pause(&context).unwrap();
+        cue.seek(4_000, &context);
+        assert_eq!(cue.action_elapsed(), Duration::from_secs(4));
+        std::thread::sleep(Duration::from_millis(20));
+        cue.tick(&context).unwrap();
+        assert_eq!(cue.active_voice_id, Some(voice), "paused image must not expire");
+
+        cue.resume(&context).unwrap();
+        cue.seek(9_990, &context);
+        std::thread::sleep(Duration::from_millis(20));
+        cue.tick(&context).unwrap();
+        assert_eq!(cue.active_voice_id, None, "seeked image expires after the remaining time");
         assert_eq!(*output.stopped.lock().unwrap(), vec![voice]);
-        assert!(png.active_voice_id.is_some());
+    }
+
+    #[test]
+    fn finite_image_uses_cue_clock_instead_of_a_fixed_mpv_ttl() {
+        let (context, output) = test_context();
+        let mut cue = ImageCue::new();
+        cue.file_path = Some(PathBuf::from("still.png"));
+        cue.display_duration_ms = Some(2_000);
+        cue.go(&context).unwrap();
+
+        assert_eq!(*output.requested_durations.lock().unwrap(), vec![None]);
     }
 
     #[test]
@@ -902,8 +980,11 @@ mod tests {
     }
 
     #[test]
-    fn duration_method_always_none() {
-        assert!(ImageCue::new().duration().is_none());
+    fn duration_tracks_authored_display_duration() {
+        let mut cue = ImageCue::new();
+        assert_eq!(cue.duration(), None);
+        cue.display_duration_ms = Some(2_500);
+        assert_eq!(cue.duration(), Some(Duration::from_millis(2_500)));
     }
 
     #[test]

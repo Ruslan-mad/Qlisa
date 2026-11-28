@@ -407,6 +407,7 @@ impl CameraCue {
                 self.layer_style,
                 fade_in_ms,
                 &self.geometry_by_output,
+                context.visual_group_order(),
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -463,6 +464,7 @@ impl CameraCue {
                 self.layer_style,
                 fade_in_ms,
                 &self.geometry_by_output,
+                context.visual_group_order(),
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -518,6 +520,8 @@ impl CameraCue {
                 preload: false,
                 layer_style: self.layer_style,
                 slices: Vec::new(),
+                layer_group_order: context.visual_group_order(),
+                layer_child_order: None,
             },
             &self.output_ids,
             &self.geometry_by_output,
@@ -958,6 +962,22 @@ impl Cue for CameraCue {
         self.started_at = snap.started_at;
         self.action_started_at = snap.action_started_at;
         self.in_pre_wait = snap.state == CueState::Running && snap.action_started_at.is_none();
+    }
+
+    fn runtime_extension(&self) -> Option<Value> {
+        Some(json!({
+            "play_generation": self.play_generation,
+            "auto_continue_fired": self.auto_continue_fired,
+        }))
+    }
+
+    fn restore_runtime_extension(&mut self, value: Value) {
+        if let Some(generation) = value.get("play_generation").and_then(Value::as_u64) {
+            self.play_generation = generation;
+        }
+        if let Some(fired) = value.get("auto_continue_fired").and_then(Value::as_bool) {
+            self.auto_continue_fired = fired;
+        }
     }
 
     // -----------------------------------------------------------------------

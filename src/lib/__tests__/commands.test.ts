@@ -214,6 +214,16 @@ describe("command wrappers forward the correct name + args", () => {
     expect(invokeMock).toHaveBeenCalledWith("go_cue", { cueId: "cue-1" });
   });
 
+  it("setPlayhead keeps explicit payloads unchanged and marks UI-only selection", async () => {
+    await cmd.setPlayhead("cue-1");
+    expect(invokeMock).toHaveBeenLastCalledWith("set_playhead", { cueId: "cue-1" });
+    await cmd.setPlayhead("cue-2", true);
+    expect(invokeMock).toHaveBeenLastCalledWith("set_playhead", {
+      cueId: "cue-2",
+      selectionOnly: true,
+    });
+  });
+
   it("seekCue → seek_cue { cueId, positionMs }", async () => {
     await cmd.seekCue("cue-1", 1234.6);
     expect(invokeMock).toHaveBeenCalledWith("seek_cue", { cueId: "cue-1", positionMs: 1235 });

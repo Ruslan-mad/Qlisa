@@ -468,12 +468,23 @@ pub fn seek_cue(
     let id: uuid::Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
-    let context = make_context(&state, stop_fade_ms);
-    let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-    if let Some(cue) = cue_list.get_mut_recursive(&id) {
-        cue.seek(position_ms, &context);
-        emit_seek_timing(&app_handle, cue, cue.action_elapsed().as_millis() as u64);
+    let context = make_context_from_workspace(&state, &ws, stop_fade_ms);
+    let before_states = workspace_cue_states(&ws.cue_lists);
+    let routed_number = seek_active_number_master(&mut ws, id, position_ms, false, &context);
+    if let Some(cue) = ws.cue_lists.iter_mut().find_map(|list| list.get_mut_recursive(&id)) {
+        if routed_number.is_none() {
+            cue.seek(position_ms, &context);
+        }
+        if routed_number.is_none() {
+            emit_seek_timing(&app_handle, cue, cue.action_elapsed().as_millis() as u64);
+        }
     }
+    if let Some(number_id) = routed_number {
+        if let Some(number) = ws.cue_lists.iter().find_map(|list| list.get_recursive(&number_id)) {
+            emit_active_cue_timing_tree(&app_handle, number);
+        }
+    }
+    emit_workspace_state_changes(&app_handle, &before_states, &workspace_cue_states(&ws.cue_lists));
     Ok(())
 }
 
@@ -490,13 +501,88 @@ pub fn seek_cue_media(
     let id: uuid::Uuid = cue_id.parse().map_err(|e: uuid::Error| e.to_string())?;
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
     let stop_fade_ms = ws.preferences.audio.default_fade_out_ms;
-    let context = make_context(&state, stop_fade_ms);
+    let context = make_context_from_workspace(&state, &ws, stop_fade_ms);
+    let before_states = workspace_cue_states(&ws.cue_lists);
+    let routed_number = seek_active_number_master(&mut ws, id, file_position_ms, true, &context);
     if let Some(cue) = ws.cue_lists.iter_mut().find_map(|list| list.get_mut_recursive(&id)) {
-        cue.seek_file_position(file_position_ms, &context);
+        if routed_number.is_none() {
+            cue.seek_file_position(file_position_ms, &context);
+        }
         let action_ms = cue.action_elapsed().as_millis() as u64;
-        emit_seek_timing(&app_handle, cue, action_ms);
+        if routed_number.is_none() {
+            emit_seek_timing(&app_handle, cue, action_ms);
+        }
     }
+    if let Some(number_id) = routed_number {
+        if let Some(number) = ws.cue_lists.iter().find_map(|list| list.get_recursive(&number_id)) {
+            emit_active_cue_timing_tree(&app_handle, number);
+        }
+    }
+    emit_workspace_state_changes(&app_handle, &before_states, &workspace_cue_states(&ws.cue_lists));
     Ok(())
+}
+
+/// Route a direct master seek through its active Number so all action windows
+/// follow the same timeline clock. Other cues retain their existing seek
+/// contract. The search covers every cue list because Live can keep a cue
+/// selected while another list is active.
+fn seek_active_number_master(
+    workspace: &mut Workspace,
+    cue_id: uuid::Uuid,
+    position_ms: u64,
+    file_relative: bool,
+    context: &CueContext,
+) -> Option<uuid::Uuid> {
+    fn owner_for(cue: &dyn Cue, child_id: uuid::Uuid) -> Option<uuid::Uuid> {
+        if cue.number_master_id() == Some(child_id) && (cue.is_running() || cue.is_paused()) {
+            return Some(cue.id());
+        }
+        cue.child_cues()?
+            .iter()
+            .find_map(|child| owner_for(child.as_ref(), child_id))
+    }
+
+    let Some(owner_id) = workspace
+        .cue_lists
+        .iter()
+        .flat_map(|list| list.cues.iter())
+        .find_map(|cue| owner_for(cue.as_ref(), cue_id))
+    else {
+        return None;
+    };
+    let action_position_ms = if file_relative {
+        let Some(position) = workspace
+            .cue_lists
+            .iter()
+            .find_map(|list| list.get_recursive(&cue_id))
+            .and_then(|cue| cue.action_position_from_file_ms(position_ms))
+        else {
+            return None;
+        };
+        position
+    } else {
+        position_ms
+    };
+    let Some(number) = workspace
+        .cue_lists
+        .iter_mut()
+        .find_map(|list| list.get_mut_recursive(&owner_id))
+    else {
+        return None;
+    };
+    number.seek_timeline_position(action_position_ms, context);
+    Some(owner_id)
+}
+
+fn emit_active_cue_timing_tree(app_handle: &tauri::AppHandle, cue: &dyn Cue) {
+    if cue.is_running() || cue.is_paused() {
+        emit_seek_timing(app_handle, cue, cue.action_elapsed().as_millis() as u64);
+    }
+    if let Some(children) = cue.child_cues() {
+        for child in children {
+            emit_active_cue_timing_tree(app_handle, child.as_ref());
+        }
+    }
 }
 
 fn emit_seek_timing(
@@ -1081,17 +1167,19 @@ mod stop_tree_notification_tests {
 
 #[cfg(test)]
 mod seek_recursive_tests {
+    use super::seek_active_number_master;
     use crate::cue::{
         audio_cue::{AudioCue, AudioCueFactory},
         context::{CueContext, CueEvent},
         group_cue::GroupCue,
+        wait_cue::WaitCue,
         traits::{Cue, CueFactory, RuntimeState},
         types::CueState,
     };
     use crate::engine::{audio_engine::AudioEngine, dmx_engine::DmxEngine, output_engine::ContentRequest, engine_traits::OutputEngineApi, ring_command::VoiceId};
     use crate::cue::memo_cue::MemoCue;
     use crate::preferences::MachineAudioConfig;
-    use crate::show::cue_list::CueList;
+    use crate::show::{cue_list::CueList, Workspace};
     use anyhow::Result;
     use crossbeam_channel::unbounded;
     use std::{sync::Arc, time::Duration};
@@ -1154,5 +1242,76 @@ mod seek_recursive_tests {
 
         assert!(cue_lists[0].get_recursive(&child_id).is_none());
         assert_eq!(cue_lists[1].get_recursive(&child_id).unwrap().action_elapsed(), Duration::from_millis(3_000));
+    }
+
+    #[test]
+    fn direct_master_seek_routes_through_number_in_another_cue_list_and_maps_trim() {
+        let mut master_json = AudioCue::new().serialize();
+        master_json["cached_duration_ms"] = serde_json::json!(10_000);
+        master_json["start_time_ms"] = serde_json::json!(2_000);
+        master_json["rate"] = serde_json::json!(2.0);
+        let mut master = AudioCueFactory.from_json(master_json).unwrap();
+        let master_id = master.id();
+        master.restore_runtime_state(RuntimeState {
+            state: CueState::Running,
+            voice_id: None,
+            started_at: Some(std::time::Instant::now()),
+            action_started_at: Some(std::time::Instant::now()),
+        });
+
+        let mut number = GroupCue::new_number();
+        let mut action = GroupCue::new();
+        action.mode = crate::cue::types::GroupMode::Sequential;
+        let mut action_wait = WaitCue::new();
+        action_wait.set_user_action_duration(Some(Duration::from_secs(5))).unwrap();
+        action.children.push(Box::new(action_wait));
+        let action_id = action.id();
+        number.children = vec![master, Box::new(action)];
+        number.set_number_master(master_id).unwrap();
+        number.set_number_action_offset(action_id, 1_000).unwrap();
+        number.go(&context()).unwrap();
+        let number_id = number.id();
+
+        let mut active_list = CueList::new("Active");
+        active_list.push(Box::new(MemoCue::new()));
+        let mut remote_list = CueList::new("Remote");
+        remote_list.push(Box::new(number));
+        let mut workspace = Workspace::new("Number seek test");
+        workspace.active_cue_list_id = active_list.id;
+        workspace.cue_lists = vec![active_list, remote_list];
+
+        assert_eq!(
+            seek_active_number_master(&mut workspace, master_id, 5_000, true, &context()),
+            Some(number_id),
+        );
+        let number = workspace.cue_lists[1].get_recursive(&number_id).unwrap();
+        let tolerance = Duration::from_millis(5);
+        assert!((Duration::from_millis(1_500)..=Duration::from_millis(1_500) + tolerance)
+            .contains(&number.action_elapsed()));
+        assert!((Duration::from_millis(1_500)..=Duration::from_millis(1_500) + tolerance)
+            .contains(&number.child_cues().unwrap()[0].action_elapsed()));
+        assert_eq!(number.child_cues().unwrap()[1].state(), CueState::Running);
+        assert_eq!(workspace.active_cue_list_id, workspace.cue_lists[0].id, "seek must not change active list");
+
+        let pause_context = context();
+        workspace.cue_lists[1]
+            .get_mut_recursive(&number_id)
+            .unwrap()
+            .pause(&pause_context)
+            .unwrap();
+        assert_eq!(
+            seek_active_number_master(&mut workspace, master_id, 3_500, false, &pause_context),
+            Some(number_id),
+            "action-relative master seeks also route while paused",
+        );
+        let number = workspace.cue_lists[1].get_recursive(&number_id).unwrap();
+        assert_eq!(number.state(), CueState::Paused);
+        assert_eq!(number.action_elapsed(), Duration::from_millis(3_500));
+        assert_eq!(number.child_cues().unwrap()[1].state(), CueState::Paused);
+        assert_eq!(
+            seek_active_number_master(&mut workspace, action_id, 3_500, false, &pause_context),
+            None,
+            "a nonmaster child keeps its direct seek path",
+        );
     }
 }

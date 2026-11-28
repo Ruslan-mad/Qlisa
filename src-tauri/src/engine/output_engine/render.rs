@@ -59,7 +59,7 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel}
 
 use super::fade;
 use super::slot;
-use super::types::{LayerStyle, MpvCtx, VideoGeometry};
+use super::types::{LayerOrderKey, LayerStyle, MpvCtx, VideoGeometry};
 use super::PipelineState;
 use super::VoiceId;
 use crate::cue::types::PresentationVideoLayout;
@@ -202,7 +202,7 @@ struct ExternalSource {
 }
 struct ExternalState {
     geometry: VideoGeometry,
-    layer_key: u64,
+    layer_key: LayerOrderKey,
     blend_mode: i32,
     anim: slot::OpacityAnim,
     pending_remove: bool,
@@ -213,7 +213,7 @@ struct ExternalDraw {
     mailbox: Arc<BgraFrameMailbox>,
     cursor: Arc<AtomicU64>,
     geometry: VideoGeometry,
-    layer_key: u64,
+    layer_key: LayerOrderKey,
     blend_mode: i32,
     opacity: f32,
 }
@@ -438,7 +438,7 @@ impl RenderRuntime {
         source: Arc<BgraFrameMailbox>,
         geometry: VideoGeometry,
         style: LayerStyle,
-        layer_key: u64,
+        layer_key: LayerOrderKey,
         fade_in_ms: u32,
     ) {
         let base = style.opacity.clamp(0.0, 1.0) as f32;
@@ -594,12 +594,36 @@ impl RenderRuntime {
             .and_then(|sources| {
                 sources.get(&voice).and_then(|source| {
                     source.state.lock().ok().map(|mut state| {
-                        let seq = state.layer_key & 0xFF_FFFF_FFFF;
-                        state.layer_key = slot::resolve_layer_key(style.layer, seq);
+                        state.layer_key.band = slot::resolve_layer_band(style.layer);
                         state.blend_mode = style.blend_mode.shader_id();
                         if !state.anim.is_animating() && !state.pending_remove {
                             state.anim.set(style.opacity.clamp(0.0, 1.0) as f32);
                         }
+                    })
+                })
+            })
+            .is_some();
+        if changed {
+            self.external_dirty.store(true, Ordering::Release);
+            self.wake();
+        }
+        changed
+    }
+    pub(super) fn set_external_layer_order(
+        &self,
+        voice: VoiceId,
+        group_order: u64,
+        child_order: u64,
+    ) -> bool {
+        let changed = self
+            .external_sources
+            .lock()
+            .ok()
+            .and_then(|sources| {
+                sources.get(&voice).and_then(|source| {
+                    source.state.lock().ok().map(|mut state| {
+                        state.layer_key.group_order = group_order;
+                        state.layer_key.child_order = child_order;
                     })
                 })
             })
@@ -2135,7 +2159,7 @@ fn render_thread_main(
         let slots = slot_snapshot(&slot_registry);
         struct LayerDraw {
             slot_index: usize,
-            layer_key: u64,
+            layer_key: LayerOrderKey,
             opacity: f32,
             blend_mode: i32,
             geometry: VideoGeometry,
@@ -4545,6 +4569,30 @@ mod tests {
     }
 
     #[test]
+    fn external_preload_reanchor_survives_layer_style_update() {
+        let runtime = RenderRuntime::new();
+        let voice = Uuid::new_v4();
+        runtime.add_external_source(
+            voice,
+            Arc::new(BgraFrameMailbox::default()),
+            VideoGeometry::default(),
+            LayerStyle::default(),
+            crate::engine::output_engine::slot::resolve_layer_order_key(None, 7, 8),
+            0,
+        );
+        assert!(runtime.set_external_layer_order(voice, 3, 22));
+        assert!(runtime.set_external_layer_style(
+            voice,
+            &LayerStyle { layer: Some(77), ..LayerStyle::default() },
+        ));
+        let (draws, _, _) = runtime.tick_external_sources();
+        let key = draws.iter().find(|draw| draw.voice == voice).unwrap().layer_key;
+        assert_eq!(key.band, 77);
+        assert_eq!(key.group_order, 3);
+        assert_eq!(key.child_order, 22);
+    }
+
+    #[test]
     fn external_hard_stop_forces_cleanup_redraw() {
         let runtime = RenderRuntime::new();
         let voice = Uuid::new_v4();
@@ -4553,7 +4601,7 @@ mod tests {
             Arc::new(BgraFrameMailbox::default()),
             VideoGeometry::default(),
             LayerStyle::default(),
-            1,
+            crate::engine::output_engine::slot::resolve_layer_order_key(None, 1, 1),
             0,
         );
         let _ = runtime.tick_external_sources();
@@ -4572,7 +4620,7 @@ mod tests {
             Arc::new(BgraFrameMailbox::default()),
             VideoGeometry::default(),
             LayerStyle::default(),
-            1,
+            crate::engine::output_engine::slot::resolve_layer_order_key(None, 1, 1),
             0,
         );
         assert!(runtime.stop_external_source(voice, 250));

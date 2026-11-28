@@ -12,6 +12,7 @@ use std::{fmt::Display, time::{Duration, Instant}};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use uuid::Uuid;
+use crate::engine::ring_command::FadeCurve as EngineFadeCurve;
 
 use super::{
     context::{CueContext, CueEvent},
@@ -71,8 +72,7 @@ pub struct GroupCue {
     /// Number-level envelopes shared by all active audio/video children.
     fade_in: Option<FadeSpec>,
     fade_out: Option<FadeSpec>,
-    /// Playlist mode only: wrap from the last child back to the first instead of
-    /// ending (QLab's looping playlist). Persisted.
+    /// Repeat a Playlist's children or a Number's full timeline. Persisted.
     playlist_loop: bool,
     /// Number start/finish flow settings. Persisted only for Number cues.
     number_start_stop_mode: NumberStartStopMode,
@@ -113,6 +113,9 @@ pub struct GroupCue {
     /// Number remains Running during its authored Post-Wait so the operator
     /// can see the final timing segment before completion/continuation.
     number_post_wait_until: Option<Instant>,
+    /// Stable visual ordering anchor for this Number run, or an inherited
+    /// anchor when this is a nested Group action inside a Number.
+    visual_group_order: Option<u64>,
     /// Runtime-only override used when this Group is a Number master.
     number_master_autoplay: bool,
     /// Runtime-only fade passed from a parent Number for the current start/stop.
@@ -151,15 +154,29 @@ fn number_seek_shared_fade() -> Option<FadeSpec> {
     None
 }
 
-fn number_due_action_ids(target_ms: u64, offsets: &[(CueId, u64)]) -> Vec<CueId> {
-    offsets
-        .iter()
-        .filter_map(|(id, offset)| (*offset <= target_ms).then_some(*id))
-        .collect()
+fn number_action_window_active(
+    target_ms: u64,
+    offset_ms: u64,
+    duration_ms: Option<u64>,
+    master_duration_ms: Option<u64>,
+) -> bool {
+    if offset_ms > target_ms || master_duration_ms.is_some_and(|end| target_ms >= end) {
+        return false;
+    }
+    duration_ms.map_or(true, |duration| target_ms.saturating_sub(offset_ms) < duration)
 }
 
 fn number_seek_state(was_paused: bool) -> CueState {
     if was_paused { CueState::Paused } else { CueState::Running }
+}
+
+fn drain_fired_ids_tree(cue: &mut dyn Cue, collected: &mut Vec<CueId>) {
+    collected.extend(cue.take_fired_cue_ids());
+    if let Some(children) = cue.child_cues_mut() {
+        for child in children {
+            drain_fired_ids_tree(child.as_mut(), collected);
+        }
+    }
 }
 
 fn fade_spec_from_json(value: &Value, duration_key: &str, curve_key: &str) -> Option<FadeSpec> {
@@ -240,6 +257,7 @@ impl GroupCue {
             number_launched_actions: std::collections::HashSet::new(),
             number_master_finished: false,
             number_post_wait_until: None,
+            visual_group_order: None,
             number_master_autoplay: false,
             number_shared_fade: None,
         }
@@ -449,6 +467,28 @@ impl GroupCue {
     /// into the active child instead of calling Group::seek on whichever child
     /// happened to be running at GO time.
     fn seek_timeline_position_impl(&mut self, position_ms: u64, ctx: &CueContext) {
+        let scoped_ctx = self.scoped_visual_context(ctx);
+        let ctx = scoped_ctx.as_ref().unwrap_or(ctx);
+        let mut pending_nested_go_ids = Vec::new();
+        for child in &mut self.children {
+            drain_fired_ids_tree(child.as_mut(), &mut pending_nested_go_ids);
+        }
+        let was_paused = self.state == CueState::Paused;
+        let elapsed = Duration::from_millis(position_ms);
+        let action_elapsed = elapsed.saturating_sub(self.pre_wait);
+        let now = Instant::now();
+        self.action_elapsed_before_pause = action_elapsed;
+        self.elapsed_before_pause = elapsed;
+        if was_paused {
+            self.started_at = None;
+            self.action_started_at = None;
+            self.paused_at = Some(now);
+        } else {
+            self.started_at = Some(now - elapsed);
+            self.action_started_at = Some(now - action_elapsed);
+            self.paused_at = None;
+        }
+
         let target = position_ms;
         for child in &mut self.children {
             if child.is_running() || child.is_paused() {
@@ -466,6 +506,7 @@ impl GroupCue {
 
         let start = self.pre_wait.as_millis() as u64;
         if target < start {
+            self.fired_child_ids.extend(pending_nested_go_ids);
             return;
         }
         let local = target.saturating_sub(start);
@@ -476,13 +517,23 @@ impl GroupCue {
                 for idx in 0..self.children.len() {
                     let child = &mut self.children[idx];
                     let child_start = if matches!(child.cue_type(), CueType::Group | CueType::Presentation) { 0 } else { child.pre_wait().as_millis() as u64 };
-                    let child_len = child.duration().map(|d| d.as_millis() as u64).unwrap_or(0);
-                    if local >= child_start && local <= child_start.saturating_add(child_len) {
+                    let child_active = child.duration().map_or(true, |duration| {
+                        local < child_start.saturating_add(duration.as_millis() as u64)
+                    });
+                    if local >= child_start && child_active {
                         if child.go(ctx).is_ok() {
                             child.seek_timeline_position(local.saturating_sub(child_start), ctx);
+                            if was_paused && child.is_running() {
+                                let _ = child.pause(ctx);
+                            }
                         }
                     }
                 }
+                let mut synthetic_ids = Vec::new();
+                for child in &mut self.children {
+                    drain_fired_ids_tree(child.as_mut(), &mut synthetic_ids);
+                }
+                self.fired_child_ids.extend(pending_nested_go_ids);
                 return;
             }
             GroupMode::Sequential | GroupMode::Playlist => {
@@ -492,30 +543,48 @@ impl GroupCue {
                     let child_pre = if composite { 0 } else { child.pre_wait().as_millis() as u64 };
                     let child_post = if composite { 0 } else { child.post_wait().as_millis() as u64 };
                     let child_start = cursor.saturating_add(child_pre);
-                    let child_len = child.duration().map(|d| d.as_millis() as u64).unwrap_or(0);
-                    let child_end = child_start.saturating_add(child_len);
-                    if local <= child_end {
+                    let child_end = child
+                        .duration()
+                        .map(|duration| child_start.saturating_add(duration.as_millis() as u64));
+                    if child_end.map_or(true, |end| local < end) {
                         selected = Some((idx, local.saturating_sub(child_start)));
                         break;
                     }
-                    cursor = child_end.saturating_add(child_post);
+                    cursor = child_end.unwrap_or(u64::MAX).saturating_add(child_post);
                 }
             }
-            GroupMode::StartRandom => return,
+            GroupMode::StartRandom => {
+                self.fired_child_ids.extend(pending_nested_go_ids);
+                return;
+            }
         }
-        let Some((idx, child_position)) = selected else { return; };
+        let Some((idx, child_position)) = selected else {
+            self.fired_child_ids.extend(pending_nested_go_ids);
+            return;
+        };
         let child_id = self.children[idx].id();
         if self.children[idx].go(ctx).is_err() {
+            self.fired_child_ids.extend(pending_nested_go_ids);
             return;
         }
         self.seq_current_id = Some(child_id);
         self.children[idx].seek_timeline_position(child_position, ctx);
+        let mut synthetic_ids = Vec::new();
+        for child in &mut self.children {
+            drain_fired_ids_tree(child.as_mut(), &mut synthetic_ids);
+        }
+        self.fired_child_ids.extend(pending_nested_go_ids);
+        if was_paused && self.children[idx].is_running() {
+            let _ = self.children[idx].pause(ctx);
+        }
     }
 
     /// Rebuild a Number's child graph at a position on the master clock.
     /// Actions whose offsets are already due are started and sought; later
     /// actions remain in Standby. The parent keeps its Running/Paused state.
     fn seek_number(&mut self, position_ms: u64, ctx: &CueContext) {
+        let scoped_ctx = self.scoped_visual_context(ctx);
+        let ctx = scoped_ctx.as_ref().unwrap_or(ctx);
         let Some(master_idx) = self.number_master_index() else {
             self.runtime_error = Some("Number has no master Audio, Video, or Group cue".into());
             return;
@@ -525,8 +594,28 @@ impl GroupCue {
             .map(|duration| duration.as_millis() as u64);
         let target_ms = number_seek_target(position_ms, max_ms);
         let offsets = self.number_seek_action_offsets(master_idx);
-        let due_actions = number_due_action_ids(target_ms, &offsets);
+        let action_windows: Vec<_> = offsets
+            .iter()
+            .map(|(id, offset)| {
+                let duration_ms = self
+                    .children
+                    .iter()
+                    .find(|child| child.id() == *id)
+                    .and_then(|child| child.duration())
+                    .map(|duration| duration.as_millis() as u64);
+                (
+                    *id,
+                    *offset,
+                    number_action_window_active(target_ms, *offset, duration_ms, max_ms),
+                )
+            })
+            .collect();
         let was_paused = self.state == CueState::Paused;
+        let fired_before_seek = self.fired_child_ids.len();
+        let mut pending_nested_go_ids = Vec::new();
+        for child in &mut self.children {
+            drain_fired_ids_tree(child.as_mut(), &mut pending_nested_go_ids);
+        }
 
         // Keep already-running children alive and seek them in place.  A
         // hard-stop/restart cycle is especially harmful for Video Cues: the
@@ -535,6 +624,15 @@ impl GroupCue {
         // before the action-time seek arrives.  Only children whose due state
         // changes need to be stopped or started.
         self.number_launched_actions.clear();
+        // Actions whose entire window is behind the seek position have
+        // already happened on this timeline. Mark them consumed so the next
+        // scheduler tick does not fire them again. Future actions stay
+        // unlaunched, which lets a later forward seek enter their windows.
+        for (id, offset, active) in &action_windows {
+            if !active && *offset <= target_ms {
+                self.number_launched_actions.insert(*id);
+            }
+        }
         self.number_master_finished = false;
         self.number_post_wait_until = None;
         self.runtime_error = None;
@@ -564,6 +662,8 @@ impl GroupCue {
             self.children[master_idx].set_initial_seek_action_ms(target_ms);
             if let Err(error) = self.go_child_with_fade(master_idx, ctx, seek_fade.as_ref()) {
                 self.runtime_error = Some(format!("Number master failed to seek: {error}"));
+                self.fired_child_ids.truncate(fired_before_seek);
+                self.fired_child_ids.extend(pending_nested_go_ids);
                 return;
             }
             // Audio masters have no initial-seek transport field.  The
@@ -573,13 +673,19 @@ impl GroupCue {
         }
 
         for idx in 0..self.children.len() {
-            if idx == master_idx || self.children[idx].is_disabled() {
+            if idx == master_idx {
                 continue;
             }
             let id = self.children[idx].id();
-            let offset = self.action_offsets_ms.get(&id).copied().unwrap_or(0);
+            let Some((_, offset, active_at_target)) = action_windows
+                .iter()
+                .find(|(action_id, _, _)| *action_id == id)
+            else {
+                continue;
+            };
+            let offset = *offset;
             let active = self.children[idx].is_running() || self.children[idx].is_paused();
-            if !due_actions.contains(&id) {
+            if !*active_at_target || self.children[idx].is_disabled() {
                 if active {
                     let _ = self.children[idx].hard_stop(ctx);
                 } else if self.children[idx].has_retained_output() {
@@ -591,7 +697,7 @@ impl GroupCue {
             }
             let action_ms = target_ms.saturating_sub(offset);
             if active {
-                self.children[idx].seek(action_ms, ctx);
+                self.children[idx].seek_timeline_position(action_ms, ctx);
             } else {
                 self.children[idx].set_initial_seek_action_ms(action_ms);
                 if let Err(error) = self.go_child_with_fade(idx, ctx, None) {
@@ -604,7 +710,7 @@ impl GroupCue {
                 }
                 // Audio children need the normal seek path; for Video this
                 // also queues the action coordinate if mpv is still loading.
-                self.children[idx].seek(action_ms, ctx);
+                self.children[idx].seek_timeline_position(action_ms, ctx);
             }
             self.number_launched_actions.insert(id);
         }
@@ -619,6 +725,10 @@ impl GroupCue {
         } else {
             self.state = number_seek_state(false);
         }
+        // Starting a child to reconstruct the seek position is not a new GO
+        // command. Do not leak its nested GO notifications to the transport.
+        self.fired_child_ids.truncate(fired_before_seek);
+        self.fired_child_ids.extend(pending_nested_go_ids);
     }
 
     fn number_child_done(&self, child: &dyn Cue, ctx: &CueContext) -> bool {
@@ -631,13 +741,58 @@ impl GroupCue {
                 || child.automatic_completion_duration().map(|d| child.action_elapsed() >= d).unwrap_or(false))
     }
 
+    fn stop_looping_number_master_audio(&self, master_idx: usize, ctx: &CueContext) -> Result<()> {
+        if !self.playlist_loop {
+            return Ok(());
+        }
+
+        // Number's timeline clock starts before streamed masters can report
+        // stream-ready. If that clock reaches the authored end first, stop
+        // only the master's live audio voices before natural completion drops
+        // their IDs. Leave visual voices intact so held last frames still work.
+        let mut voice_ids = std::collections::HashSet::new();
+        for cue_voice_id in self.children[master_idx].all_voice_ids() {
+            voice_ids.insert(cue_voice_id);
+            if let Some(audio_voice_id) = ctx.output_engine.video_audio_voice(cue_voice_id) {
+                voice_ids.insert(audio_voice_id);
+            }
+            if let Some(audio_voice_id) = ctx.output_engine.attached_cue_audio_voice(cue_voice_id) {
+                voice_ids.insert(audio_voice_id);
+            }
+        }
+        for voice_id in voice_ids {
+            if ctx.audio_engine.voice_is_alive(voice_id) {
+                ctx.audio_engine.stop_voice(voice_id, 0, EngineFadeCurve::Linear)?;
+            }
+        }
+        Ok(())
+    }
+
     fn tick_number(&mut self, ctx: &CueContext) -> Result<()> {
         if self.number_master_finished {
             if self
                 .number_post_wait_until
                 .is_some_and(|due| Instant::now() >= due)
             {
-                self.number_post_wait_until = None;
+                if self.playlist_loop {
+                    // Close the previous pass completely before restarting its
+                    // children. Keep the Number execution identity so an
+                    // iteration does not look like a new external GO.
+                    self.hard_stop_children(ctx);
+                    self.reset_children();
+                    self.number_master_finished = false;
+                    self.number_post_wait_until = None;
+                    self.number_completion_start_ids.clear();
+                    let now = Instant::now();
+                    self.started_at = Some(now);
+                    self.action_started_at = Some(now);
+                    self.elapsed_before_pause = Duration::ZERO;
+                    self.action_elapsed_before_pause = Duration::ZERO;
+                    self.in_pre_wait = false;
+                    self.number_start_action(ctx)?;
+                } else {
+                    self.number_post_wait_until = None;
+                }
             }
             return Ok(());
         }
@@ -653,7 +808,7 @@ impl GroupCue {
 
         let elapsed_ms = self.action_elapsed().as_millis() as u64;
         for idx in 0..self.children.len() {
-            if idx == master_idx || self.children[idx].is_disabled() {
+            if idx == master_idx {
                 continue;
             }
             let id = self.children[idx].id();
@@ -663,7 +818,13 @@ impl GroupCue {
                         let message = number_action_runtime_error(self.children[idx].name(), "during playback", error);
                         return self.abort_number(ctx, message);
                     }
+                    if self.number_child_done(self.children[idx].as_ref(), ctx) {
+                        let _ = self.children[idx].complete_naturally();
+                    }
                 }
+                continue;
+            }
+            if self.children[idx].is_disabled() {
                 continue;
             }
             let offset = self.action_offsets_ms.get(&id).copied().unwrap_or(0);
@@ -716,6 +877,9 @@ impl GroupCue {
                     && (self.children[idx].is_running() || self.children[idx].is_paused()) {
                     let _ = self.children[idx].stop_with_fade(ctx, number_fade_out.as_ref());
                 }
+            }
+            if let Err(error) = self.stop_looping_number_master_audio(master_idx, ctx) {
+                return self.abort_number(ctx, format!("Failed to stop Number master audio before loop: {error}"));
             }
             let _ = self.children[master_idx].complete_naturally();
         }
@@ -778,17 +942,25 @@ impl GroupCue {
 
     fn go_child_with_fade(&mut self, idx: usize, ctx: &CueContext, shared_fade: Option<&FadeSpec>) -> Result<()> {
         let shared_fade = shared_fade.or(self.number_shared_fade.as_ref());
+        let child_ctx = self.visual_group_order
+            .map(|order| ctx.with_visual_group_order(order));
+        let child_ctx = child_ctx.as_ref().unwrap_or(ctx);
         let (id, nested_ids) = {
             let child = &mut self.children[idx];
             if child.is_disabled() {
                 anyhow::bail!("Cue '{}' is disarmed", child.name());
             }
-            child.go_with_fade(ctx, shared_fade)?;
+            child.go_with_fade(child_ctx, shared_fade)?;
             (child.id(), child.take_fired_cue_ids())
         };
         self.fired_child_ids.push(id);
         self.fired_child_ids.extend(nested_ids);
         Ok(())
+    }
+
+    fn scoped_visual_context(&self, ctx: &CueContext) -> Option<CueContext> {
+        self.visual_group_order
+            .map(|order| ctx.with_visual_group_order(order))
     }
 
     /// Fire the next sequential child after `after_id` (or the first child if
@@ -1165,6 +1337,7 @@ impl GroupCue {
         self.number_master_autoplay = false;
         self.number_shared_fade = None;
         self.number_completion_start_ids.clear();
+        self.visual_group_order = None;
     }
 
     fn complete_children_naturally(&mut self) {
@@ -1461,6 +1634,13 @@ impl Cue for GroupCue {
             }
         }
 
+        // Assign identity on the accepted GO, before a pre-wait or any media
+        // load. Absorbed GO and Running Number no-op paths above keep theirs.
+        self.visual_group_order = if self.number_mode {
+            ctx.visual_group_order().or_else(|| Some(ctx.output_engine.next_layer_order()))
+        } else {
+            ctx.visual_group_order()
+        };
         self.execution_generation = self.execution_generation.wrapping_add(1);
         self.auto_continue_fired = false;
         self.started_at = Some(Instant::now());
@@ -1503,6 +1683,7 @@ impl Cue for GroupCue {
         self.number_master_autoplay = false;
         self.number_shared_fade = None;
         self.number_completion_start_ids.clear();
+        self.visual_group_order = None;
         ctx.emit(CueEvent::Stopped { cue_id: self.id });
         Ok(())
     }
@@ -1531,6 +1712,8 @@ impl Cue for GroupCue {
         if self.state != CueState::Paused {
             return Ok(());
         }
+        let scoped_ctx = self.scoped_visual_context(ctx);
+        let ctx = scoped_ctx.as_ref().unwrap_or(ctx);
         let paused_for = self.paused_at.take().map(|at| at.elapsed()).unwrap_or_default();
         let now = Instant::now();
         self.started_at = Some(now - self.elapsed_before_pause);
@@ -1577,6 +1760,7 @@ impl Cue for GroupCue {
         self.number_master_autoplay = false;
         self.number_shared_fade = None;
         self.number_completion_start_ids.clear();
+        self.visual_group_order = None;
         ctx.emit(CueEvent::Stopped { cue_id: self.id });
         Ok(())
     }
@@ -1598,6 +1782,8 @@ impl Cue for GroupCue {
     }
 
     fn tick(&mut self, ctx: &CueContext) -> Result<()> {
+        let scoped_ctx = self.scoped_visual_context(ctx);
+        let ctx = scoped_ctx.as_ref().unwrap_or(ctx);
         if self.state == CueState::Paused {
             return Ok(());
         }
@@ -1754,6 +1940,11 @@ impl Cue for GroupCue {
 
     fn automatic_completion_duration(&self) -> Option<Duration> {
         if self.number_mode {
+            // The Number scheduler owns master EOF and Post-Wait completion.
+            // A parent duration must not complete it before that deadline.
+            if self.number_master_finished || self.playlist_loop {
+                return None;
+            }
             let master = self.number_master_index().and_then(|idx| self.children.get(idx))?;
             master.automatic_completion_duration()?;
             return self.duration();
@@ -1832,6 +2023,7 @@ impl Cue for GroupCue {
         if self.number_mode {
             return self.state == CueState::Running
                 && !self.in_pre_wait
+                && !self.playlist_loop
                 && self.number_master_finished
                 && self
                     .number_post_wait_until
@@ -1938,7 +2130,7 @@ impl Cue for GroupCue {
     }
 
     fn playlist_loop(&self) -> Option<bool> {
-        (!self.number_mode).then_some(self.playlist_loop)
+        Some(self.playlist_loop)
     }
 
     fn set_playlist_loop(&mut self, on: bool) {
@@ -1970,6 +2162,11 @@ impl Cue for GroupCue {
     }
 
     fn take_number_completion_start_ids(&mut self) -> Vec<CueId> {
+        if self.number_mode && self.playlist_loop {
+            // Keep the configured finish targets pending. If loop is disabled
+            // during Post-Wait, the final natural completion still starts them.
+            return Vec::new();
+        }
         std::mem::take(&mut self.number_completion_start_ids)
     }
 
@@ -2334,7 +2531,335 @@ mod tests {
     use crate::cue::timer_cue::TimerCue;
     use crate::cue::wait_cue::WaitCue;
     use crate::cue::traits::RuntimeState;
-    use crate::cue::video_cue::VideoCue;
+    use crate::cue::video_cue::{VideoCue, VideoCueFactory};
+    use crate::show::cue_list::CueList;
+
+    #[test]
+    fn number_completion_state_diff_includes_all_descendant_media() {
+        fn running_number(post_wait: Duration) -> (GroupCue, CueId, [CueId; 3]) {
+            let mut master = AudioCue::new();
+            let master_id = master.id();
+            master.accept_preloaded_audio(
+                std::sync::Arc::new(vec![0.0; 57_600]),
+                2,
+                48_000,
+                Duration::from_millis(600),
+            );
+
+            let mut video = VideoCue::new();
+            video.file_path = Some(std::path::PathBuf::from("number-end-video.mp4"));
+            video.accept_preloaded_audio(
+                std::sync::Arc::new(vec![0.0; 57_600]),
+                2,
+                48_000,
+                Duration::from_millis(600),
+            );
+            let video_id = video.id();
+
+            let mut image = ImageCue::new();
+            image.file_path = Some(std::path::PathBuf::from("number-end-image.png"));
+            image.display_duration_ms = Some(100);
+            let image_id = image.id();
+
+            let mut number = GroupCue::new_number();
+            number.children = vec![Box::new(master), Box::new(video), Box::new(image)];
+            number.set_number_master(master_id).unwrap();
+            number.set_number_action_offset(video_id, 0).unwrap();
+            number.set_number_action_offset(image_id, 0).unwrap();
+            number.set_post_wait(post_wait);
+            (number, master_id, [master_id, video_id, image_id])
+        }
+
+        fn state_diff(cue: &mut GroupCue, update: impl FnOnce(&mut GroupCue)) -> Vec<(CueId, CueState, CueState)> {
+            let before = crate::show::event_loop::cue_tree_cue_states(cue);
+            update(cue);
+            let after = crate::show::event_loop::cue_tree_cue_states(cue);
+            crate::show::event_loop::changed_cue_states(&before, &after)
+        }
+
+        // The scheduler tick, not a test-only state assignment, reaches the
+        // Number end. This covers both clock completion and an earlier master
+        // EOF, plus forward/back repositioning and pause/resume.
+        for (seek, pause, early_eof, post_wait) in [
+            (false, false, false, Duration::ZERO),
+            (true, false, false, Duration::ZERO),
+            (false, true, false, Duration::ZERO),
+            (false, false, true, Duration::ZERO),
+            (false, false, false, Duration::from_millis(20)),
+        ] {
+            let (context, _) = presentation_context_with_output();
+            let (mut number, master_id, child_ids) = running_number(post_wait);
+            let number_id = number.id();
+            let before_go = crate::show::event_loop::cue_tree_cue_states(&number);
+            number.go(&context).unwrap();
+            let after_go = crate::show::event_loop::cue_tree_cue_states(&number);
+            let mut changes = crate::show::event_loop::changed_cue_states(&before_go, &after_go);
+            assert!(number.children.iter().all(|child| child.state() == CueState::Running));
+            if seek {
+                number.seek_number(80, &context);
+                number.seek_number(20, &context);
+                assert!(number.children.iter().all(|child| child.state() == CueState::Running));
+            }
+            if pause {
+                number.pause(&context).unwrap();
+                assert_eq!(number.state(), CueState::Paused);
+                number.tick(&context).unwrap();
+                assert_eq!(number.state(), CueState::Paused, "paused Number must not finish on its wall clock");
+                number.resume(&context).unwrap();
+            }
+            if !seek && !pause && !early_eof && post_wait.is_zero() {
+                // The finite Image action ends before its 600 ms master.
+                std::thread::sleep(Duration::from_millis(120));
+                changes.extend(state_diff(&mut number, |number| {
+                    number.tick(&context).unwrap();
+                }));
+                assert_eq!(number.state(), CueState::Running);
+                assert_eq!(number.children[2].state(), CueState::Standby);
+                assert!(changes.contains(&(child_ids[2], CueState::Running, CueState::Standby)));
+            }
+            if early_eof {
+                // The event loop reaps a naturally ended voice during its
+                // completion phase, before it checks the parent Number.
+            } else {
+                number.action_started_at = Some(Instant::now() - Duration::from_millis(610));
+            }
+
+            changes.extend(state_diff(&mut number, |number| {
+                if early_eof {
+                    number.children
+                        .iter_mut()
+                        .find(|child| child.id() == master_id)
+                        .unwrap()
+                        .complete_naturally()
+                        .unwrap();
+                }
+                number.tick(&context).unwrap();
+            }));
+            if post_wait > Duration::ZERO {
+                assert_eq!(number.state(), CueState::Running);
+                assert!(!number.is_complete(), "post-wait keeps the Number alive");
+                number.number_post_wait_until = Some(Instant::now() - Duration::from_millis(1));
+                changes.extend(state_diff(&mut number, |number| {
+                    number.tick(&context).unwrap();
+                    if number.is_complete() {
+                        number.complete_naturally().unwrap();
+                    }
+                }));
+            } else {
+                assert!(number.is_complete(), "master end must complete the Number");
+                changes.extend(state_diff(&mut number, |number| {
+                    number.complete_naturally().unwrap();
+                }));
+            }
+
+            assert_eq!(number.state(), CueState::Standby);
+            assert!(number.children.iter().all(|child| child.state() == CueState::Standby));
+            assert!(changes.contains(&(number_id, CueState::Running, CueState::Standby)));
+            for child_id in child_ids {
+                assert!(changes.contains(&(child_id, CueState::Running, CueState::Standby)),
+                    "state event diff must clear media child {child_id}");
+            }
+
+            // A new GO followed by a completion in the same scheduler turn
+            // must leave the final UI state at the backend's terminal state.
+            if !seek && !pause && !early_eof && post_wait.is_zero() {
+                let before_retrigger = crate::show::event_loop::cue_tree_cue_states(&number);
+                number.go(&context).unwrap();
+                let after_retrigger = crate::show::event_loop::cue_tree_cue_states(&number);
+                let mut same_tick_changes = crate::show::event_loop::changed_cue_states(&before_retrigger, &after_retrigger);
+                number.action_started_at = Some(Instant::now() - Duration::from_millis(610));
+                same_tick_changes.extend(state_diff(&mut number, |number| {
+                    number.tick(&context).unwrap();
+                    if number.is_complete() {
+                        number.complete_naturally().unwrap();
+                    }
+                }));
+                let mut states: std::collections::HashMap<_, _> = before_retrigger.into_iter().collect();
+                for (id, _, state) in same_tick_changes {
+                    states.insert(id, state);
+                }
+                assert_eq!(states.get(&number_id), Some(&CueState::Standby));
+                for child_id in child_ids {
+                    assert_eq!(states.get(&child_id), Some(&CueState::Standby));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_child_keeps_zero_wait_playlist_loop_advancing() {
+        fn run(paused: bool) {
+            let ctx = presentation_context();
+            let mut playlist = GroupCue::new();
+            playlist.mode = GroupMode::Playlist;
+            playlist.playlist_loop = true;
+            let ids: Vec<_> = (0..3)
+                .map(|_| {
+                    let mut child = WaitCue::new();
+                    child.set_user_action_duration(Some(Duration::ZERO)).unwrap();
+                    let id = child.id();
+                    playlist.children.push(Box::new(child));
+                    id
+                })
+                .collect();
+            let playlist_id = playlist.id();
+            playlist.go(&ctx).unwrap();
+            if paused {
+                playlist.pause(&ctx).unwrap();
+            }
+            let mut cue_list = CueList::new("test");
+            cue_list.push(Box::new(playlist));
+
+            if paused {
+                cue_list
+                    .set_playhead_for_selection(Some(ids[2]))
+                    .unwrap();
+                assert_eq!(
+                    cue_list.get(&playlist_id).unwrap().active_child_id(),
+                    Some(ids[1]),
+                    "paused playlist retains its next child"
+                );
+                cue_list.get_mut(&playlist_id).unwrap().resume(&ctx).unwrap();
+            }
+            let mut observed = Vec::new();
+            for target_idx in [0, 2, 1, 0, 2, 1, 0, 2, 1] {
+                cue_list
+                    .set_playhead_for_selection(Some(ids[target_idx]))
+                    .unwrap();
+                cue_list.get_mut(&playlist_id).unwrap().tick(&ctx).unwrap();
+                let running_child = cue_list
+                    .get(&playlist_id)
+                    .unwrap()
+                    .child_cues()
+                    .unwrap()
+                    .iter()
+                    .find(|child| child.state() == CueState::Running)
+                    .map(|child| child.id());
+                observed.push(running_child);
+            }
+            assert_eq!(
+                observed,
+                vec![
+                    Some(ids[1]), Some(ids[2]), Some(ids[0]),
+                    Some(ids[1]), Some(ids[2]), Some(ids[0]),
+                    Some(ids[1]), Some(ids[2]), Some(ids[0]),
+                ],
+                "selection must not interrupt three complete playlist loops (paused={paused})",
+            );
+        }
+
+        run(false);
+        run(true);
+    }
+
+    #[test]
+    fn standby_selection_and_explicit_playhead_keep_existing_positioning() {
+        let mut playlist = GroupCue::new();
+        playlist.mode = GroupMode::Playlist;
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let child = WaitCue::new();
+            ids.push(child.id());
+            playlist.children.push(Box::new(child));
+        }
+        let playlist_id = playlist.id();
+        let mut cue_list = CueList::new("test");
+        cue_list.push(Box::new(playlist));
+
+        cue_list.set_playhead_for_selection(Some(ids[2])).unwrap();
+        assert_eq!(cue_list.get(&playlist_id).unwrap().active_child_id(), Some(ids[2]));
+
+        cue_list.set_playhead(Some(ids[1])).unwrap();
+        assert_eq!(cue_list.get(&playlist_id).unwrap().active_child_id(), Some(ids[1]));
+
+        let mut active = GroupCue::new();
+        active.mode = GroupMode::Playlist;
+        active.playlist_loop = true;
+        let active_ids: Vec<_> = (0..3)
+            .map(|_| {
+                let child = WaitCue::new();
+                let id = child.id();
+                active.children.push(Box::new(child));
+                id
+            })
+            .collect();
+        active.state = CueState::Running;
+        active.seq_current_id = Some(active_ids[0]);
+        let active_id = active.id();
+        let mut active_list = CueList::new("test");
+        active_list.push(Box::new(active));
+        active_list.set_playhead(Some(active_ids[2])).unwrap();
+        assert_eq!(active_list.get(&active_id).unwrap().active_child_id(), Some(active_ids[2]));
+    }
+
+    #[test]
+    fn rebuilt_completed_image_keeps_pending_playlist_deadline_and_stop_cancels_it() {
+        let ctx = presentation_context();
+        let mut image = ImageCue::new();
+        image.mark_auto_continue_fired();
+        image.restore_runtime_state(RuntimeState {
+            state: CueState::Completed,
+            voice_id: None,
+            started_at: None,
+            action_started_at: None,
+        });
+        let image_id = image.id();
+        let next = WaitCue::new();
+        let next_id = next.id();
+        let mut group = GroupCue::new();
+        group.mode = GroupMode::Playlist;
+        group.state = CueState::Running;
+        group.seq_current_id = Some(image_id);
+        group.children.extend([Box::new(image) as Box<dyn Cue>, Box::new(next)]);
+        let due = std::time::Instant::now() + Duration::from_secs(3);
+        let pending = PendingGroupAdvance {
+            due,
+            source_id: image_id,
+            source_generation: 0,
+            expected_current_id: Some(image_id),
+            require_marker: true,
+            source_paused_at: None,
+        };
+        group.seq_post_wait_until = Some(pending);
+
+        let original = group.children[0].as_ref();
+        let extension = original.runtime_extension().unwrap();
+        let runtime = original.runtime_state();
+        let mut registry = crate::cue::registry::CueRegistry::new();
+        registry.register(
+            CueType::Image,
+            Box::new(crate::cue::image_cue::ImageCueFactory),
+        );
+        let mut rebuilt = registry.from_json(original.serialize()).unwrap();
+        rebuilt.restore_runtime_state(runtime);
+        rebuilt.restore_runtime_extension(extension);
+        group.children[0] = rebuilt;
+
+        assert_eq!(group.seq_post_wait_until.unwrap().due, due);
+        assert!(group.pending_advance_is_valid(pending));
+        group.tick(&ctx).unwrap();
+        assert_eq!(group.seq_post_wait_until.unwrap().due, due);
+        assert!(!group.seq_done);
+
+        group.seq_post_wait_until.as_mut().unwrap().due = std::time::Instant::now();
+        group.tick(&ctx).unwrap();
+        assert_eq!(group.seq_current_id, Some(next_id));
+        assert_eq!(group.children[1].state(), CueState::Running);
+
+        group.stop(&ctx).unwrap();
+        assert!(group.seq_post_wait_until.is_none());
+        assert_eq!(group.children[0].auto_continue_marker(), Some(false));
+        assert_eq!(group.state, CueState::Standby);
+
+        group.children[0].mark_auto_continue_fired();
+        group.state = CueState::Running;
+        group.seq_current_id = Some(image_id);
+        group.seq_post_wait_until = Some(pending);
+        group.reset().unwrap();
+        assert!(group.seq_post_wait_until.is_none());
+        assert_eq!(group.children[0].auto_continue_marker(), Some(false));
+        assert_eq!(group.state, CueState::Standby);
+    }
     use crate::engine::{
         audio_engine::AudioEngine,
         dmx_engine::DmxEngine,
@@ -2349,12 +2874,23 @@ mod tests {
     struct NullOutput {
         started: std::sync::Mutex<Vec<VoiceId>>,
         stopped: std::sync::Mutex<Vec<VoiceId>>,
+        requested_durations: std::sync::Mutex<Vec<Option<u64>>>,
+        shown_paths: std::sync::Mutex<Vec<String>>,
+        seeked: std::sync::Mutex<Vec<(VoiceId, u64)>>,
+        visual_orders: std::sync::Mutex<Vec<(String, Option<u64>, Option<u64>)>>,
     }
 
     impl OutputEngineApi for NullOutput {
-        fn show_content(&self, _req: ContentRequest<'_>) -> anyhow::Result<VoiceId> {
+        fn show_content(&self, req: ContentRequest<'_>) -> anyhow::Result<VoiceId> {
             let id = Uuid::new_v4();
             self.started.lock().unwrap().push(id);
+            self.requested_durations.lock().unwrap().push(req.display_duration_ms);
+            self.shown_paths.lock().unwrap().push(req.file_path.to_string_lossy().into_owned());
+            self.visual_orders.lock().unwrap().push((
+                req.file_path.to_string_lossy().into_owned(),
+                req.layer_group_order,
+                req.layer_child_order,
+            ));
             Ok(id)
         }
         fn stop_content(&self, voice_id: VoiceId, _visual_fade_ms: u32, _audio_fade_ms: u32) {
@@ -2375,6 +2911,9 @@ mod tests {
         fn begin_eof_fade_out(&self, _voice_id: VoiceId, _fade_ms: u32) -> bool { false }
         fn devamp_voice(&self, _voice_id: VoiceId, _stop_at_end: bool) {}
         fn start_preloaded(&self, _voice_id: VoiceId) -> bool { false }
+        fn seek_voice_action_ms(&self, voice_id: VoiceId, position_ms: u64) {
+            self.seeked.lock().unwrap().push((voice_id, position_ms));
+        }
     }
 
     fn presentation_context() -> CueContext {
@@ -2561,16 +3100,180 @@ mod tests {
         assert!(number.pending_child_post_wait().is_none());
     }
 
+    #[test]
+    fn number_playlist_loop_restarts_the_graph_after_post_wait_and_preserves_offsets() {
+        let ctx = presentation_context();
+        let mut number = GroupCue::new_number();
+        let mut master = GroupCue::new();
+        master.mode = GroupMode::Sequential;
+        let mut master_first = WaitCue::new();
+        master_first.set_user_action_duration(Some(Duration::from_secs(1))).unwrap();
+        let mut master_second = WaitCue::new();
+        master_second.set_user_action_duration(Some(Duration::from_secs(1))).unwrap();
+        master.children = vec![Box::new(master_first), Box::new(master_second)];
+        let master_id = master.id();
+        let mut first = ImageCue::new();
+        first.file_path = Some(std::path::PathBuf::from("number-first.png"));
+        first.display_duration_ms = Some(2_000);
+        let first_id = first.id();
+        let mut delayed = ImageCue::new();
+        delayed.file_path = Some(std::path::PathBuf::from("number-delayed.png"));
+        delayed.display_duration_ms = Some(2_000);
+        let delayed_id = delayed.id();
+        let finish_target = Uuid::new_v4();
+        number.children = vec![Box::new(master), Box::new(first), Box::new(delayed)];
+        number.master_child_id = Some(master_id);
+        number.action_offsets_ms.insert(first_id, 0);
+        number.action_offsets_ms.insert(delayed_id, 500);
+        number.number_finish_start_ids.push(finish_target);
+        number.post_wait = Duration::from_millis(20);
+        number.set_playlist_loop(true);
+
+        number.go(&ctx).unwrap();
+        let number_generation = number.play_generation();
+        let master_generation = number.children[0].play_generation();
+        let first_generation = number.children[1].play_generation();
+        number.take_fired_cue_ids();
+        assert_eq!(number.children[0].state(), CueState::Running);
+        assert_eq!(number.children[1].state(), CueState::Running);
+        assert_eq!(number.children[2].state(), CueState::Standby);
+
+        // Advance only the Number clock to the end of this master pass.
+        number.action_started_at = Some(Instant::now() - Duration::from_secs(3));
+        number.tick_number(&ctx).unwrap();
+        assert!(number.number_master_finished);
+        assert!(!number.is_complete(), "looping Numbers do not complete at master EOF");
+        assert_eq!(number.automatic_completion_duration(), None);
+        assert!(number.take_number_completion_start_ids().is_empty());
+        assert_eq!(number.number_completion_start_ids, vec![finish_target]);
+        assert_eq!(number.playlist_loop(), Some(true));
+        assert_eq!(number.serialize()["playlist_loop"], true);
+
+        // Pause across the original deadline. Resume must shift that deadline;
+        // the next tick must not start a pass until the shifted Post-Wait ends.
+        number.pause(&ctx).unwrap();
+        let paused_deadline = number.number_post_wait_until.unwrap();
+        std::thread::sleep(Duration::from_millis(25));
+        number.tick(&ctx).unwrap();
+        assert_eq!(number.children[0].play_generation(), master_generation);
+        number.resume(&ctx).unwrap();
+        assert!(number.number_post_wait_until.unwrap() > Instant::now());
+        assert!(number.number_post_wait_until.unwrap() > paused_deadline);
+        assert_eq!(number.children[0].play_generation(), master_generation);
+
+        // Let the resumed post-wait expire without another timed sleep.
+        number.number_post_wait_until = Some(Instant::now() - Duration::from_millis(1));
+        number.tick_number(&ctx).unwrap();
+        assert!(number.is_running());
+        assert!(!number.number_master_finished);
+        assert!(number.action_elapsed() <= Duration::from_millis(5));
+        assert_eq!(number.play_generation(), number_generation, "internal passes are not new external GO operations");
+        assert_eq!(number.children[0].state(), CueState::Running);
+        assert_eq!(number.children[1].state(), CueState::Running);
+        assert_eq!(number.children[2].state(), CueState::Standby, "the delayed action keeps its saved offset");
+        let master_children = number.children[0].child_cues().unwrap();
+        assert_eq!(master_children[0].state(), CueState::Running, "a Group master starts at its first child each pass");
+        assert_eq!(master_children[1].state(), CueState::Standby);
+        assert_eq!(number.action_offsets_ms.get(&delayed_id), Some(&500));
+        assert!(number.children[0].play_generation() > master_generation);
+        assert!(number.children[1].play_generation() > first_generation);
+        let fired = number.take_fired_cue_ids();
+        assert!(fired.contains(&master_id) && fired.contains(&first_id));
+        assert!(!fired.contains(&finish_target), "finish targets are not re-fired on an internal pass");
+
+        number.stop(&ctx).unwrap();
+        assert_eq!(number.state(), CueState::Standby);
+        assert_eq!(number.children[0].state(), CueState::Standby);
+        assert_eq!(number.playlist_loop(), Some(true), "Stop clears runtime but keeps the saved loop setting");
+    }
 
     #[test]
-    fn number_seek_plan_clamps_master_and_starts_only_due_actions() {
-        let due = Uuid::new_v4();
-        let future = Uuid::new_v4();
-        let offsets = vec![(due, 1_000), (future, 6_000)];
-        let target = number_seek_target(9_000, Some(5_000));
+    fn number_audio_master_loop_survives_forward_backward_seek_and_stop() {
+        let (ctx, output) = presentation_context_with_output();
+        let mut number = GroupCue::new_number();
+        let mut master = AudioCue::new();
+        master.accept_preloaded_audio(
+            std::sync::Arc::new(vec![0.0; 192_000]),
+            2,
+            48_000,
+            Duration::from_secs(2),
+        );
+        let master_id = master.id();
+        let mut action = ImageCue::new();
+        action.file_path = Some(std::path::PathBuf::from("number-seek-action.png"));
+        action.display_duration_ms = Some(2_000);
+        let action_id = action.id();
+        number.children = vec![Box::new(master), Box::new(action)];
+        number.master_child_id = Some(master_id);
+        number.action_offsets_ms.insert(action_id, 500);
+        number.post_wait = Duration::from_millis(5);
+        number.set_playlist_loop(true);
+        number.go(&ctx).unwrap();
+        let anchor = number.visual_group_order.expect("Number reserves order on GO");
+        let parent_generation = number.play_generation();
+        let master_generation = number.children[0].play_generation();
 
-        assert_eq!(target, 5_000);
-        assert_eq!(number_due_action_ids(target, &offsets), vec![due]);
+        number.seek_number(600, &ctx);
+        assert_eq!(number.children[1].state(), CueState::Running);
+        assert_eq!(output.visual_orders.lock().unwrap().last().unwrap().1, Some(anchor));
+        number.seek_number(100, &ctx);
+        assert_eq!(number.children[1].state(), CueState::Standby);
+        assert_eq!(number.playlist_loop(), Some(true));
+
+        number.action_started_at = Some(Instant::now() - Duration::from_secs(3));
+        number.tick_number(&ctx).unwrap();
+        assert!(number.number_master_finished);
+        number.number_post_wait_until = Some(Instant::now() - Duration::from_millis(1));
+        number.tick_number(&ctx).unwrap();
+
+        assert_eq!(number.play_generation(), parent_generation);
+        assert!(number.children[0].play_generation() > master_generation);
+        assert_eq!(number.children[0].state(), CueState::Running);
+        assert_eq!(number.visual_group_order, Some(anchor), "internal loop keeps the execution anchor");
+        assert_eq!(number.children[1].state(), CueState::Standby, "seek did not erase the action's authored offset");
+        assert_eq!(number.action_offsets_ms.get(&action_id), Some(&500));
+
+        number.stop(&ctx).unwrap();
+        assert_eq!(number.state(), CueState::Standby);
+        assert!(number.children.iter().all(|child| child.state() == CueState::Standby));
+        assert_eq!(number.visual_group_order, None, "Stop releases the old scope");
+        number.go(&ctx).unwrap();
+        assert_ne!(number.visual_group_order, Some(anchor), "a new GO gets a new visual priority");
+    }
+
+    #[test]
+    fn number_loop_off_during_post_wait_completes_and_emits_finish_targets_once() {
+        let ctx = presentation_context();
+        let mut number = GroupCue::new_number();
+        let finish_target = Uuid::new_v4();
+        number.state = CueState::Running;
+        number.number_master_finished = true;
+        number.number_post_wait_until = Some(Instant::now() + Duration::from_secs(1));
+        number.number_completion_start_ids.push(finish_target);
+        number.set_playlist_loop(true);
+
+        assert!(number.take_number_completion_start_ids().is_empty());
+        assert_eq!(number.number_completion_start_ids, vec![finish_target]);
+        number.set_playlist_loop(false);
+        assert_eq!(number.automatic_completion_duration(), None, "Post-Wait deadline is authoritative after loop is disabled");
+        assert!(!number.is_complete());
+
+        number.number_post_wait_until = Some(Instant::now() - Duration::from_millis(1));
+        number.tick_number(&ctx).unwrap();
+        assert!(number.is_complete());
+        assert_eq!(number.take_number_completion_start_ids(), vec![finish_target]);
+        assert!(number.take_number_completion_start_ids().is_empty());
+    }
+
+
+    #[test]
+    fn number_seek_action_windows_respect_offsets_duration_and_master_end() {
+        assert!(number_action_window_active(1_000, 1_000, Some(500), Some(5_000)));
+        assert!(!number_action_window_active(1_500, 1_000, Some(500), Some(5_000)));
+        assert!(!number_action_window_active(999, 1_000, Some(500), Some(5_000)));
+        assert!(number_action_window_active(4_999, 1_000, None, Some(5_000)));
+        assert!(!number_action_window_active(5_000, 1_000, None, Some(5_000)));
+        assert_eq!(number_seek_target(9_000, Some(5_000)), 5_000);
     }
 
     #[test]
@@ -2589,7 +3292,304 @@ mod tests {
 
         let offsets = number.number_seek_action_offsets(0);
         assert_eq!(offsets, vec![(action_id, 0)]);
-        assert_eq!(number_due_action_ids(8_000, &offsets), vec![action_id]);
+        assert!(number_action_window_active(8_000, offsets[0].1, None, Some(10_000)));
+    }
+
+    #[test]
+    fn number_seek_rebuilds_active_windows_forward_and_backward_without_relaunching_finished_actions() {
+        let ctx = presentation_context();
+        let mut number = GroupCue::new_number();
+        let mut master = AudioCue::new();
+        master.accept_preloaded_audio(
+            std::sync::Arc::new(vec![0.0; 192_000]),
+            2,
+            48_000,
+            Duration::from_secs(2),
+        );
+        let master_id = master.id();
+        master.go(&ctx).unwrap();
+
+        let mut finished = WaitCue::new();
+        finished.set_user_action_duration(Some(Duration::from_millis(100))).unwrap();
+        let finished_id = finished.id();
+        let mut first = WaitCue::new();
+        first.set_user_action_duration(Some(Duration::from_millis(200))).unwrap();
+        let first_id = first.id();
+        let mut second = WaitCue::new();
+        second.set_user_action_duration(Some(Duration::from_millis(200))).unwrap();
+        let second_id = second.id();
+
+        number.children = vec![Box::new(master), Box::new(finished), Box::new(first), Box::new(second)];
+        number.master_child_id = Some(master_id);
+        number.action_offsets_ms.insert(finished_id, 0);
+        number.action_offsets_ms.insert(first_id, 200);
+        number.action_offsets_ms.insert(second_id, 500);
+        number.state = CueState::Running;
+
+        number.seek_number(250, &ctx);
+        assert_eq!(number.children[2].state(), CueState::Running);
+        assert_eq!(number.children[3].state(), CueState::Standby);
+        assert_eq!(number.children[1].state(), CueState::Standby);
+        let first_generation = number.children[2].play_generation();
+        assert!(number.number_launched_actions.contains(&finished_id));
+
+        number.tick_number(&ctx).unwrap();
+        assert_eq!(number.children[1].play_generation(), 0, "finished window must not be launched on the next tick");
+        assert_eq!(number.children[2].play_generation(), first_generation);
+
+        number.seek_number(550, &ctx);
+        assert_eq!(number.children[2].state(), CueState::Standby);
+        assert_eq!(number.children[3].state(), CueState::Running);
+        assert!(number.number_launched_actions.contains(&first_id));
+        assert!(number.number_launched_actions.contains(&second_id));
+        let second_generation = number.children[3].play_generation();
+        number.tick_number(&ctx).unwrap();
+        assert_eq!(number.children[2].play_generation(), first_generation, "a finished window must not relaunch on the next tick");
+        assert_eq!(number.children[3].play_generation(), second_generation);
+
+        number.seek_number(250, &ctx);
+        assert_eq!(number.children[2].state(), CueState::Running);
+        assert_eq!(number.children[3].state(), CueState::Standby);
+        assert!(number.number_launched_actions.contains(&finished_id));
+    }
+
+    #[test]
+    fn number_seek_preserves_paused_state_and_repositions_nested_group_timeline() {
+        let ctx = presentation_context();
+        let mut number = GroupCue::new_number();
+        let mut master = WaitCue::new();
+        master.set_user_action_duration(Some(Duration::from_secs(2))).unwrap();
+        let master_id = master.id();
+        master.go(&ctx).unwrap();
+
+        let mut action = GroupCue::new();
+        action.mode = GroupMode::Sequential;
+        let mut first = WaitCue::new();
+        first.set_user_action_duration(Some(Duration::from_millis(100))).unwrap();
+        let mut second = WaitCue::new();
+        second.set_user_action_duration(Some(Duration::from_millis(100))).unwrap();
+        let second_id = second.id();
+        action.children = vec![Box::new(first), Box::new(second)];
+        let action_id = action.id();
+        let nested_real_go = Uuid::new_v4();
+        action.fired_child_ids.push(nested_real_go);
+
+        number.children = vec![Box::new(master), Box::new(action)];
+        number.master_child_id = Some(master_id);
+        number.action_offsets_ms.insert(action_id, 0);
+        number.state = CueState::Paused;
+        number.seek_number(150, &ctx);
+
+        assert_eq!(number.take_fired_cue_ids(), vec![nested_real_go], "nested real GO waits survive timeline reconstruction");
+        assert_eq!(number.state, CueState::Paused);
+        assert_eq!(number.children[1].state(), CueState::Paused);
+        assert!((Duration::from_millis(150)..=Duration::from_millis(155))
+            .contains(&number.children[1].action_elapsed()));
+        assert_eq!(number.children[1].child_cues().unwrap()[1].id(), second_id);
+        assert_eq!(number.children[1].child_cues().unwrap()[1].state(), CueState::Paused);
+
+        number.seek_number(50, &ctx);
+        assert_eq!(number.children[1].action_elapsed(), Duration::from_millis(50));
+        assert_eq!(number.children[1].child_cues().unwrap()[0].state(), CueState::Paused);
+        assert_eq!(number.children[1].child_cues().unwrap()[1].state(), CueState::Standby);
+
+        number.seek_number(150, &ctx);
+        assert_eq!(number.children[1].action_elapsed(), Duration::from_millis(150));
+        assert_eq!(number.children[1].child_cues().unwrap()[1].state(), CueState::Paused);
+        assert!(number.take_fired_cue_ids().is_empty(), "seek-generated nested GO IDs must not leak on later ticks");
+    }
+
+    #[test]
+    fn simultaneous_group_seek_keeps_indefinite_image_active_after_offset() {
+        let (ctx, _) = presentation_context_with_output();
+        let mut number = GroupCue::new_number();
+        let mut master = WaitCue::new();
+        master.set_user_action_duration(Some(Duration::from_secs(2))).unwrap();
+        let master_id = master.id();
+        master.go(&ctx).unwrap();
+
+        let mut image = ImageCue::new();
+        image.file_path = Some(std::path::PathBuf::from("indefinite.png"));
+        let mut action = GroupCue::new();
+        action.mode = GroupMode::Simultaneous;
+        action.children.push(Box::new(image));
+        let action_id = action.id();
+        number.children = vec![Box::new(master), Box::new(action)];
+        number.master_child_id = Some(master_id);
+        number.action_offsets_ms.insert(action_id, 0);
+        number.state = CueState::Running;
+
+        number.seek_number(500, &ctx);
+
+        let action = number.children[1].as_ref();
+        assert_eq!(action.state(), CueState::Running);
+        assert!((Duration::from_millis(500)..=Duration::from_millis(505))
+            .contains(&action.action_elapsed()));
+        assert_eq!(action.child_cues().unwrap()[0].state(), CueState::Running);
+    }
+
+    #[test]
+    fn number_seek_repositions_finite_image_clock_and_keeps_indefinite_image_active() {
+        let (ctx, output) = presentation_context_with_output();
+        let mut number = GroupCue::new_number();
+        let mut master = WaitCue::new();
+        master.set_user_action_duration(Some(Duration::from_secs(2))).unwrap();
+        let master_id = master.id();
+        master.go(&ctx).unwrap();
+
+        let mut image = ImageCue::new();
+        image.file_path = Some(std::path::PathBuf::from("number.png"));
+        image.display_duration_ms = Some(40);
+        let image_id = image.id();
+        let mut hold = ImageCue::new();
+        hold.file_path = Some(std::path::PathBuf::from("hold.png"));
+        let hold_id = hold.id();
+
+        number.children = vec![Box::new(master), Box::new(image), Box::new(hold)];
+        number.master_child_id = Some(master_id);
+        number.action_offsets_ms.insert(image_id, 100);
+        number.action_offsets_ms.insert(hold_id, 300);
+        number.state = CueState::Running;
+
+        number.seek_number(110, &ctx);
+        assert_eq!(number.children[1].state(), CueState::Running);
+        assert!(number.children[1].action_elapsed() >= Duration::from_millis(10));
+        assert_eq!(output.requested_durations.lock().unwrap().as_slice(), &[None]);
+
+        std::thread::sleep(Duration::from_millis(45));
+        number.tick_number(&ctx).unwrap();
+        assert_eq!(number.children[1].state(), CueState::Standby, "expired nested image must be reaped by Number");
+        assert!(!number.children[1].has_retained_output());
+
+        number.seek_number(110, &ctx);
+        assert_eq!(number.children[1].state(), CueState::Running, "rewind re-enters the image window");
+        let image_generation = number.children[1].play_generation();
+        number.children[1].set_disabled(true);
+        std::thread::sleep(Duration::from_millis(45));
+        number.tick_number(&ctx).unwrap();
+        assert_eq!(number.children[1].state(), CueState::Standby, "a running image still expires after it is disarmed");
+        number.seek_number(110, &ctx);
+        assert_eq!(number.children[1].state(), CueState::Standby, "a disabled image is not launched by seek");
+        assert_eq!(number.children[1].play_generation(), image_generation);
+        number.seek_number(310, &ctx);
+        assert_eq!(number.children[1].state(), CueState::Standby);
+        assert_eq!(number.children[2].state(), CueState::Running);
+        std::thread::sleep(Duration::from_millis(45));
+        number.tick_number(&ctx).unwrap();
+        assert_eq!(number.children[2].state(), CueState::Running, "indefinite image must not expire by clock");
+    }
+
+    #[test]
+    fn number_seek_repositions_video_within_window_and_rebuilds_windows_forward_and_back() {
+        let (ctx, output) = presentation_context_with_output();
+        let mut number = GroupCue::new_number();
+        let mut master = WaitCue::new();
+        master.set_user_action_duration(Some(Duration::from_secs(2))).unwrap();
+        let master_id = master.id();
+        master.go(&ctx).unwrap();
+
+        let first_path = "first.mp4".to_string();
+        let second_path = "second.mp4".to_string();
+        let mut first_json = VideoCue::new().serialize();
+        first_json["file_path"] = serde_json::json!(first_path.clone());
+        first_json["cached_duration_ms"] = serde_json::json!(300);
+        let mut first = VideoCueFactory.from_json(first_json).unwrap();
+        first.accept_preloaded_audio(
+            std::sync::Arc::new(vec![0.0; 480]),
+            1,
+            48_000,
+            Duration::from_millis(10),
+        );
+        let first_id = first.id();
+        let mut second_json = VideoCue::new().serialize();
+        second_json["file_path"] = serde_json::json!(second_path.clone());
+        second_json["cached_duration_ms"] = serde_json::json!(300);
+        let mut second = VideoCueFactory.from_json(second_json).unwrap();
+        second.accept_preloaded_audio(
+            std::sync::Arc::new(vec![0.0; 480]),
+            1,
+            48_000,
+            Duration::from_millis(10),
+        );
+        let second_id = second.id();
+
+        number.children = vec![Box::new(master), first, second];
+        number.master_child_id = Some(master_id);
+        number.set_number_action_offset(first_id, 100).unwrap();
+        number.set_number_action_offset(second_id, 500).unwrap();
+        number.state = CueState::Running;
+        let pending_real_go = Uuid::new_v4();
+        number.fired_child_ids.push(pending_real_go);
+
+        number.seek_number(150, &ctx);
+        assert_eq!(number.take_fired_cue_ids(), vec![pending_real_go], "seek preserves already queued real GO notifications");
+        assert_eq!(number.children[1].state(), CueState::Running);
+        assert_eq!(number.children[2].state(), CueState::Standby);
+        let first_voice = number.children[1].playing_voice_id().unwrap();
+        assert_eq!(output.seeked.lock().unwrap().last(), Some(&(first_voice, 50)));
+
+        number.seek_number(200, &ctx);
+        assert_eq!(output.seeked.lock().unwrap().last(), Some(&(first_voice, 100)));
+        assert_eq!(output.shown_paths.lock().unwrap().iter().filter(|path| *path == &first_path).count(), 1,
+            "seeking inside an active action must not reload the video");
+
+        number.seek_number(550, &ctx);
+        assert_eq!(number.children[1].state(), CueState::Standby);
+        assert_eq!(number.children[2].state(), CueState::Running);
+        assert!(number.take_fired_cue_ids().is_empty(), "seek must not publish synthetic child GO notifications");
+        let second_voice = number.children[2].playing_voice_id().unwrap();
+        assert_eq!(output.seeked.lock().unwrap().last(), Some(&(second_voice, 50)));
+
+        number.seek_number(200, &ctx);
+        assert_eq!(number.children[1].state(), CueState::Running);
+        assert_eq!(number.children[2].state(), CueState::Standby);
+        assert_eq!(output.shown_paths.lock().unwrap().iter().filter(|path| *path == &first_path).count(), 2,
+            "rewinding into a finished window must start it again");
+        number.tick_number(&ctx).unwrap();
+        assert!(number.take_fired_cue_ids().is_empty(), "synthetic GO IDs must not leak on the next Number tick");
+    }
+
+    #[test]
+    fn nested_group_delayed_video_keeps_number_order_scope() {
+        let (ctx, output) = presentation_context_with_output();
+        let mut master = AudioCue::new();
+        master.accept_preloaded_audio(
+            std::sync::Arc::new(vec![0.0; 192_000]),
+            2,
+            48_000,
+            Duration::from_secs(2),
+        );
+        let master_id = master.id();
+
+        let mut video_json = VideoCue::new().serialize();
+        video_json["file_path"] = serde_json::json!("delayed-grandchild.mp4");
+        video_json["cached_duration_ms"] = serde_json::json!(500);
+        let mut video = VideoCueFactory.from_json(video_json).unwrap();
+        video.accept_preloaded_audio(
+            std::sync::Arc::new(vec![0.0; 48_000]),
+            2,
+            48_000,
+            Duration::from_millis(500),
+        );
+        video.set_pre_wait(Duration::from_millis(5));
+        let mut nested = GroupCue::new();
+        nested.children.push(video);
+        let nested_id = nested.id();
+
+        let mut number = GroupCue::new_number();
+        number.children = vec![Box::new(master), Box::new(nested)];
+        number.set_number_master(master_id).unwrap();
+        number.set_number_action_offset(nested_id, 0).unwrap();
+        number.go(&ctx).unwrap();
+        let anchor = number.visual_group_order.expect("Number reserves order on GO");
+        assert_eq!(number.children[1].state(), CueState::Running);
+        assert_eq!(number.children[1].child_cues().unwrap()[0].state(), CueState::Running);
+        std::thread::sleep(Duration::from_millis(10));
+        number.tick(&ctx).unwrap();
+
+        let orders = output.visual_orders.lock().unwrap();
+        let delayed = orders.iter().find(|(path, _, _)| path == "delayed-grandchild.mp4").unwrap();
+        assert_eq!(delayed.1, Some(anchor));
     }
 
     #[test]

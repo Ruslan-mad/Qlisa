@@ -608,6 +608,8 @@ impl VideoCue {
             },
             live_source: false,
             layer_style: self.layer_style,
+            layer_group_order: context.visual_group_order(),
+            layer_child_order: None,
             slices,
             preload: self.preloading,
         }, &self.output_ids, &self.geometry_by_output) {
@@ -822,6 +824,17 @@ impl Cue for VideoCue {
         self.decoded_sample_rate = sample_rate.max(1);
     }
 
+    fn extract_preloaded_stream(
+        &self,
+    ) -> Option<(PathBuf, u16, u32, Option<Duration>)> {
+        Some((
+            self.stream_path.clone()?,
+            self.decoded_channels,
+            self.decoded_sample_rate,
+            self.cached_duration,
+        ))
+    }
+
     fn go(&mut self, context: &CueContext) -> Result<()> {
         self.validate_presentation_video_mode()?;
         if self.state == CueState::Running {
@@ -993,6 +1006,9 @@ impl Cue for VideoCue {
             if let Some(vid) = self.active_voice_id {
             // Releasing a preload reveals and unpauses in one step; an
             // ordinary pause just unpauses.
+                if self.preloaded {
+                    context.output_engine.set_voice_layer_order(vid, context.visual_group_order());
+                }
                 let revealed = self.preloaded && context.output_engine.start_preloaded(vid);
                 if !revealed {
                     context.output_engine.resume_voice(vid)?;
@@ -1039,14 +1055,19 @@ impl Cue for VideoCue {
         if self.action_started_at.is_none() && self.state != CueState::Paused {
             return;
         }
-        let action_ms = action_position_from_file_ms(
+        if let Some(action_ms) = self.action_position_from_file_ms(file_position_ms) {
+            self.seek(action_ms, ctx);
+        }
+    }
+
+    fn action_position_from_file_ms(&self, file_position_ms: u64) -> Option<u64> {
+        Some(action_position_from_file_ms(
             file_position_ms,
             self.cached_duration,
             self.start_time,
             self.end_time,
             1.0,
-        );
-        self.seek(action_ms, ctx);
+        ))
     }
 
     fn media_position_for_action_ms(&self, action_elapsed: Duration) -> Option<u64> {
@@ -1284,6 +1305,22 @@ impl Cue for VideoCue {
         self.started_at = snap.started_at;
         self.action_started_at = snap.action_started_at;
         self.in_pre_wait = snap.state == CueState::Running && snap.action_started_at.is_none();
+    }
+
+    fn runtime_extension(&self) -> Option<Value> {
+        Some(json!({
+            "play_generation": self.play_generation,
+            "auto_continue_fired": self.auto_continue_fired,
+        }))
+    }
+
+    fn restore_runtime_extension(&mut self, value: Value) {
+        if let Some(generation) = value.get("play_generation").and_then(Value::as_u64) {
+            self.play_generation = generation;
+        }
+        if let Some(fired) = value.get("auto_continue_fired").and_then(Value::as_bool) {
+            self.auto_continue_fired = fired;
+        }
     }
 
     fn live_audio_params(&self) -> Option<crate::cue::traits::LiveAudioParams> {

@@ -82,6 +82,7 @@ function effectiveDuration(cue: CueSummary): DurationResult {
   if (cue.duration_ms != null && (!Number.isFinite(cue.duration_ms) || cue.duration_ms < 0)) return { kind: "unknown" };
   if ((cue.cue_type === "audio" || cue.cue_type === "video") && cue.loop_count === INFINITE_LOOP) return { kind: "infinite" };
   if (cue.cue_type === "group" && cue.group_mode === "playlist" && cue.playlist_loop) return { kind: "infinite" };
+  if (cue.cue_type === "number" && cue.playlist_loop) return { kind: "infinite" };
   // Group summaries already include their own and child waits. Number summaries
   // include the master and post-wait, but omit the Number pre-wait. Leaf
   // summaries include trim/repeat and still need both waits added.

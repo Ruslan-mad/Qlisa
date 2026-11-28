@@ -29,14 +29,14 @@ use runtime::OutputPipelineConfig;
 pub(crate) use runtime::OutputRegistry;
 use types::{compose_display_props, FadeAnimState, MpvCtx, OutputVoice, PendingVideoStart};
 pub use types::{
-    ContentRequest, FitMode, LayerStyle, OutputStatus, OutputSurface, OutputTransform, ScreenInfo,
+    ContentRequest, FitMode, LayerOrder, LayerOrderKey, LayerStyle, OutputStatus, OutputSurface, OutputTransform, ScreenInfo,
     SurfaceId, TestPattern, VideoGeometry, VoiceId,
 };
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_void, CString};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -981,6 +981,9 @@ pub struct OutputEngine {
     voice_groups: Mutex<HashMap<VoiceId, Vec<VoiceId>>>,
     voice_group_completed: Mutex<HashMap<VoiceId, HashSet<VoiceId>>>,
     voice_group_completion_emitted: Mutex<HashSet<VoiceId>>,
+    /// Engine-wide visual request order shared by every destination. This
+    /// is assigned at GO/load request time, before decoder readiness events.
+    layer_order_seq: AtomicU64,
     /// Serialises full output graph transitions without sharing the network
     /// publisher's short endpoint-map lock.
     network_configure_gate: Mutex<()>,
@@ -1019,6 +1022,24 @@ fn media_probe_can_return(
 }
 
 impl OutputEngine {
+    /// Reserve a monotonically increasing visual order shared by all output
+    /// destinations. Callers use this synchronously at GO, before media load.
+    pub fn next_layer_order(&self) -> u64 {
+        self.layer_order_seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn resolve_layer_order(&self, group_order: Option<u64>, child_order: Option<u64>) -> LayerOrder {
+        match (group_order, child_order) {
+            (Some(group_order), Some(child_order)) => LayerOrder { group_order, child_order },
+            (Some(group_order), None) => LayerOrder { group_order, child_order: self.next_layer_order() },
+            (None, Some(child_order)) => LayerOrder { group_order: child_order, child_order },
+            (None, None) => {
+                let order = self.next_layer_order();
+                LayerOrder { group_order: order, child_order: order }
+            }
+        }
+    }
+
     fn resolve_browser_output_id(
         registry: &OutputRegistry,
         requested: Option<&str>,
@@ -1357,6 +1378,7 @@ impl OutputEngine {
             voice_groups: Mutex::new(HashMap::new()),
             voice_group_completed: Mutex::new(HashMap::new()),
             voice_group_completion_emitted: Mutex::new(HashSet::new()),
+            layer_order_seq: AtomicU64::new(1),
             network_configure_gate: Mutex::new(()),
             monitor_selection: Mutex::new((0, None)),
             display_visibility,
@@ -1388,6 +1410,7 @@ impl OutputEngine {
             voice_groups: Mutex::new(HashMap::new()),
             voice_group_completed: Mutex::new(HashMap::new()),
             voice_group_completion_emitted: Mutex::new(HashSet::new()),
+            layer_order_seq: AtomicU64::new(1),
             network_configure_gate: Mutex::new(()),
             monitor_selection: Mutex::new((0, None)),
             display_visibility,
@@ -2258,6 +2281,7 @@ impl OutputEngine {
     /// Display video, image, or a live feed on a named output.  A voice is
     /// claimed before native work begins and all failures roll the claim back.
     pub fn show_content(&self, req: ContentRequest<'_>) -> Result<VoiceId> {
+        let layer_order = self.resolve_layer_order(req.layer_group_order, req.layer_child_order);
         let Some((output_id, output)) = self.pipeline_for_output(req.output_id) else {
             return Err(match req.output_id {
                 Some(id) => anyhow!("Output destination '{id}' is unavailable"),
@@ -2344,6 +2368,7 @@ impl OutputEngine {
                 geometry: req.geometry,
                 presentation_video_layout: req.presentation_video_layout,
                 layer_style: req.layer_style,
+                layer_order,
                 slices: req.slices,
                 preload: req.preload,
             },
@@ -2398,11 +2423,14 @@ impl OutputEngine {
                 geometry: resolved_geometry,
                 live_source: req.live_source,
                 layer_style: req.layer_style,
+                layer_group_order: req.layer_group_order,
+                layer_child_order: req.layer_child_order,
                 presentation_video_layout: req.presentation_video_layout,
                 slices: req.slices,
                 preload: req.preload,
             });
         }
+        let layer_order = self.resolve_layer_order(req.layer_group_order, req.layer_child_order);
         let mut voices = Vec::with_capacity(ids.len());
         for id in ids {
             let audio_voice_id = if voices.is_empty() {
@@ -2426,6 +2454,8 @@ impl OutputEngine {
                 geometry: *geometry_for_output(id, &req.geometry, geometry_by_output),
                 live_source: req.live_source,
                 layer_style: req.layer_style,
+                layer_group_order: Some(layer_order.group_order),
+                layer_child_order: Some(layer_order.child_order),
                 presentation_video_layout: req.presentation_video_layout,
                 slices: req.slices.clone(),
                 preload: req.preload,
@@ -2462,6 +2492,19 @@ impl OutputEngine {
         geometry: VideoGeometry,
         layer_style: LayerStyle,
         fade_in_ms: u32,
+    ) -> Result<VoiceId> {
+        let layer_order = self.resolve_layer_order(None, None);
+        self.show_external_bgra_source_ordered(output_id, source, geometry, layer_style, fade_in_ms, layer_order)
+    }
+
+    fn show_external_bgra_source_ordered(
+        &self,
+        output_id: Option<&str>,
+        source: Arc<crate::engine::network_io::BgraFrameMailbox>,
+        geometry: VideoGeometry,
+        layer_style: LayerStyle,
+        fade_in_ms: u32,
+        layer_order: LayerOrder,
     ) -> Result<VoiceId> {
         let Some((resolved_id, output)) = self.pipeline_for_output(output_id) else {
             return Err(match output_id {
@@ -2509,8 +2552,11 @@ impl OutputEngine {
             ));
         }
         fade::set_overlay_alpha(&output.pipeline, 0);
-        let layer_key =
-            slot::resolve_layer_key(layer_style.layer, output.slot_registry.next_layer_seq());
+        let layer_key = slot::resolve_layer_order_key(
+            layer_style.layer,
+            layer_order.group_order,
+            layer_order.child_order,
+        );
         output.render_runtime.add_external_source(
             voice_id,
             source,
@@ -2539,6 +2585,7 @@ impl OutputEngine {
             layer_style,
             fade_in_ms,
             &std::collections::HashMap::new(),
+            None,
         )
     }
 
@@ -2551,6 +2598,7 @@ impl OutputEngine {
         layer_style: LayerStyle,
         fade_in_ms: u32,
         geometry_by_output: &std::collections::HashMap<String, VideoGeometry>,
+        layer_group_order: Option<u64>,
     ) -> Result<VoiceId> {
         let ids: Vec<&str> = output_ids
             .iter()
@@ -2567,23 +2615,27 @@ impl OutputEngine {
                 .pipeline_for_output(output_id)
                 .map(|(id, _)| *geometry_for_output(&id, &geometry, geometry_by_output))
                 .unwrap_or(geometry);
-            return self.show_external_bgra_source(
+            let order = self.resolve_layer_order(layer_group_order, None);
+            return self.show_external_bgra_source_ordered(
                 output_id,
                 source,
                 resolved_geometry,
                 layer_style,
                 fade_in_ms,
+                order,
             );
         }
+        let order = self.resolve_layer_order(layer_group_order, None);
         let mut voices = Vec::with_capacity(ids.len());
         for id in ids {
             let output_geometry = *geometry_for_output(id, &geometry, geometry_by_output);
-            match self.show_external_bgra_source(
+            match self.show_external_bgra_source_ordered(
                 Some(id),
                 Arc::clone(&source),
                 output_geometry,
                 layer_style,
                 fade_in_ms,
+                order,
             ) {
                 Ok(voice) => voices.push(voice),
                 Err(error) => {
@@ -2911,6 +2963,38 @@ impl OutputEngine {
         self.set_layer_props_single(voice_id, style);
     }
 
+    pub fn set_voice_layer_order(&self, voice_id: VoiceId, group_order: Option<u64>) -> bool {
+        let order = self.resolve_layer_order(group_order, None);
+        let members = self
+            .voice_groups
+            .lock()
+            .ok()
+            .and_then(|groups| groups.get(&voice_id).cloned())
+            .unwrap_or_else(|| vec![voice_id]);
+        let mut changed = false;
+        for member in members {
+            if let Some(output) = self.pipeline_for_voice(member) {
+                if output.render_runtime.set_external_layer_order(
+                    member,
+                    order.group_order,
+                    order.child_order,
+                ) {
+                    changed = true;
+                    continue;
+                }
+                if let Some(slot) = slot::slot_for_voice(&output.slot_registry, member) {
+                    slot::set_layer_group_order(
+                        &slot,
+                        order.group_order,
+                        order.child_order,
+                    );
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     fn set_layer_props_single(&self, voice_id: VoiceId, style: &LayerStyle) {
         if let Some(output) = self.pipeline_for_voice(voice_id) {
             if output
@@ -3108,6 +3192,8 @@ impl OutputEngine {
             presentation_video_layout: None,
             live_source: false,
             layer_style: LayerStyle::default(),
+            layer_group_order: None,
+            layer_child_order: None,
             slices: Vec::new(),
         })
     }

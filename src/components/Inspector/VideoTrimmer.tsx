@@ -182,6 +182,7 @@ export function VideoTrimmer({
       height={64}
       paint={paint}
       paintKey={tiles}
+      resetKey={cue.id}
       onCommitStart={(ms) => onSave({ start_time_ms: ms })}
       onCommitEnd={(ms) => onSave({ end_time_ms: ms })}
       dragPreview={dragPreview}

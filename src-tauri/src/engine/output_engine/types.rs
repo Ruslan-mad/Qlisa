@@ -186,6 +186,25 @@ pub struct LayerStyle {
     pub black_bars: bool,
 }
 
+/// Runtime-only ordering context for one visual start. A Number supplies a
+/// stable `group_order`; each visual child receives its own `child_order`.
+/// Standalone visuals use the same value for both fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LayerOrder {
+    pub group_order: u64,
+    pub child_order: u64,
+}
+
+/// Per-output compositor key. Authored absolute bands remain globally
+/// dominant; within one band, Number visuals sort by the Number GO order,
+/// then by their actual start order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct LayerOrderKey {
+    pub band: u32,
+    pub group_order: u64,
+    pub child_order: u64,
+}
+
 impl Default for LayerStyle {
     fn default() -> Self {
         Self {
@@ -389,6 +408,12 @@ pub struct ContentRequest<'a> {
     pub live_source: bool,
     /// Compositing properties (stacking order, base opacity, blend mode).
     pub layer_style: LayerStyle,
+    /// Runtime-only Number ordering anchor. The output engine assigns one
+    /// child order synchronously before loading the media.
+    pub layer_group_order: Option<u64>,
+    /// Resolved runtime child order. Set internally so multi-output fan-out
+    /// uses the same ordering tuple on every destination.
+    pub layer_child_order: Option<u64>,
     /// QLab-style slice segments as `(start_s, end_s, play_count)`;
     /// `u32::MAX` = vamp.  Empty = plain playback.  When present,
     /// `loop_count` is ignored (the segments own the looping via ab-loop).

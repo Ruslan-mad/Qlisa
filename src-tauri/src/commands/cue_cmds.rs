@@ -181,7 +181,7 @@ pub struct CueSummary {
     /// For Group cues: the playback mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_mode: Option<GroupMode>,
-    /// For Playlist Group cues: whether the playlist loops (wraps last → first).
+    /// Whether a Playlist wraps its children or a Number repeats its whole timeline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub playlist_loop: Option<bool>,
     /// For running Sequential Group cues: ID of the currently active child
@@ -2451,6 +2451,10 @@ mod bulk_update_tests {
         registry.register(CueType::Image, Box::new(ImageCueFactory));
         registry.register(CueType::Camera, Box::new(CameraCueFactory));
         registry.register(CueType::Browser, Box::new(crate::cue::browser_cue::BrowserCueFactory));
+        registry.register(CueType::Text, Box::new(crate::cue::text_cue::TextCueFactory));
+        registry.register(CueType::Wait, Box::new(crate::cue::wait_cue::WaitCueFactory));
+        registry.register(CueType::Fade, Box::new(crate::cue::fade_cue::FadeCueFactory));
+        registry.register(CueType::MidiFile, Box::new(crate::cue::midi_file_cue::MidiFileCueFactory));
         registry
     }
 
@@ -3566,6 +3570,72 @@ mod bulk_update_tests {
             .expect("nested Number audio remains preloaded after fade edit");
         assert!(Arc::ptr_eq(&samples, &restored.0));
     }
+
+    #[test]
+    fn video_trim_rebuild_preserves_preloaded_stream_format() {
+        let mut video = VideoCue::new();
+        let video_id = video.id();
+        let stream_path = std::env::temp_dir().join("preloaded-video-audio.mkv");
+        video.accept_preloaded_stream(
+            stream_path.clone(),
+            2,
+            48_000,
+            Some(Duration::from_secs(12)),
+        );
+        let mut list = CueList::new("test");
+        list.push(Box::new(video));
+
+        let prepared = prepare_all(
+            &list,
+            &[entry(video_id, serde_json::json!({ "start_time_ms": 750 }))],
+            &registry(),
+        )
+        .unwrap();
+        apply_all(&mut list, prepared);
+
+        let restored = list
+            .get_recursive(&video_id)
+            .and_then(|cue| cue.extract_preloaded_stream())
+            .expect("rebuilt video keeps its preloaded audio stream");
+        assert_eq!(restored.0, stream_path);
+        assert_eq!(restored.1, 2);
+        assert_eq!(restored.2, 48_000);
+    }
+
+    #[test]
+    fn rebuildable_execution_markers_survive_registry_roundtrips() {
+        let registry = registry();
+        for cue_type in [
+            CueType::Audio,
+            CueType::Video,
+            CueType::Image,
+            CueType::Camera,
+            CueType::Browser,
+            CueType::Text,
+            CueType::Wait,
+            CueType::Fade,
+            CueType::MidiFile,
+        ] {
+            let mut cue = registry.create(&cue_type).unwrap();
+            if cue_type != CueType::Image {
+                cue.restore_runtime_extension(serde_json::json!({
+                    "play_generation": 41,
+                    "auto_continue_fired": true,
+                }));
+            }
+            cue.mark_auto_continue_fired();
+            let extension = cue.runtime_extension().expect("execution marker");
+            let mut rebuilt = registry.from_json(cue.serialize()).unwrap();
+            rebuilt.restore_runtime_extension(extension.clone());
+            assert_eq!(
+                rebuilt.runtime_extension(),
+                Some(extension),
+                "{cue_type} marker survives its registry rebuild (including preloaded Image gen=0)",
+            );
+            assert_eq!(rebuilt.play_generation(), cue.play_generation());
+            assert_eq!(rebuilt.auto_continue_marker(), Some(true));
+        }
+    }
 }
 
 /// Add a new cue of the given type at the given position (index).
@@ -4647,6 +4717,7 @@ pub fn set_cue_duration(
 #[tauri::command]
 pub fn set_playhead(
     cue_id: Option<String>,
+    selection_only: Option<bool>,
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
@@ -4662,7 +4733,11 @@ pub fn set_playhead(
 
     let mut ws = state.workspace.lock().map_err(|e| e.to_string())?;
     let cue_list = ws.active_cue_list_mut().ok_or("No active cue list")?;
-    cue_list.set_playhead(id).map_err(|e| e.to_string())?;
+    if selection_only.unwrap_or(false) {
+        cue_list.set_playhead_for_selection(id).map_err(|e| e.to_string())?;
+    } else {
+        cue_list.set_playhead(id).map_err(|e| e.to_string())?;
+    }
     // The resulting outer Playhead may differ from `id` (a group child parks the
     // Playhead on its ancestor group), so emit the actual outer Playhead.
     let outer_playhead = cue_list.playhead_cue_id;
@@ -6814,7 +6889,7 @@ pub fn set_group_mode(
     Ok(())
 }
 
-/// Enable/disable looping for a Playlist Group Cue (wrap last child → first).
+/// Enable/disable looping for a Playlist Group or whole-Number repetition.
 #[tauri::command]
 pub fn set_playlist_loop(
     group_id: String,

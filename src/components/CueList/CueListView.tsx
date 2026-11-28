@@ -1310,7 +1310,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh, onIm
         selectionEndRef.current = next.endCueId;
         const parentGroupId = flatItemsRef.current.find((item) => item.cue.id === next.selectedCueId)?.parentGroupId;
         setPlayheadCueId(parentGroupId ?? next.selectedCueId);
-        void queueCueListPlayheadUpdate(() => setPlayhead(next.selectedCueId)).catch(console.error);
+        void queueCueListPlayheadUpdate(() => setPlayhead(next.selectedCueId, true)).catch(console.error);
         return;
       }
 
@@ -1439,7 +1439,7 @@ export function CueListView({ onCueDoubleClick, onOpenInspector, onRefresh, onIm
         // Park the Playhead on this exact cue (backend routes a child of a
         // Sequential group to its ancestor group). Optimistically reflect it.
         setPlayheadCueId(parentGroupId ?? id);
-        void queueCueListPlayheadUpdate(() => setPlayhead(id)).catch(console.error);
+        void queueCueListPlayheadUpdate(() => setPlayhead(id, true)).catch(console.error);
         anchorCueIdRef.current = id;
         selectionEndRef.current = id;
       }

@@ -8,7 +8,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ScriptCueData, AudioCueData, BrowserCueData, CameraCueData, CueSummary, CueType, DevampCueData, FadeCueData, ImageCueData, LightCueData, MemoCueData, MicCueData, MidiCueData, MidiFileCueData, NumberCueData, OscCueData, StopCueData, TextCueData, TimecodeCueData, TimerCueData, VideoCueData, WaitCueData } from "../../lib/types";
 import { isCommandCueType } from "../../lib/types";
-import { getCue, updateCue } from "../../lib/commands";
+import { getCue, setPlaylistLoop, updateCue } from "../../lib/commands";
 import { BasicsTab } from "./BasicsTab";
 import { BasicQuickControls } from "./BasicQuickControls";
 import { TimeTab } from "./TimeTab";
@@ -216,16 +216,20 @@ export function InspectorPanel({ selectedCue, selectedCueIds, onRefresh, onOpenE
       && currentSaveSelectionKey.current === submittedSelectionKey;
     const fadeEdit = isFadeEdit(partial);
     const persist = async () => {
+      const { playlist_loop, ...cuePatch } = partial;
+      if (typeof playlist_loop === "boolean") {
+        await setPlaylistLoop(targetCueId, playlist_loop);
+      }
       // Color changes fan out to every selected cue; everything else applies
       // to the primary (inspector) cue only.
-      if ("color" in partial && submittedSelectionIds.length > 1) {
-        await Promise.all(submittedSelectionIds.map((id) => updateCue(id, { color: partial.color })));
+      if ("color" in cuePatch && submittedSelectionIds.length > 1) {
+        await Promise.all(submittedSelectionIds.map((id) => updateCue(id, { color: cuePatch.color })));
         // Apply any remaining non-color fields to the primary cue.
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { color: _c, ...rest } = partial;
+        const { color: _c, ...rest } = cuePatch;
         if (Object.keys(rest).length > 0) await updateCue(targetCueId, rest);
-      } else {
-        await updateCue(targetCueId, partial);
+      } else if (Object.keys(cuePatch).length > 0) {
+        await updateCue(targetCueId, cuePatch);
       }
     };
 

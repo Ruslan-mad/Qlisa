@@ -301,7 +301,7 @@ export interface CueSummary {
   page_count?: number;
   /** For Group cues: playback mode. */
   group_mode?: GroupMode;
-  /** For Playlist Group cues: whether the playlist loops (wraps last → first). */
+  /** Whether a Playlist wraps its children or a Number repeats its whole timeline. */
   playlist_loop?: boolean;
   /** Present only on videos imported from a Presentation. */
   presentation_video_imported?: boolean;

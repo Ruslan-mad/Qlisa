@@ -820,7 +820,7 @@ export default function App() {
   const [showLivePanel, setShowLivePanel]         = useState(() => loadUiLayout().showLivePanel);
   const [showCueToolbar, setShowCueToolbar]       = useState(() => loadUiLayout().showCueToolbar);
   const [showClipEditorDock, setShowClipEditorDock] = useState(() => loadUiLayout().showClipEditorDock);
-  const [activeClipTab, setActiveClipTab]         = useState<"Preview" | "Live">(() => loadUiLayout().activeClipTab);
+  const [activeClipTab, setActiveClipTab]         = useState<"Preview" | "Live">("Live");
   const [inspectorWidth, setInspectorWidth]       = useState(() => loadUiLayout().inspectorWidth);
   const [editorCueId, setEditorCueId]             = useState<string | null>(null);
   const [numberTimelineCueId, setNumberTimelineCueId] = useState<string | null>(null);
@@ -880,7 +880,6 @@ export default function App() {
   useEffect(() => {
     const migrated = normalizeClipEditorVisibility(displayPrefs);
     setShowLivePanel(migrated.show_live_panel);
-    setActiveClipTab(migrated.clip_editor_active_tab_v2);
   }, [displayPrefs.show_live_panel, displayPrefs.show_slice_panel, displayPrefs.clip_editor_active_tab, displayPrefs.clip_editor_active_tab_v2]);
 
   const persistClipEditorPrefs = useCallback((patch: Partial<Pick<import("./lib/types").DisplayPreferences, "show_live_panel" | "show_slice_panel" | "clip_editor_active_tab" | "clip_editor_active_tab_v2">>) => {

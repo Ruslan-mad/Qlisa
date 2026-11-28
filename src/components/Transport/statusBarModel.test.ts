@@ -113,6 +113,16 @@ describe("status bar preferences and cue metrics", () => {
     expect(result.infiniteCount).toBe(1);
   });
 
+  it("counts a whole-Number loop as infinite while retaining finite pass duration", () => {
+    const result = buildCueStatusMetrics([
+      cue("number-loop", "number", { duration_ms: 12000, playlist_loop: true }),
+      cue("number-once", "number", { duration_ms: 12000, playlist_loop: false }),
+    ]);
+
+    expect(result.infiniteCount).toBe(1);
+    expect(result.knownDurationMs).toBe(12000);
+  });
+
   it("marks missing media and broken or warning cues once", () => {
     const missing = cue("bad", "audio", { media_file_missing: true, is_broken: true });
     const result = buildCueStatusMetrics([missing], new Set(["bad"]));

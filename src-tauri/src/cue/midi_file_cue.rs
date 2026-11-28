@@ -472,6 +472,22 @@ impl Cue for MidiFileCue {
         }
     }
 
+    fn runtime_extension(&self) -> Option<Value> {
+        Some(json!({
+            "play_generation": self.execution_generation,
+            "auto_continue_fired": self.auto_continue_fired,
+        }))
+    }
+
+    fn restore_runtime_extension(&mut self, value: Value) {
+        if let Some(generation) = value.get("play_generation").and_then(Value::as_u64) {
+            self.execution_generation = generation;
+        }
+        if let Some(fired) = value.get("auto_continue_fired").and_then(Value::as_bool) {
+            self.auto_continue_fired = fired;
+        }
+    }
+
     fn serialize(&self) -> Value {
         json!({
             "type": "midi_file",

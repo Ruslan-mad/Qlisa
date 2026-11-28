@@ -215,6 +215,11 @@ impl ExecutionMarker {
     pub(crate) fn mark_fired(&mut self) {
         self.auto_continue_fired = true;
     }
+
+    pub(crate) fn restore(&mut self, generation: u64, auto_continue_fired: bool) {
+        self.generation = generation;
+        self.auto_continue_fired = auto_continue_fired;
+    }
 }
 
 /// Live audio parameters to re-apply to a cue's currently-playing voice after an
@@ -584,6 +589,13 @@ pub trait Cue: Send {
     /// Inspector scrub bar; this separate entry point is used by timeline
     /// views whose coordinates are the source file/waveform coordinates.
     fn seek_file_position(&mut self, _file_position_ms: u64, _ctx: &CueContext) {}
+
+    /// Convert a source-file position into the cue's action-relative timeline.
+    /// Media cues override this so a parent timeline can route a file scrub
+    /// without first seeking the leaf and then seeking the parent.
+    fn action_position_from_file_ms(&self, _file_position_ms: u64) -> Option<u64> {
+        None
+    }
 
     /// Return the source-file playhead position for an active media leaf.
     /// Implementations prefer the engine's position (which includes loop and
